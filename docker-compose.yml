@@ -23,11 +23,16 @@ services:
       GLASSES_MAX: "0.50"
       # Base pública para construir el verificationUrl (se ajusta al dominio del túnel).
       PUBLIC_BASE_URL: "${PUBLIC_BASE_URL:-http://localhost:4400}"
+      # Operador admin bootstrap (se crea al arrancar si admin_operators está vacía).
+      TEKO_ADMIN_BOOTSTRAP_USER: "admin"
+      TEKO_ADMIN_BOOTSTRAP_PASSWORD: "TekoAdmin2026!"
     volumes:
       # Modelos ONNX montados desde el host (no se hornean en la imagen).
       - ./models:/app/models:ro
       # SPA de captura (HTML autocontenido), iterable sin rebuild.
       - ./web/dist:/app/web/dist:ro
+      # Dashboard admin compilado (Vite), iterable sin rebuild. ADMIN_DIST=/app/admin/dist.
+      - ./admin/dist:/app/admin/dist:ro
       # Migraciones disponibles para `npm run migrate` (no se hornean en la imagen).
       - ./migrations:/app/migrations:ro
       # Evidencia en disco (patrón v9) + job de retención.

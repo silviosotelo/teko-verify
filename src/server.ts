@@ -112,7 +112,18 @@ app.get("/verify/:token", (_req: Request, res: Response) => {
 
 const ADMIN_DIST = process.env.TEKO_ADMIN_DIST || path.resolve(__dirname, "..", "admin", "dist");
 if (fs.existsSync(ADMIN_DIST)) {
+  // 1) Estáticos del dashboard (assets compilados ganan sobre el fallback).
   app.use("/admin-ui", express.static(ADMIN_DIST));
+  // 2) SPA fallback: cualquier ruta /admin-ui/* que NO sea un asset existente
+  //    devuelve index.html (routing client-side con basename /admin-ui). Este
+  //    handler solo matchea el prefijo /admin-ui → NO afecta /admin (API), /v1,
+  //    /verify ni /health (prefijos distintos). Express 4: wildcard "/*" válido.
+  app.get("/admin-ui", (_req: Request, res: Response) => {
+    res.sendFile(path.join(ADMIN_DIST, "index.html"));
+  });
+  app.get("/admin-ui/*", (_req: Request, res: Response) => {
+    res.sendFile(path.join(ADMIN_DIST, "index.html"));
+  });
 }
 
 app.get("/", (_req: Request, res: Response) => {

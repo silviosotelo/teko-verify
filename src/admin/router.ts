@@ -20,6 +20,7 @@ import { Router } from "express";
 import type { NextFunction, Request, Response } from "express";
 import { repos } from "../db/repos";
 import { pool } from "../db/pool";
+import { evidenceStore } from "../lib/evidenceStore";
 import {
   generateApiKey,
   generateSessionToken,
@@ -34,6 +35,7 @@ import type {
   AdminSessionDetailResponse,
   ApiKeyResponse,
   CreateApiKeyResponse,
+  EvidenceType,
   SessionState,
   TenantResponse,
 } from "../types";
@@ -367,6 +369,40 @@ adminRouter.get("/tenants/:id/sessions/:sessionId", async (req: Request, res: Re
   };
   res.json(resp);
 });
+
+// ---- Evidencia (imágenes) para la revisión del dashboard ------------------ //
+// Sirve la imagen de evidencia (selfie / doc_front / doc_back) por TIPO, nunca
+// por ruta cruda (anti path-traversal): re-resuelve vía evidenceStore.read con
+// (tenantId, sessionId, type). Queda detrás de adminGuard (auth Bearer). El front
+// la consume con fetch + Authorization → Blob (un <img src> no manda el header).
+const EVIDENCE_TYPES: EvidenceType[] = ["selfie", "doc_front", "doc_back", "frames"];
+
+adminRouter.get(
+  "/tenants/:id/sessions/:sessionId/evidence/:type",
+  async (req: Request, res: Response) => {
+    const tenantId = req.params.id;
+    const sessionId = req.params.sessionId;
+    const type = req.params.type as EvidenceType;
+    if (!EVIDENCE_TYPES.includes(type)) {
+      res.status(400).json({ error: "invalid_evidence_type" });
+      return;
+    }
+    // Verifica que la sesión pertenezca al tenant (aislamiento).
+    const session = await repos.sessions.getById(tenantId, sessionId);
+    if (!session) {
+      res.status(404).json({ error: "session_not_found" });
+      return;
+    }
+    const buf = await evidenceStore.read(tenantId, sessionId, type);
+    if (!buf) {
+      res.status(404).json({ error: "evidence_not_found" });
+      return;
+    }
+    res.setHeader("Content-Type", "image/jpeg");
+    res.setHeader("Cache-Control", "private, max-age=60");
+    res.send(buf);
+  }
+);
 
 // ---- Métricas + export de auditoría -------------------------------------- //
 
