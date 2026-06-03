@@ -47,6 +47,9 @@ services:
     # Sin "ports": solo accesible en la red interna por teko-verify.
     expose:
       - "8001"
+    volumes:
+      # Código del sidecar iterable sin rebuild (pip layers cacheadas).
+      - ./ocr:/app/ocr:ro
 
   postgres:
     image: postgres:16

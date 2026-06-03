@@ -143,7 +143,12 @@ export class QualityModule {
     const byName =
       out["glasses"] ?? out[this.glassesNet.outputNames[0]];
     const arr = byName.data as Float32Array;
-    const raw = arr.length === 1 ? arr[0] : Math.max(...Array.from(arr));
+    // face_attrib_net → [ojoIzqAbierto, ojoDerAbierto, anteojos, barbijo, lentesSol].
+    // glassesPct = max(anteojos, lentesSol). (Antes tomaba max de TODO el vector →
+    // confundía "ojo abierto"≈0.999 con anteojos = falso positivo que rechazaba todo.)
+    let raw: number;
+    if (arr.length >= 5) raw = Math.max(arr[2], arr[4]);
+    else raw = arr.length === 1 ? arr[0] : Math.max(...Array.from(arr));
     // Si el modelo emite logits, lo pasamos por sigmoide; si ya es prob, queda igual.
     return raw >= 0 && raw <= 1 ? raw : 1 / (1 + Math.exp(-raw));
   }

@@ -78,6 +78,18 @@ export class PaddleOcrClient implements OcrClient {
   }
 }
 
+/** Ordena 3 líneas MRZ TD1 por estructura (NO alfabéticamente). */
+function orderTd1(lines: string[]): string[] {
+  if (lines.length < 3) return lines;
+  const letterRatio = (s: string) => s.replace(/[^A-Z]/g, "").length / Math.max(1, s.length);
+  // Línea 3 = nombres (apellidos<<nombres): mayor proporción de letras.
+  const nameLine = [...lines].sort((a, b) => letterRatio(b) - letterRatio(a))[0];
+  const rest = lines.filter((l) => l !== nameLine);
+  // Línea 1 (tipo doc + país) arranca con letra; línea 2 (nac/sexo/exp) con dígito.
+  rest.sort((a, b) => (/^\d/.test(a) ? 1 : 0) - (/^\d/.test(b) ? 1 : 0));
+  return rest.length >= 2 ? [rest[0], rest[1], nameLine] : lines;
+}
+
 /** MRZ por OCR del dorso: usa el sidecar y quita ruido para aislar 3 líneas de 30 chars. */
 export class OcrMrzReader implements MrzReader {
   async readLines(back: Buffer, ocr: OcrClient): Promise<string[]> {
@@ -86,11 +98,10 @@ export class OcrMrzReader implements MrzReader {
       .split(/\r?\n/)
       .map((l) => l.replace(/\s+/g, "").toUpperCase())
       .filter((l) => /^[A-Z0-9<]{20,}$/.test(l));
-    // TD1 = 3 líneas; tomamos las 3 más largas con el alfabeto MRZ.
-    return candidates
-      .sort((a, b) => b.length - a.length)
-      .slice(0, 3)
-      .sort();
+    // TD1 = 3 líneas; tomamos las 3 más largas del alfabeto MRZ y las ordenamos por
+    // estructura TD1 (NO alfabéticamente: eso intercambiaba L1/L2 y rompía el parseo).
+    const top3 = candidates.sort((a, b) => b.length - a.length).slice(0, 3);
+    return orderTd1(top3);
   }
 }
 
