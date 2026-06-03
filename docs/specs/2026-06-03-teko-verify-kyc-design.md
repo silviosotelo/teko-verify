@@ -60,6 +60,9 @@ La visión "SSI real estilo MIA" (DIDs, VC firmadas, wallet del usuario con sus 
 8. **PostgreSQL propio** y dedicado (no reusar el PG de v6 que lee v9).
 9. **Marca:** **Teko**; sub-proyecto = **Teko Verify**.
 10. **OCR:** **PaddleOCR** (sidecar Python) por precisión en documentos.
+11. **Dashboard de administración de tenants:** en alcance de Teko Verify (ver §4/§8).
+12. **Cumplimiento:** Ley N° 7593/2025 (PY) de Protección de Datos Personales — rostro = dato sensible (ver §12).
+13. **Documento:** la fuente legible-por-máquina autoritativa es el **MRZ TD1** (no PDF417); el chip eMRTD (NFC) queda como camino futuro de alta-confianza.
 
 ---
 
@@ -80,15 +83,16 @@ La visión "SSI real estilo MIA" (DIDs, VC firmadas, wallet del usuario con sus 
 | `sessions.ts` | Ciclo de vida de la sesión de verificación (multi-tenant, token de link, máquina de estados) |
 | `liveness.ts` | PAD pasivo (anti-spoof) + verificación de desafío activo opcional |
 | `quality.ts` | Anti-anteojos + brillo/nitidez/pose gating |
-| `document.ts` | Cédula PY: PDF417 + MRZ + OCR + recorte de foto + autenticidad por cruce |
+| `document.ts` | Cédula PY: **MRZ TD1** + OCR + barcode 1D (serial) + recorte de foto + autenticidad por cruce |
 | `match.ts` | Verificación 1:1 selfie↔foto del documento |
 | `decision.ts` | Combina señales → identidad verificada + LoA + motivos |
 | `identities.ts` | Store de identidades verificadas + evidencia |
 | `tenants.ts` | Tenants + API keys + aislamiento |
 | `web/` | Página de captura en navegador (getUserMedia) |
+| `admin/` | **Dashboard de administración de tenants**: alta/gestión de tenants, API keys, políticas por tenant, revisión de sesiones/resultados, métricas, export de auditoría |
 
 ### Stack on-prem (server 34)
-node + onnxruntime-node + sharp + pg + express (heredado) · PaddleOCR (sidecar Python) · decodificador PDF417 (zxing-cpp wasm / `pdf417-decoder`) · parser MRZ (`mrz`) · modelo PAD anti-spoof (Silent-Face / MiniFASNet onnx) · modelo de anteojos (Qualcomm face_attrib_net convertido TFLite→ONNX) · MediaPipe Face Detection (solo UX in-browser).
+node + onnxruntime-node + sharp + pg + express (heredado) · PaddleOCR (sidecar Python) · parser **MRZ TD1** (`mrz`, ICAO 9303) · decodificador de barcode 1D Code128 (`zxing`) · modelo PAD anti-spoof (Silent-Face / MiniFASNet onnx) · modelo de anteojos (Qualcomm face_attrib_net convertido TFLite→ONNX) · MediaPipe Face Detection (solo UX in-browser).
 
 ---
 
@@ -122,7 +126,7 @@ Todas las tablas llevan `tenant_id`; toda query/API key queda scopeada a su tena
 |---|---|---|---|
 | a | `quality` | Detecta cara (SCRFD), brillo/nitidez/pose + anti-anteojos | needs_recapture |
 | b | `liveness` | PAD anti-spoof (+ desafío activo si la policy lo exige) | rejected |
-| c | `document` | PDF417 (dorso) + MRZ + OCR (frente) → datos; recorta foto; autenticidad por cruce PDF417↔MRZ↔OCR | rejected |
+| c | `document` | **MRZ TD1** + barcode 1D (dorso) + OCR (frente) → datos; recorta foto; autenticidad por cruce **MRZ↔OCR + dígitos verificadores + vencimiento** | rejected |
 | d | `match` | Embedding(selfie) vs embedding(foto-doc) → coseno | rejected |
 | e | `decision` | Combina los 4 → verified/rejected + LoA + motivos | — |
 
@@ -135,11 +139,12 @@ Todas las tablas llevan `tenant_id`; toda query/API key queda scopeada a su tena
 - **L1:** documento legible + datos consistentes (sin match ni liveness).
 - **L2:** L1 + match 1:1 doc↔selfie OK.
 - **L3:** L2 + liveness OK (persona viva presente). ← objetivo del flujo completo.
+- **L4 (futuro):** L3 + lectura del **chip eMRTD por NFC** (Passive Authentication: verifica criptográficamente que el documento es genuino e inalterado). Requiere NFC (app/lector) → fuera del alcance de captura web; ver §14.
 
 **Contratos de módulos:**
 - `quality(image)` → `{faceOk, brightness, sharpness, pose, glassesPct, passed, reasons[]}`
 - `liveness(selfie, frames?, challenge?)` → `{score, passed, attackType?}`
-- `document(front, back)` → `{pdf417{}, mrz{}, ocr{}, docFaceCrop, authenticity{consistent, checks[]}, passed}`
+- `document(front, back)` → `{mrz{}, barcode{}, ocr{}, docFaceCrop, authenticity{consistent, checks[]}, passed}`
 - `match(selfieEmb, docFaceEmb)` → `{cosine, passed}`
 - `decision(checks, tenantPolicy)` → `{decision, loa, reasons[]}`
 
@@ -153,11 +158,14 @@ Todas las tablas llevan `tenant_id`; toda query/API key queda scopeada a su tena
 | Quality/pose | Landmarks SCRFD (yaw/pitch/roll) + luma/Laplaciano | node | Brillo, nitidez, frontalidad |
 | Anti-anteojos | Qualcomm face_attrib_net (TFLite→ONNX) | onnxruntime-node | Ojos abiertos, anteojos, máscara, lentes sol. Paridad con lo validado en Flutter |
 | Liveness/PAD | Silent-Face-Anti-Spoofing (MiniFASNet) | onnxruntime-node | Pasivo, RGB, print/replay. Opcional: desafío activo (parpadeo/giro en frames) |
-| PDF417 (dorso) | zxing-cpp (wasm) / `pdf417-decoder` | node | Datos estructurados confiables |
-| MRZ (ICAO 9303) | OCR de líneas + parser `mrz` (dígitos verificadores) | node + OCR | OCR-B muy legible |
+| MRZ TD1 (dorso) | OCR de las 3 líneas + parser `mrz` (dígitos verificadores) | node + OCR | **Fuente autoritativa** (ICAO 9303 TD1, OCR-B muy legible) |
+| Barcode 1D (dorso) | `zxing` (Code128) | node | Serial del documento (cruce con Nº del frente) |
+| Chip eMRTD (futuro) | NFC + PACE/BAC + Passive Auth | — | Autenticidad criptográfica; requiere NFC (fuera de captura web) |
 | OCR visual (frente) | **PaddleOCR** (sidecar Python) | python | Mejor precisión en cédulas |
 | Match 1:1 | engine: coseno(selfie, foto-doc) | onnxruntime-node | Umbral propio (1:1 ≠ 1:N), calibrable |
 | Decisión/LoA | reglas por policy de tenant | node | Fusión ML más adelante |
+
+**Referencia de cédula PY** (layout frente/dorso, MRZ TD1, barcode 1D, chip eMRTD): `docs/reference/cedula-py-specimen.png`.
 
 ---
 
@@ -187,8 +195,11 @@ Todas las tablas llevan `tenant_id`; toda query/API key queda scopeada a su tena
 ### Página de captura (`web/`)
 SPA liviana mobile-first servida por el servicio. Pasos: `consentimiento → selfie (guía de encuadre + frames + desafío activo opcional) → cédula frente (guía anti-reflejo) → cédula dorso (encuadre PDF417) → "procesando" (SSE) → resultado/redirect`. Pistas de encuadre con MediaPipe Face Detection (solo UX); liveness/calidad/anti-spoof autoritativo corre server-side.
 
+### C) Dashboard de administración (`admin/`)
+UI servida por el servicio, con **autenticación de operador y roles propios**, para: alta y gestión de **tenants**; **API keys** (crear/rotar/revocar); **políticas por tenant** (LoA requerido, retención, desafíos, texto de consentimiento); **revisión de sesiones y resultados** (con evidencia); **métricas** y **export de auditoría**. Consume APIs `/admin/*` separadas de las del tenant.
+
 ### Seguridad
-API keys con hash; webhooks firmados HMAC; `link_token` de un solo uso, expirable e inadivinable; rate-limit por tenant; CORS acotado.
+API keys con hash; webhooks firmados HMAC; `link_token` de un solo uso, expirable e inadivinable; rate-limit por tenant; CORS acotado; **roles y auth propios** para el dashboard admin.
 
 ---
 
@@ -226,16 +237,32 @@ API keys con hash; webhooks firmados HMAC; `link_token` de un solo uso, expirabl
 
 ---
 
-## 12. Límites honestos (alcance realista)
+## 12. Cumplimiento normativo (Ley N° 7593/2025)
+
+Ley N° 7593/2025 de Protección de Datos Personales (PY), promulgada 27-11-2025, **en vigencia desde noviembre 2027** (diseñamos para cumplir desde ya). Puntos aplicables:
+- **Dato biométrico (rostro) = dato sensible** → régimen reforzado.
+- **Consentimiento previo, libre, informado e inequívoco** (acción afirmativa clara) → tabla `consents` con texto/versión (ya contemplado).
+- **Minimización y limitación de finalidad** → guardar solo lo necesario; finalidad = verificación de identidad.
+- **Retención y supresión** → plazos por política de tenant + `DELETE` (derecho de supresión).
+- **Derechos del titular**: acceso, rectificación, supresión, portabilidad → endpoints/flujos previstos.
+- **Roles del tratamiento (multi-tenant)**: el **tenant es Responsable** y **Teko es Encargado** → requiere acuerdo de tratamiento (DPA) y que el tenant configure finalidad/retención/consentimiento.
+- **Autoridad de control**: Agencia Nacional de Protección de Datos Personales (bajo MITIC) → posible registro/inscripción y deber de colaboración.
+- **Seguridad**: cifrado, hash de evidencia, control de acceso, auditoría (ya en el diseño).
+- **Transferencias internacionales**: al ser **on-prem**, los datos no salen de la infra/país → mitiga el riesgo de transferencia.
+
+---
+
+## 13. Límites honestos (alcance realista)
 - **Liveness pasivo** cubre foto/pantalla (print/replay); no garantiza contra máscaras 3D sofisticadas → desafío activo opcional como refuerzo.
 - **Autenticidad documental** desde foto de celular = cruce de datos (PDF417↔MRZ↔OCR) + dígitos verificadores + vencimiento; **no** es peritaje físico (hologramas/UV).
 - **Match 1:1** contra foto de cédula vieja/baja-res requiere calibración de umbral (desafío clásico de KYC) → parámetro tuneable.
 
 ---
 
-## 13. Preguntas abiertas / futuro
-- Consola de administración de tenants (¿alcance en B o posterior?).
-- Normativa PY de protección de datos personales / dato biométrico (revisar para el texto de consentimiento y retención).
-- Set de evaluación: ¿de dónde salen cédulas etiquetadas para calibrar? (posible reuso del background de dataset OCR médico).
-- Origen de la conversión Qualcomm TFLite→ONNX (validar que onnxruntime-node corre el modelo convertido con paridad).
-- Sub-proyecto A (núcleo SSI) y C (credenciales) quedan para specs futuros.
+## 14. Preguntas abiertas / futuro
+- ✅ Consola de administración de tenants → **en alcance** (ver §4/§8).
+- ✅ Normativa → **Ley N° 7593/2025** (ver §12).
+- **Set de evaluación**: ¿de dónde salen cédulas reales etiquetadas (reales/spoof/mismatch/vencidas) para calibrar umbrales (liveness FAR/FRR, match 1:1, OCR)? (posible reuso del background de dataset OCR médico).
+- **Conversión Qualcomm TFLite→ONNX**: validar paridad en onnxruntime-node; fallback a sidecar Python tflite si la conversión no es fiel.
+- **Chip eMRTD (L4)**: lectura NFC + Passive Authentication como camino de alta-confianza futuro (necesita app/lector NFC).
+- Sub-proyectos A (núcleo SSI) y C (credenciales) → specs futuros.
