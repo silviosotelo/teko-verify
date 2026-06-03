@@ -19,7 +19,8 @@ RUN npm install --omit=dev --no-audit --no-fund
 
 # App compilada, frontend de captura y modelos ONNX (montados o baked).
 COPY --from=build /app/dist ./dist
-COPY web/dist ./web/dist
+# Frontend de captura: se sirve por volumen (web/dist) cuando exista; el server
+# guarda el static con fs.existsSync, asi que su ausencia no rompe el backend.
 # Los modelos .onnx (SCRFD, recognizer, PAD, glasses) se montan por volumen
 # en compose o se copian aquí en un build self-contained:
 # COPY models ./models
