@@ -121,13 +121,19 @@ export class QualityModule {
   /** Probabilidad de anteojos 0..1 vía face_attrib_net. Null si el modelo no está. */
   private async glassesProbability(rgb112: Buffer): Promise<number | null> {
     if (!this.glassesLoaded || !this.glassesNet) return null;
-    const size = 112;
+    // face_attrib_net espera 128x128 (NCHW [1,3,128,128]); la cara viene alineada
+    // a 112x112 (ArcFace) → la reescalamos a 128 antes de inferir.
+    const size = 128;
+    const rgb = await sharp(rgb112, { raw: { width: 112, height: 112, channels: 3 } })
+      .resize(size, size, { fit: "fill" })
+      .raw()
+      .toBuffer();
     const n = size * size;
     const f = new Float32Array(3 * n);
     for (let i = 0; i < n; i++) {
-      f[i] = rgb112[i * 3] / 255;
-      f[n + i] = rgb112[i * 3 + 1] / 255;
-      f[2 * n + i] = rgb112[i * 3 + 2] / 255;
+      f[i] = rgb[i * 3] / 255;
+      f[n + i] = rgb[i * 3 + 1] / 255;
+      f[2 * n + i] = rgb[i * 3 + 2] / 255;
     }
     const t = new ort.Tensor("float32", f, [1, 3, size, size]);
     const out = await this.glassesNet.run({ [this.glassesNet.inputNames[0]]: t });
