@@ -1,128 +1,87 @@
 import { useState } from "react"
-import { Recognize } from "./Recognize"
-import { Enroll } from "./Enroll"
-import { Persons } from "./Persons"
-import { Settings } from "./Settings"
-import { History } from "./History"
-import { C } from "./ui"
+import { TOKEN, type StatusResult } from "./api"
+import { Brand, Card, Stepper } from "./ui"
+import { Consent } from "./screens/Consent"
+import { Selfie } from "./screens/Selfie"
+import { DocCapture } from "./screens/DocCapture"
+import { Processing } from "./screens/Processing"
+import { Result } from "./screens/Result"
 
-type Tab = "recognize" | "enroll" | "persons" | "history" | "settings"
+/**
+ * Wizard de captura Teko Verify. Máquina de estados que reproduce el flujo del
+ * HTML vanilla original:
+ *   consent → selfie → doc (frente/dorso) → processing → result
+ * El token sale de location.pathname (último segmento de /verify/:token).
+ */
+type Step = "consent" | "selfie" | "doc" | "processing" | "result"
 
-const TABS: { id: Tab; label: string; icon: string }[] = [
-  { id: "recognize", label: "Reconocer", icon: "◎" },
-  { id: "enroll", label: "Enrolar", icon: "+" },
-  { id: "persons", label: "Personas", icon: "☰" },
-  { id: "history", label: "Historial", icon: "◷" },
-  { id: "settings", label: "Ajustes", icon: "⚙" },
-]
+// Índice de paso para el Stepper (doc=frente y dorso comparten el mismo paso).
+const STEP_INDEX: Record<Step, number> = {
+  consent: 0,
+  selfie: 1,
+  doc: 2,
+  processing: 3,
+  result: 3,
+}
 
-export default function App() {
-  const [tab, setTab] = useState<Tab>("recognize")
+function Shell({
+  step,
+  children,
+}: {
+  step: Step
+  children: React.ReactNode
+}) {
+  return (
+    <div className="teko-bg flex min-h-full flex-col items-center px-4 py-6">
+      <div className="flex w-full max-w-md flex-col items-center">
+        <Brand />
+        <Stepper active={STEP_INDEX[step]} />
+        {children}
+        <footer className="mt-5 max-w-md px-4 text-center text-[11px] leading-relaxed text-gray-400">
+          Tus datos se tratan solo para verificar tu identidad · Ley N°
+          7593/2025
+        </footer>
+      </div>
+    </div>
+  )
+}
+
+export function App() {
+  const [step, setStep] = useState<Step>("consent")
+  const [status, setStatus] = useState<StatusResult | null>(null)
+
+  if (!TOKEN) {
+    return (
+      <div className="teko-bg flex min-h-full flex-col items-center px-4 py-6">
+        <div className="flex w-full max-w-md flex-col items-center">
+          <Brand />
+          <Card>
+            <h1 className="text-xl font-bold text-gray-900">Enlace inválido</h1>
+            <p className="mt-1 text-sm text-gray-500">
+              Falta el token de verificación.
+            </p>
+          </Card>
+        </div>
+      </div>
+    )
+  }
 
   return (
-    <div
-      style={{
-        height: "100%",
-        display: "flex",
-        flexDirection: "column",
-        maxWidth: 560,
-        margin: "0 auto",
-        position: "relative",
-      }}
-    >
-      <header
-        style={{
-          padding: "16px 18px 12px",
-          display: "flex",
-          alignItems: "center",
-          gap: 10,
-        }}
-      >
-        <div
-          style={{
-            width: 32,
-            height: 32,
-            borderRadius: 9,
-            background: C.accent,
-            color: "#04161a",
-            display: "grid",
-            placeItems: "center",
-            fontWeight: 800,
-            fontSize: 17,
+    <Shell step={step}>
+      {step === "consent" && <Consent onDone={() => setStep("selfie")} />}
+      {step === "selfie" && <Selfie onDone={() => setStep("doc")} />}
+      {step === "doc" && <DocCapture onDone={() => setStep("processing")} />}
+      {step === "processing" && (
+        <Processing
+          onResult={(s) => {
+            setStatus(s)
+            setStep("result")
           }}
-        >
-          ◎
-        </div>
-        <div>
-          <div style={{ fontWeight: 700, fontSize: 17, lineHeight: 1 }}>
-            Reconocimiento Facial
-          </div>
-          <div style={{ color: C.muted, fontSize: 12 }}>v9 · motor facenox ONNX</div>
-        </div>
-      </header>
-
-      <main
-        style={{
-          flex: 1,
-          overflowY: "auto",
-          padding: "4px 16px 92px",
-        }}
-      >
-        {/* Keep camera screens mounted only when active so streams release. */}
-        <div style={{ display: tab === "recognize" ? "block" : "none" }}>
-          <Recognize active={tab === "recognize"} />
-        </div>
-        <div style={{ display: tab === "enroll" ? "block" : "none" }}>
-          <Enroll active={tab === "enroll"} />
-        </div>
-        {tab === "persons" && <Persons active />}
-        {tab === "history" && <History active />}
-        {tab === "settings" && <Settings active />}
-      </main>
-
-      <nav
-        style={{
-          position: "fixed",
-          bottom: 0,
-          left: 0,
-          right: 0,
-          display: "flex",
-          maxWidth: 560,
-          margin: "0 auto",
-          background: "var(--surface-glass)",
-          backdropFilter: "blur(16px)",
-          WebkitBackdropFilter: "blur(16px)",
-          borderTop: `1px solid ${C.border}`,
-          paddingBottom: "env(safe-area-inset-bottom)",
-        }}
-      >
-        {TABS.map((t) => {
-          const on = tab === t.id
-          return (
-            <button
-              key={t.id}
-              onClick={() => setTab(t.id)}
-              style={{
-                flex: 1,
-                background: "transparent",
-                border: "none",
-                color: on ? C.accent : C.text3,
-                padding: "11px 0 13px",
-                display: "flex",
-                flexDirection: "column",
-                alignItems: "center",
-                gap: 3,
-                fontSize: 11,
-                fontWeight: 600,
-                transition: "color 0.15s",
-              }}
-            >
-              <span style={{ fontSize: 19 }}>{t.icon}</span>
-              {t.label}
-            </button>
-          )
-        })}
-      </nav>
-    </div>
+        />
+      )}
+      {step === "result" && status && (
+        <Result status={status} onRetry={() => setStep("selfie")} />
+      )}
+    </Shell>
   )
 }

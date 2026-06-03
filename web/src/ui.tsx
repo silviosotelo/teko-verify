@@ -1,143 +1,111 @@
-import type { CSSProperties, ReactNode } from "react"
+import type { ButtonHTMLAttributes, ReactNode } from "react"
 
-export const C = {
-  bg: "var(--bg-primary)",
-  card: "var(--card-bg)",
-  border: "var(--card-border)",
-  borderH: "var(--card-hover-border)",
-  accent: "var(--accent)",
-  accentH: "var(--accent-hover)",
-  accentSub: "var(--accent-subtle)",
-  text: "var(--text-primary)",
-  text2: "var(--text-secondary)",
-  text3: "var(--text-tertiary)",
-  muted: "var(--text-muted)",
-  error: "var(--error)",
-  warning: "var(--warning)",
-}
-
-export function Spinner({ size = 22 }: { size?: number }) {
-  return (
-    <span
-      style={{
-        width: size,
-        height: size,
-        display: "inline-block",
-        border: `2.5px solid rgba(255,255,255,0.15)`,
-        borderTopColor: C.accent,
-        borderRadius: "50%",
-        animation: "spin 0.7s linear infinite",
-      }}
-    />
-  )
-}
-
-export function Card({
-  children,
-  style,
-}: {
-  children: ReactNode
-  style?: CSSProperties
-}) {
-  return (
-    <div
-      style={{
-        background: C.card,
-        border: `1px solid ${C.border}`,
-        borderRadius: 16,
-        padding: 18,
-        ...style,
-      }}
-    >
-      {children}
-    </div>
-  )
-}
+/** Componentes de UI compartidos — radios redondeados + verde Teko (estilo ecme/Behance). */
 
 export function Button({
-  children,
-  onClick,
   variant = "primary",
-  disabled,
-  style,
-}: {
-  children: ReactNode
-  onClick?: () => void
-  variant?: "primary" | "ghost" | "danger"
-  disabled?: boolean
-  style?: CSSProperties
+  className = "",
+  children,
+  ...props
+}: ButtonHTMLAttributes<HTMLButtonElement> & {
+  variant?: "primary" | "ghost"
 }) {
-  const base: CSSProperties = {
-    border: "1px solid transparent",
-    borderRadius: 12,
-    padding: "11px 18px",
-    fontSize: 15,
-    fontWeight: 600,
-    display: "inline-flex",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 8,
-    transition: "all 0.15s ease",
-    opacity: disabled ? 0.5 : 1,
-    pointerEvents: disabled ? "none" : "auto",
-    width: "100%",
-  }
-  const variants: Record<string, CSSProperties> = {
-    primary: { background: C.accent, color: "#04161a" },
-    ghost: {
-      background: "transparent",
-      color: C.text2,
-      border: `1px solid ${C.border}`,
-    },
-    danger: {
-      background: "rgba(239,68,68,0.12)",
-      color: C.error,
-      border: "1px solid rgba(239,68,68,0.3)",
-    },
-  }
+  const base =
+    "w-full rounded-2xl px-5 py-4 text-base font-semibold transition active:scale-[0.99] disabled:opacity-50 disabled:active:scale-100"
+  const styles =
+    variant === "primary"
+      ? "bg-primary text-white shadow-lg shadow-primary/25 hover:bg-primary-deep"
+      : "bg-white text-gray-600 ring-1 ring-gray-200 hover:bg-gray-50"
   return (
-    <button
-      onClick={onClick}
-      disabled={disabled}
-      style={{ ...base, ...variants[variant], ...style }}
-    >
+    <button className={`${base} ${styles} ${className}`} {...props}>
       {children}
     </button>
   )
 }
 
-export function Field({
-  label,
-  ...props
-}: {
-  label: string
-} & React.InputHTMLAttributes<HTMLInputElement>) {
+/** Tarjeta blanca flotante centrada — el lienzo del wizard (mobile-first). */
+export function Card({ children }: { children: ReactNode }) {
   return (
-    <label style={{ display: "block", marginBottom: 14 }}>
-      <span
-        style={{
-          display: "block",
-          fontSize: 13,
-          color: C.text3,
-          marginBottom: 6,
-          fontWeight: 500,
-        }}
-      >
-        {label}
+    <div className="w-full max-w-md rounded-3xl bg-white/90 p-6 shadow-xl shadow-gray-900/5 ring-1 ring-gray-100 backdrop-blur-sm sm:p-7">
+      {children}
+    </div>
+  )
+}
+
+/** Punto de confianza (ícono + texto) — "Toma ~60s", "Encriptado", etc. */
+export function TrustPoint({
+  icon,
+  children,
+}: {
+  icon: ReactNode
+  children: ReactNode
+}) {
+  return (
+    <li className="flex items-center gap-3 text-sm text-gray-600">
+      <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-primary-subtle text-primary">
+        {icon}
       </span>
-      <input
-        {...props}
-        style={{
-          width: "100%",
-          background: "var(--bg-tertiary)",
-          border: `1px solid ${C.border}`,
-          borderRadius: 10,
-          padding: "11px 13px",
-          color: C.text,
-          fontSize: 15,
-          outline: "none",
-        }}
-      />
-    </label>
+      <span>{children}</span>
+    </li>
+  )
+}
+
+/** Aviso amable (tip de recaptura). */
+export function Notice({ children }: { children: ReactNode }) {
+  return (
+    <div className="my-3 rounded-2xl bg-warning-subtle px-4 py-3 text-sm leading-snug text-amber-800">
+      {children}
+    </div>
+  )
+}
+
+const STEP_LABELS = ["Consentimiento", "Selfie", "Cédula", "Verificación"]
+
+/** Stepper de progreso (consentimiento → selfie → cédula → verificación). */
+export function Stepper({ active }: { active: number }) {
+  return (
+    <div className="mb-5 w-full max-w-md">
+      <div className="flex gap-1.5">
+        {STEP_LABELS.map((_, i) => (
+          <div
+            key={i}
+            className={`h-1.5 flex-1 rounded-full transition-colors ${
+              i <= active ? "bg-primary" : "bg-gray-200"
+            }`}
+          />
+        ))}
+      </div>
+      <div className="mt-2 flex justify-between px-0.5">
+        {STEP_LABELS.map((l, i) => (
+          <span
+            key={l}
+            className={`text-[11px] font-medium ${
+              i <= active ? "text-primary-deep" : "text-gray-400"
+            }`}
+          >
+            {l}
+          </span>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+/** Logo Teko (T·E·KO con la E en verde, como el HTML original). */
+export function Brand() {
+  return (
+    <div className="mb-5 flex items-center gap-2.5">
+      <span className="flex size-10 items-center justify-center rounded-2xl bg-primary text-lg font-black tracking-wider text-white shadow-md shadow-primary/30">
+        T
+      </span>
+      <div className="leading-tight">
+        <div className="text-lg font-extrabold tracking-[0.2em] text-gray-900">
+          T<span className="text-primary">E</span>KO
+        </div>
+        <div className="-mt-0.5 text-[11px] text-gray-400">
+          identidad verificada
+        </div>
+      </div>
+    </div>
   )
 }

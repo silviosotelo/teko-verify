@@ -1,106 +1,108 @@
-:root {
-  --bg-primary: #06080c;
-  --bg-secondary: #0d1117;
-  --bg-tertiary: #131922;
-  --bg-hover: #19212d;
-  --bg-canvas: #030406;
+@import "tailwindcss";
 
-  --surface-glass: rgba(13, 17, 23, 0.72);
-  --card-bg: #0d1117;
-  --card-border: rgba(255, 255, 255, 0.09);
-  --card-hover-border: rgba(255, 255, 255, 0.16);
+/*
+ * Design tokens — espejo del design system de ecme (admin/), con el ACENTO
+ * cambiado al verde Teko (#16a34a) por marca. Tailwind v4: el bloque @theme
+ * genera utilidades (bg-primary, text-primary, rounded-*, font-sans…).
+ */
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+    "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif;
 
-  --text-primary: #ffffff;
-  --text-secondary: #d8dee8;
-  --text-tertiary: #95a0af;
-  --text-muted: #616c7b;
+  /* Acento Teko (verde) — reemplaza el indigo de ecme */
+  --color-primary: #16a34a;
+  --color-primary-deep: #15803d;
+  --color-mint: #34d399;
+  --color-primary-mild: #4ade80;
+  --color-primary-subtle: #dcfce7;
 
-  --accent: #22d3ee;
-  --accent-hover: #06b6d4;
-  --accent-dark: #0891b2;
-  --accent-subtle: rgba(34, 211, 238, 0.12);
-  --success: #22d3ee;
-  --warning: #e2b714;
-  --error: #ef4444;
+  --color-success: #16a34a;
+  --color-success-subtle: #dcfce7;
+  --color-error: #ef4444;
+  --color-error-subtle: #fee2e2;
+  --color-warning: #f59e0b;
+  --color-warning-subtle: #fef3c7;
+  --color-info: #0ea5e9;
+  --color-info-subtle: #e0f2fe;
 
-  --gradient-primary: linear-gradient(135deg, #06080c 0%, #0d121b 100%);
+  /* Grises ecme (slate) */
+  --color-ink: #0f172a;
+  --color-gray-50: #f8fafc;
+  --color-gray-100: #f1f5f9;
+  --color-gray-200: #e2e8f0;
+  --color-gray-300: #cbd5e1;
+  --color-gray-400: #94a3b8;
+  --color-gray-500: #64748b;
+  --color-gray-600: #475569;
+  --color-gray-700: #334155;
+  --color-gray-800: #1e293b;
+  --color-gray-900: #0f172a;
 
-  font-family: "Inter", "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont,
-    Helvetica, Arial, sans-serif;
-  line-height: 1.5;
-  font-weight: 400;
-  color-scheme: dark;
-  color: var(--text-primary);
-  background: var(--bg-canvas);
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-}
-
-* {
-  box-sizing: border-box;
+  /* Radios redondeados estilo ecme/Behance */
+  --radius-xl: 1rem;
+  --radius-2xl: 1.25rem;
+  --radius-3xl: 1.75rem;
 }
 
 html,
 body,
 #root {
   height: 100%;
-  margin: 0;
-  padding: 0;
 }
 
 body {
-  background: var(--gradient-primary);
-  background-attachment: fixed;
+  margin: 0;
+  font-family: var(--font-sans);
+  color: var(--color-ink);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
-button {
-  font-family: inherit;
-  cursor: pointer;
+/* Fondo pastel en degradé (verde menta → lavanda) detrás del contenido,
+   como en las referencias Behance. */
+.teko-bg {
+  background:
+    radial-gradient(1200px 600px at 50% -10%, #d1fae5 0%, transparent 55%),
+    radial-gradient(900px 500px at 100% 0%, #ede9fe 0%, transparent 45%),
+    radial-gradient(900px 500px at 0% 20%, #ccfbf1 0%, transparent 45%),
+    linear-gradient(180deg, #f8fafc 0%, #ffffff 60%);
 }
 
-input,
-select {
-  font-family: inherit;
-}
-
-::-webkit-scrollbar {
-  width: 10px;
-  height: 10px;
-}
-::-webkit-scrollbar-track {
-  background: transparent;
-}
-::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.12);
-  border-radius: 6px;
-}
-::-webkit-scrollbar-thumb:hover {
-  background: rgba(255, 255, 255, 0.22);
-}
-
-@keyframes spin {
+@keyframes teko-spin {
   to {
     transform: rotate(360deg);
   }
 }
-@keyframes fadeIn {
-  from {
-    opacity: 0;
-    transform: translateY(6px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-@keyframes pulseRing {
+@keyframes teko-scan {
   0% {
-    box-shadow: 0 0 0 0 rgba(34, 211, 238, 0.5);
-  }
-  70% {
-    box-shadow: 0 0 0 12px rgba(34, 211, 238, 0);
+    transform: translateY(-100%);
   }
   100% {
-    box-shadow: 0 0 0 0 rgba(34, 211, 238, 0);
+    transform: translateY(100%);
   }
+}
+@keyframes teko-pop {
+  0% {
+    transform: scale(0.7);
+    opacity: 0;
+  }
+  60% {
+    transform: scale(1.08);
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+@keyframes teko-pulse {
+  0%,
+  100% {
+    opacity: 0.55;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+.teko-pop {
+  animation: teko-pop 0.45s cubic-bezier(0.16, 1, 0.3, 1) both;
 }

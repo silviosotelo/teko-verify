@@ -1,101 +1,103 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 
-export interface CameraState {
-  videoRef: React.RefObject<HTMLVideoElement | null>
-  ready: boolean
-  error: string | null
-  facingMode: "user" | "environment"
-  flip: () => void
-  /** Capture current frame to a JPEG base64 (no data: prefix) at the video's
-   *  native resolution. Returns null if not ready. */
-  capture: () => { dataUrl: string; base64: string; width: number; height: number } | null
-}
+type Facing = "user" | "environment"
 
-const captureCanvas = document.createElement("canvas")
-
-export function useCamera(active: boolean): CameraState {
+/**
+ * Hook de cámara. PORTA la lógica del HTML vanilla:
+ *  - getUserMedia con focusMode:"continuous" (top-level + advanced[]) y res 1920 ideal.
+ *  - applyConstraints de autoenfoque en try/catch (best-effort).
+ *  - grab(): captura un frame del <video> a dataURL JPEG 0.9.
+ *
+ * Maneja correctamente el ciclo de vida en React/StrictMode: para los tracks en
+ * el cleanup del efecto y al desmontar, evitando streams duplicados o colgados.
+ */
+export function useCamera(facing: Facing) {
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const streamRef = useRef<MediaStream | null>(null)
-  const [ready, setReady] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [facingMode, setFacingMode] = useState<"user" | "environment">("user")
+  const [ready, setReady] = useState(false)
 
   const stop = useCallback(() => {
-    streamRef.current?.getTracks().forEach((t) => t.stop())
-    streamRef.current = null
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((t) => t.stop())
+      streamRef.current = null
+    }
     setReady(false)
   }, [])
 
-  useEffect(() => {
-    let cancelled = false
-    if (!active) {
-      stop()
-      return
-    }
+  const start = useCallback(async () => {
     setError(null)
-    setReady(false)
-
-    if (!navigator.mediaDevices?.getUserMedia) {
-      setError(
-        "La cámara no está disponible. Requiere un contexto seguro (HTTPS o localhost).",
-      )
-      return
-    }
-
-    navigator.mediaDevices
-      .getUserMedia({
-        video: { facingMode, width: { ideal: 1280 }, height: { ideal: 720 } },
+    stop()
+    try {
+      // La cámara trasera usa {exact:"environment"}; si el dispositivo no la
+      // tiene, caemos a "environment" laxo. La frontal usa "user" directo.
+      const facingMode: MediaTrackConstraints["facingMode"] =
+        facing === "environment" ? { exact: "environment" } : facing
+      const constraints: MediaStreamConstraints = {
+        video: {
+          facingMode,
+          width: { ideal: 1920 },
+          height: { ideal: 1080 },
+          // focusMode no es estándar en los tipos DOM → cast controlado.
+          ...({ focusMode: "continuous" } as Record<string, unknown>),
+          advanced: [{ focusMode: "continuous" } as unknown as MediaTrackConstraintSet],
+        },
         audio: false,
-      })
-      .then((stream) => {
-        if (cancelled) {
-          stream.getTracks().forEach((t) => t.stop())
-          return
-        }
-        streamRef.current = stream
-        const v = videoRef.current
-        if (v) {
-          v.srcObject = stream
-          v.onloadedmetadata = () => {
-            v.play()
-              .then(() => setReady(true))
-              .catch((e) => setError(String(e)))
-          }
-        }
-      })
-      .catch((e: DOMException) => {
-        if (cancelled) return
-        if (e.name === "NotAllowedError")
-          setError("Permiso de cámara denegado.")
-        else if (e.name === "NotFoundError")
-          setError("No se encontró ninguna cámara.")
-        else setError(`No se pudo abrir la cámara: ${e.message || e.name}`)
-      })
-
-    return () => {
-      cancelled = true
-      stop()
+      }
+      let stream: MediaStream
+      try {
+        stream = await navigator.mediaDevices.getUserMedia(constraints)
+      } catch {
+        // Fallback: environment laxo (algunos browsers rechazan {exact}).
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: facing,
+            width: { ideal: 1920 },
+            height: { ideal: 1080 },
+          },
+          audio: false,
+        })
+      }
+      streamRef.current = stream
+      const track = stream.getVideoTracks()[0]
+      try {
+        await track.applyConstraints({
+          advanced: [
+            { focusMode: "continuous" } as unknown as MediaTrackConstraintSet,
+          ],
+        })
+      } catch {
+        /* el browser no soporta focusMode: seguimos igual */
+      }
+      const v = videoRef.current
+      if (v) {
+        v.srcObject = stream
+        await v.play()
+        setReady(true)
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
     }
-  }, [active, facingMode, stop])
+  }, [facing, stop])
 
-  const flip = useCallback(
-    () => setFacingMode((m) => (m === "user" ? "environment" : "user")),
-    [],
-  )
-
-  const capture = useCallback(() => {
+  // Captura un frame del video actual como dataURL JPEG.
+  const grab = useCallback((): string => {
     const v = videoRef.current
-    if (!v || !v.videoWidth) return null
-    const w = v.videoWidth
-    const h = v.videoHeight
-    captureCanvas.width = w
-    captureCanvas.height = h
-    const ctx = captureCanvas.getContext("2d")
-    if (!ctx) return null
-    ctx.drawImage(v, 0, 0, w, h)
-    const dataUrl = captureCanvas.toDataURL("image/jpeg", 0.92)
-    return { dataUrl, base64: dataUrl.split(",")[1], width: w, height: h }
+    if (!v) return ""
+    const c = document.createElement("canvas")
+    c.width = v.videoWidth || 1280
+    c.height = v.videoHeight || 960
+    const ctx = c.getContext("2d")
+    if (ctx) ctx.drawImage(v, 0, 0, c.width, c.height)
+    return c.toDataURL("image/jpeg", 0.9)
   }, [])
 
-  return { videoRef, ready, error, facingMode, flip, capture }
+  // Abrir la cámara al montar / cambiar de facing; cerrar en cleanup.
+  useEffect(() => {
+    void start()
+    return () => stop()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [facing])
+
+  return { videoRef, grab, start, stop, error, ready }
 }
