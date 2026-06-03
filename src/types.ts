@@ -609,6 +609,12 @@ export interface DocumentUploadRequest {
 export interface UploadResponse {
   ok: boolean;
   state: SessionState;
+  /**
+   * Pre-check informativo de calidad de la selfie (§6.a). SOLO lo devuelve
+   * /selfie; es opcional porque /document comparte este tipo y no corre quality.
+   * La autoridad sigue siendo el pipeline en /submit: esto NO cambia el estado.
+   */
+  quality?: { passed: boolean; reasons: string[] };
 }
 
 /** POST /verify/:token/submit — dispara el pipeline. */

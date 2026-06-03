@@ -21,6 +21,10 @@ import { evidenceStore } from "../lib/evidenceStore";
 import { decodeBase64Image, assertFrameCount } from "../lib/images";
 import { processSession } from "../pipeline";
 import { realPipelineDeps } from "../pipelineDeps";
+// Singletons ya inicializados (engine.init() + qualityModule.init() en server.ts).
+// Los reusamos para el pre-check de calidad de la selfie (§6.a).
+import { engine } from "../engine";
+import { qualityModule } from "../modules/quality";
 import type {
   CaptureStatusResponse,
   ConsentResponse,
@@ -161,7 +165,22 @@ captureRouter.post("/:token/selfie", async (req: Request, res: Response) => {
       const repFrame = frames.length > 1 ? frames[frames.length - 1] : frames[0];
       await evidenceStore.save(session.tenantId, session.id, "frames", decodeBase64Image(repFrame));
     }
-    const resp: UploadResponse = { ok: true, state: "capturing" };
+
+    // Pre-check INFORMATIVO de calidad sobre la selfie (§6.a): corre el mismo módulo
+    // `quality` que usará el pipeline para avisar AL MOMENTO de la captura (anteojos,
+    // luz, nitidez, pose). NO cambia el estado ni bloquea del lado servidor: la
+    // autoridad sigue siendo el pipeline en /submit. Se proyecta a {passed, reasons}.
+    // try/catch propio (NO el outer): un fallo de quality NO debe romper el upload ya
+    // exitoso → fail-closed devolviendo passed=false con reason "quality_error".
+    let quality: { passed: boolean; reasons: string[] };
+    try {
+      const q = await qualityModule.run(selfie, engine);
+      quality = { passed: q.passed, reasons: q.reasons };
+    } catch {
+      quality = { passed: false, reasons: ["quality_error"] };
+    }
+
+    const resp: UploadResponse = { ok: true, state: "capturing", quality };
     res.json(resp);
   } catch (e) {
     res.status(400).json({ error: "selfie_upload_failed", detail: (e as Error).message });
