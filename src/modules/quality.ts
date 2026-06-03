@@ -80,6 +80,16 @@ export class QualityModule {
     this.ready = true;
   }
 
+  /**
+   * Nitidez pública (varianza del Laplaciano) para pre-checks que NO son selfies
+   * (p.ej. la cédula en /doc-check): la cédula no tiene cara/pose/anteojos que
+   * gatear, así que reusamos sólo la señal de nitidez sin correr el gate completo.
+   */
+  async sharpness(buf: Buffer): Promise<number> {
+    const { sharpness } = await this.lumaAndSharpness(buf);
+    return sharpness;
+  }
+
   /** Brillo (luma media 0..1) + nitidez (varianza del Laplaciano) sobre escala de grises. */
   private async lumaAndSharpness(buf: Buffer): Promise<{ brightness: number; sharpness: number }> {
     const W = 256;

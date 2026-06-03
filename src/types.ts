@@ -617,6 +617,19 @@ export interface UploadResponse {
   quality?: { passed: boolean; reasons: string[] };
 }
 
+/**
+ * POST /verify/:token/doc-check — pre-check INFORMATIVO de la cédula al capturar
+ * cada lado (frente/dorso). NO persiste, NO cambia estado, NO consume el token: el
+ * pipeline en /submit sigue siendo la autoridad. Espejo del pre-check de la selfie.
+ */
+export interface DocCheckResponse {
+  ok: boolean;
+  /** false si la cédula no es usable (borrosa / sin rostro en frente / MRZ ilegible). */
+  passed: boolean;
+  /** Motivos legibles: "blurry", "no_doc_face", "mrz_unreadable", "doc_check_error". */
+  reasons: string[];
+}
+
 /** POST /verify/:token/submit — dispara el pipeline. */
 export interface SubmitResponse {
   ok: boolean;

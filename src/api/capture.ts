@@ -25,14 +25,27 @@ import { realPipelineDeps } from "../pipelineDeps";
 // Los reusamos para el pre-check de calidad de la selfie (§6.a).
 import { engine } from "../engine";
 import { qualityModule } from "../modules/quality";
+import { PaddleOcrClient } from "../modules/document";
 import type {
   CaptureStatusResponse,
   ConsentResponse,
+  DocCheckResponse,
   SessionState,
   SubmitResponse,
   UploadResponse,
   VerificationSession,
 } from "../types";
+
+/**
+ * Umbral de nitidez (varianza del Laplaciano) para el pre-check de la cédula. La
+ * cédula tiene una varianza de Laplaciano muy distinta a una selfie; este umbral
+ * es deliberadamente bajo (sólo descarta fotos MUY borrosas) — la autoridad real
+ * sigue siendo el módulo `document` en /submit. Configurable por entorno.
+ */
+const DOC_SHARPNESS_MIN = parseFloat(process.env.TEKO_DOC_SHARPNESS_MIN || "12");
+
+/** Cliente OCR reusado para el pre-check del dorso (MRZ legible). */
+const docCheckOcr = new PaddleOcrClient();
 
 export const captureRouter = Router();
 
@@ -201,6 +214,79 @@ captureRouter.post("/:token/document", async (req: Request, res: Response) => {
     res.json(resp);
   } catch (e) {
     res.status(400).json({ error: "document_upload_failed", detail: (e as Error).message });
+  }
+});
+
+// POST /verify/:token/doc-check  → pre-check INFORMATIVO de la cédula (UX)
+// Espejo del pre-check de la selfie: NO persiste, NO cambia estado, NO consume el
+// token. Verifica nitidez (Laplaciano), rostro en el frente y MRZ legible en el
+// dorso. Fail-closed/no-throw: ante cualquier error devuelve passed=false con una
+// reason genérica (nunca 500). El pipeline en /submit sigue siendo la autoridad.
+captureRouter.post("/:token/doc-check", async (req: Request, res: Response) => {
+  const session = await loadSession(req, res);
+  if (!session) return;
+  if (!requireCapturable(session, res)) return;
+
+  const sideRaw = req.body?.side;
+  const side: "front" | "back" = sideRaw === "back" ? "back" : "front";
+  const reasons: string[] = [];
+
+  try {
+    const image = decodeBase64Image(req.body?.image);
+
+    // 1) Nitidez (varianza del Laplaciano) — descarta sólo fotos MUY borrosas.
+    let sharp = Infinity;
+    try {
+      sharp = await qualityModule.sharpness(image);
+    } catch {
+      // Si no podemos medir nitidez, no bloqueamos por eso (la dejamos en Infinity).
+    }
+    if (sharp < DOC_SHARPNESS_MIN) reasons.push("blurry");
+
+    if (side === "front") {
+      // 2a) FRENTE: debe verse el rostro del titular (engine SCRFD). Sin rostro →
+      // probablemente no es el frente o está mal encuadrada.
+      let hasFace = false;
+      try {
+        const faces = await engine.detect(image);
+        hasFace = engine.bestFace(faces) !== null;
+      } catch {
+        hasFace = false;
+      }
+      if (!hasFace) reasons.push("no_doc_face");
+    } else {
+      // 2b) DORSO: el OCR debe devolver algo con pinta de MRZ (líneas largas del
+      // alfabeto MRZ A-Z0-9<) o, al menos, texto suficiente. El OCR confunde
+      // `<`↔`C`/`K`, así que NO exigimos `<` literal: aceptamos líneas largas del
+      // alfabeto MRZ O texto total suficiente.
+      let mrzOk = false;
+      try {
+        const ocr = await docCheckOcr.recognize(image);
+        const text = ocr.rawText || "";
+        const mrzLike = text
+          .split(/\r?\n/)
+          .map((l) => l.replace(/\s+/g, "").toUpperCase())
+          .filter((l) => /^[A-Z0-9<]{20,}$/.test(l))
+          .filter((l) => !(/^[A-Z]+$/.test(l) && l.length < 28));
+        const enoughText = text.replace(/\s+/g, "").length >= 40;
+        mrzOk = mrzLike.length >= 1 || enoughText;
+      } catch {
+        mrzOk = false;
+      }
+      if (!mrzOk) reasons.push("mrz_unreadable");
+    }
+
+    const resp: DocCheckResponse = { ok: true, passed: reasons.length === 0, reasons };
+    res.json(resp);
+  } catch (e) {
+    // Fail-closed: cualquier fallo (decodificación, etc.) → passed=false, NUNCA 500.
+    const resp: DocCheckResponse = {
+      ok: true,
+      passed: false,
+      reasons: reasons.length ? reasons : ["doc_check_error"],
+    };
+    void e;
+    res.json(resp);
   }
 });
 

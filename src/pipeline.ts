@@ -311,9 +311,13 @@ export async function processSession(
     let selfieEmb: Float32Array | null = null;
     if (needsMatch(policy)) {
       selfieEmb = await deps.modules.embed(images.selfie);
-      const docFaceEmb = document.docFaceCrop
+      // Embedding de la cara de la cédula. Primero el recorte ajustado; si SCRFD no
+      // lo re-detecta (recorte sin contexto), caemos a la foto del FRENTE completa
+      // (su única cara es el retrato) → SCRFD la encuentra con contexto suficiente.
+      let docFaceEmb = document.docFaceCrop
         ? await deps.modules.embed(Buffer.from(document.docFaceCrop.base64Jpeg, "base64"))
         : null;
+      if (!docFaceEmb) docFaceEmb = await deps.modules.embed(images.docFront);
       if (!selfieEmb || !docFaceEmb) {
         // Fail-closed: sin embeddings no hay match → rechazo.
         return await rejectAt(deps, session, images, "match", ["match_embeddings_unavailable"], { quality, liveness, document });

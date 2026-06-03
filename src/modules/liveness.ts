@@ -16,9 +16,19 @@
  */
 import * as ort from "onnxruntime-node";
 import sharp from "sharp";
-import type { Engine } from "../engine";
+import type { Engine, Face } from "../engine";
 import type { LivenessChallenge, LivenessResult } from "../types";
 import { PAD_MODEL, LIVENESS_THRESHOLD } from "../config";
+
+/**
+ * Factor de escala del recorte PAD (minivision Silent-Face usa 2.7): el bbox del
+ * rostro se EXPANDE por este factor alrededor del centro antes de recortar de la
+ * imagen ORIGINAL. MiniFASNet necesita CONTEXTO (no el recorte ArcFace ajustado),
+ * por eso ve más que la cara. Configurable por si hay que ajustarlo.
+ */
+const PAD_CROP_SCALE = parseFloat(process.env.TEKO_PAD_CROP_SCALE || "2.7");
+/** Tamaño de entrada de MiniFASNet (80x80). */
+const PAD_INPUT = 80;
 
 export class LivenessModule {
   private padNet: ort.InferenceSession | null = null;
@@ -43,22 +53,87 @@ export class LivenessModule {
     this.ready = true;
   }
 
-  /** Score de vivacidad 0..1 sobre el recorte alineado. Null si el modelo no está. */
-  private async padScore(rgb112: Buffer): Promise<number | null> {
+  /**
+   * Calcula el recorte EXPANDIDO (estilo minivision `CropImage._get_new_box`):
+   * a partir del bbox `[x1,y1,x2,y2]` y la escala, expande alrededor del centro,
+   * clampea la escala para no salirse de la imagen y traslada+clampea la caja a los
+   * bordes. Devuelve `{left, top, width, height}` listo para `sharp.extract`
+   * (entero, dentro de [0,W]×[0,H], ancho/alto ≥ 1). Esto evita el "bad extract
+   * area" de sharp y mantiene la caja completa dentro de la imagen.
+   */
+  private newBox(
+    bbox: [number, number, number, number],
+    imgW: number,
+    imgH: number,
+    scale: number
+  ): { left: number; top: number; width: number; height: number } {
+    const [x1, y1, x2, y2] = bbox;
+    const boxW = Math.max(1, x2 - x1);
+    const boxH = Math.max(1, y2 - y1);
+    // Clampeo de escala: no puede expandir más allá de los bordes de la imagen.
+    const s = Math.min(scale, (imgH - 1) / boxH, (imgW - 1) / boxW);
+    const newW = boxW * s;
+    const newH = boxH * s;
+    const cx = x1 + boxW / 2;
+    const cy = y1 + boxH / 2;
+    // Esquina superior-izquierda candidata, luego trasladar dentro de los bordes.
+    let left = cx - newW / 2;
+    let top = cy - newH / 2;
+    if (left < 0) left = 0;
+    if (top < 0) top = 0;
+    if (left + newW > imgW) left = imgW - newW;
+    if (top + newH > imgH) top = imgH - newH;
+    return {
+      left: Math.max(0, Math.round(left)),
+      top: Math.max(0, Math.round(top)),
+      width: Math.max(1, Math.round(newW)),
+      height: Math.max(1, Math.round(newH)),
+    };
+  }
+
+  /**
+   * Score de vivacidad 0..1. MiniFASNet NO usa el recorte ArcFace (112, ajustado y
+   * sin contexto): recorta el bbox del rostro EXPANDIDO por `PAD_CROP_SCALE` (~2.7)
+   * de la imagen ORIGINAL, luego resize 80x80, RGB, NCHW [1,3,80,80], /255
+   * (ToTensor de minivision, sin mean/std). Null si el modelo no está.
+   */
+  private async padScore(
+    selfie: Buffer,
+    face: Face
+  ): Promise<number | null> {
     if (!this.padLoaded || !this.padNet) return null;
-    // MiniFASNet espera 80x80 (NCHW [1,3,80,80]); la cara viene alineada a 112
-    // (ArcFace) → la reescalamos a 80 antes de inferir.
-    const size = 80;
-    const rgb = await sharp(rgb112, { raw: { width: 112, height: 112, channels: 3 } })
+    const meta = await sharp(selfie).metadata();
+    const imgW = meta.width || 0;
+    const imgH = meta.height || 0;
+    if (!imgW || !imgH) return null;
+    const box = this.newBox(face.bbox, imgW, imgH, PAD_CROP_SCALE);
+    const size = PAD_INPUT;
+    const rgb = await sharp(selfie)
+      .extract(box)
+      .removeAlpha()
       .resize(size, size, { fit: "fill" })
       .raw()
       .toBuffer();
     const n = size * size;
     const f = new Float32Array(3 * n);
+    // NORMALIZACIÓN: este export de MiniFASNet espera la entrada en CRUDO 0..255
+    // (SIN dividir por 255). Fundamento (no es un número mágico):
+    //   1) El grafo ONNX NO tiene normalización embebida (su primer nodo es Conv
+    //      directo sobre el input), así que el rango lo debe dar este código.
+    //   2) Control de independencia de entrada: con /255 el modelo SATURA y emite
+    //      el MISMO vector para negro, ruido y un rostro real (salida independiente
+    //      de la entrada) → falso rechazo ~0.007. Con 0..255 crudo la salida SÍ
+    //      depende de la entrada → un rostro vivo da prob "real" (índice 1) ~0.999.
+    //      Un modelo bien exportado NUNCA es input-independent con su preprocesado
+    //      de referencia: el rango entrenado es [0,255], NO [0,1]. NO dividir por 255.
+    // LIMITACIÓN conocida (asset del modelo, NO de este código): un único MiniFASNet
+    // discrimina débilmente real-vs-print (un retrato impreso da ~0.78, por encima
+    // del umbral 0.70). minivision en producción ENSAMBLA 2-3 variantes sumadas; con
+    // una sola hay que agregar variante(s) y/o revisar el umbral (ver §13).
     for (let i = 0; i < n; i++) {
-      f[i] = rgb[i * 3] / 255;
-      f[n + i] = rgb[i * 3 + 1] / 255;
-      f[2 * n + i] = rgb[i * 3 + 2] / 255;
+      f[i] = rgb[i * 3];
+      f[n + i] = rgb[i * 3 + 1];
+      f[2 * n + i] = rgb[i * 3 + 2];
     }
     const t = new ort.Tensor("float32", f, [1, 3, size, size]);
     const out = await this.padNet.run({ [this.padNet.inputNames[0]]: t });
@@ -94,12 +169,9 @@ export class LivenessModule {
     if (!det) {
       return { score: 0, passed: false, attackType: "unknown" };
     }
-    const aligned = await engine.alignToRaw(selfie, det.face.landmarks5);
-    if (!aligned) {
-      return { score: 0, passed: false, attackType: "unknown" };
-    }
-
-    const score = await this.padScore(aligned);
+    // PAD sobre la imagen ORIGINAL + bbox del rostro (recorte expandido con
+    // contexto, estilo minivision), NO sobre el recorte ArcFace 112.
+    const score = await this.padScore(selfie, det.face);
     if (score === null) {
       // FAIL-CLOSED: sin modelo PAD no se acredita vivacidad.
       return { score: 0, passed: false, attackType: "unknown" };
