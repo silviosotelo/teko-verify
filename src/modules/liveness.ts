@@ -15,6 +15,7 @@
  * requerido es L3; para L1/L2 el pipeline puede omitirlo.
  */
 import * as ort from "onnxruntime-node";
+import sharp from "sharp";
 import type { Engine } from "../engine";
 import type { LivenessChallenge, LivenessResult } from "../types";
 import { PAD_MODEL, LIVENESS_THRESHOLD } from "../config";
@@ -45,13 +46,19 @@ export class LivenessModule {
   /** Score de vivacidad 0..1 sobre el recorte alineado. Null si el modelo no está. */
   private async padScore(rgb112: Buffer): Promise<number | null> {
     if (!this.padLoaded || !this.padNet) return null;
-    const size = 112;
+    // MiniFASNet espera 80x80 (NCHW [1,3,80,80]); la cara viene alineada a 112
+    // (ArcFace) → la reescalamos a 80 antes de inferir.
+    const size = 80;
+    const rgb = await sharp(rgb112, { raw: { width: 112, height: 112, channels: 3 } })
+      .resize(size, size, { fit: "fill" })
+      .raw()
+      .toBuffer();
     const n = size * size;
     const f = new Float32Array(3 * n);
     for (let i = 0; i < n; i++) {
-      f[i] = rgb112[i * 3] / 255;
-      f[n + i] = rgb112[i * 3 + 1] / 255;
-      f[2 * n + i] = rgb112[i * 3 + 2] / 255;
+      f[i] = rgb[i * 3] / 255;
+      f[n + i] = rgb[i * 3 + 1] / 255;
+      f[2 * n + i] = rgb[i * 3 + 2] / 255;
     }
     const t = new ort.Tensor("float32", f, [1, 3, size, size]);
     const out = await this.padNet.run({ [this.padNet.inputNames[0]]: t });

@@ -171,6 +171,17 @@ export interface BarcodeData {
   text: string;
 }
 
+/**
+ * Una línea reconocida por el OCR con su caja (4 esquinas en píxeles). El
+ * sidecar PaddleOCR ya las devuelve; las usamos para anclar valores por posición.
+ */
+export interface OcrLine {
+  text: string;
+  score: number;
+  /** 4 esquinas [[x1,y1],[x2,y2],[x3,y3],[x4,y4]] en píxeles. */
+  box: [[number, number], [number, number], [number, number], [number, number]];
+}
+
 /** OCR visual del frente (PaddleOCR sidecar) — §7. */
 export interface OcrData {
   /** Texto completo concatenado tal como lo devuelve el sidecar. */
@@ -186,6 +197,55 @@ export interface OcrData {
   };
   /** Confianza media 0..1 reportada por el OCR. */
   confidence: number;
+}
+
+/**
+ * Datos estructurados ricos extraídos del documento (cédula PY) — FUENTE
+ * AUTORITATIVA: el OCR de los campos impresos del frente/dorso anclados por
+ * etiqueta (Opción 1). El MRZ es best-effort y NO decide el resultado.
+ *
+ * Todos los campos son opcionales/derivables: ante dato faltante quedan vacíos
+ * (fail-closed; nunca se inventan valores).
+ */
+export interface ExtractedDocument {
+  documento: {
+    pais: string;
+    tipo: string;
+    numeroCedula: string;
+    specimen: boolean;
+  };
+  titular: {
+    apellidos: string;
+    nombres: string;
+    fechaNacimiento: string; // ISO 8601 (YYYY-MM-DD)
+    sexo: string;
+    lugarNacimiento: { ciudad: string; departamento: string };
+    nacionalidad: string;
+    estadoCivil: string;
+    donante: boolean;
+    firma: string;
+  };
+  documentoFisico: {
+    fechaEmision: string; // ISO 8601
+    fechaVencimiento: string; // ISO 8601
+    chip: boolean;
+    codigoBarras: boolean;
+  };
+  registroInterno: {
+    ic: string;
+    ubicacion: string;
+  };
+  autoridadEmisora: {
+    nombre: string;
+    cargo: string;
+    dependencia: string;
+  };
+  mrz: {
+    linea1: string;
+    linea2: string;
+    linea3: string;
+    paisCodigo: string;
+  };
 }
 
 /** Recorte de la foto del titular extraída del documento (para el match 1:1). */
@@ -222,6 +282,11 @@ export interface DocumentResult {
   ocr: OcrData;
   /** Recorte de la foto del titular (null si no se pudo extraer). */
   docFaceCrop: DocFaceCrop | null;
+  /**
+   * JSON estructurado rico extraído del documento (FUENTE AUTORITATIVA: OCR de
+   * campos impresos del frente/dorso). Independiente del MRZ.
+   */
+  extracted: ExtractedDocument;
   authenticity: Authenticity;
   passed: boolean;
 }

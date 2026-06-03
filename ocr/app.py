@@ -48,7 +48,10 @@ def _extract(res):
         return [], []
     texts = data.get("rec_texts") or []
     scores = data.get("rec_scores") or []
-    return list(texts), list(scores)
+    polys = data.get("rec_polys")
+    if polys is None:
+        polys = data.get("dt_polys") or []
+    return list(texts), list(scores), list(polys)
 
 
 class OcrIn(BaseModel):
@@ -83,13 +86,23 @@ def ocr(inp: OcrIn):
     arr = np.array(img)
     results = _get_ocr().predict(arr)
 
-    texts, scores = [], []
+    texts, scores, polys = [], [], []
     for res in results or []:
-        t, s = _extract(res)
+        t, s, p = _extract(res)
         texts.extend(t)
         scores.extend(s)
+        polys.extend(p)
+
+    def _box(poly):
+        try:
+            return [[float(x), float(y)] for x, y in poly]
+        except Exception:  # noqa: BLE001
+            return []
 
     conf = float(sum(scores) / len(scores)) if scores else 0.0
-    lines = [{"text": str(t), "score": float(s) if i < len(scores) else 0.0}
-             for i, (t, s) in enumerate(zip(texts, scores + [0.0] * len(texts)))]
+    lines = []
+    for i, t in enumerate(texts):
+        s = float(scores[i]) if i < len(scores) else 0.0
+        box = _box(polys[i]) if i < len(polys) else []
+        lines.append({"text": str(t), "score": s, "box": box})
     return {"text": "\n".join(str(t) for t in texts), "confidence": conf, "lines": lines}

@@ -1,25 +1,28 @@
 /**
- * Módulo `document` — cédula PY (§6.c/§7).
+ * Módulo `document` — cédula PY (§6.c/§7). REESCRITO: extracción por OCR del
+ * FRENTE/DORSO como DATO AUTORITATIVO (Opción 1).
  *
- * Contrato (spec §6): document(front, back) → {mrz, barcode, ocr, docFaceCrop,
- * authenticity{consistent, checks[]}, passed}. Rechazo duro si inconsistente/vencido.
+ * Contrato (spec §6): document(front, back) → {mrz, barcode, ocr, extracted,
+ * docFaceCrop, authenticity{consistent, checks[]}, passed}.
  *
- * Fuentes:
- *   - MRZ TD1 (dorso): OCR de las 3 líneas + parser `mrz` (ICAO 9303) → FUENTE
- *     AUTORITATIVA legible-por-máquina (§3.13). Dígitos verificadores incluidos.
- *   - Barcode 1D Code128 (dorso): `@zxing/library` → serial, cruce con Nº del frente.
- *   - OCR visual (frente): PaddleOCR (sidecar Python) → datos legibles + recorte foto.
+ * Cambio clave de estrategia:
+ *   - FUENTE AUTORITATIVA = campos impresos del documento, leídos por OCR y
+ *     ANCLADOS POR POSICIÓN a sus etiquetas (el valor está DEBAJO de la etiqueta,
+ *     salvo "Nº" que está a la derecha). Frente + dorso.
+ *   - MRZ TD1 (dorso) = BEST-EFFORT: guardamos las 3 líneas crudas; si el parser
+ *     `mrz` valida, sumamos paisCodigo y consistencia SOFT. El MRZ ya NO decide
+ *     el resultado (los dígitos verificadores no son hard-fail).
  *   - docFaceCrop: la foto del titular recortada del frente (engine SCRFD) para el match.
  *
- * Autenticidad por CRUCE (no peritaje físico, §13): MRZ↔OCR (nombre/Nº/fecha) +
- * dígitos verificadores del MRZ + no-vencimiento. consistent = todos los cruces OK.
+ * Autenticidad (§6.c): `passed`/`consistent` exigen los campos impresos requeridos
+ * presentes + documento no vencido + foto recortable. Los cruces MRZ↔frente son
+ * SOFT (informativos), nunca bloquean.
  *
- * FAIL-CLOSED: si el OCR de las líneas MRZ no se obtiene, o el sidecar OCR está
- * caído, o el parser falla, el documento NO pasa (passed=false) → el pipeline lo
- * trata como rejected. Un sidecar caído nunca produce un documento "válido".
+ * FAIL-CLOSED: ante excepción/dato faltante el campo queda vacío y passed=false;
+ * nunca se inventan datos. Un sidecar OCR caído nunca produce un documento "válido".
  *
- * Inyección: el cliente OCR y el lector MRZ/barcode se reciben para poder testear
- * el módulo sin sidecar ni binarios nativos.
+ * Inyección: el cliente OCR, el lector MRZ y el de barcode se reciben para poder
+ * testear el módulo sin sidecar ni binarios nativos.
  */
 import sharp from "sharp";
 import type { Engine, Face } from "../engine";
@@ -29,8 +32,10 @@ import type {
   BarcodeData,
   DocFaceCrop,
   DocumentResult,
+  ExtractedDocument,
   MrzData,
   OcrData,
+  OcrLine,
 } from "../types";
 import { OCR_SIDECAR_URL } from "../config";
 
@@ -38,9 +43,17 @@ import { OCR_SIDECAR_URL } from "../config";
 // Puertos inyectables (contratos mínimos) — implementaciones reales más abajo.
 // ---------------------------------------------------------------------------
 
-/** Cliente OCR: dado un JPEG/PNG, devuelve texto + confianza (PaddleOCR sidecar). */
+/** Resultado crudo del OCR: texto completo, confianza y líneas con caja. */
+export interface OcrResult {
+  rawText: string;
+  confidence: number;
+  /** Líneas con caja (4 esquinas en píxeles). Vacío si el sidecar no las trae. */
+  lines: OcrLine[];
+}
+
+/** Cliente OCR: dado un JPEG/PNG, devuelve texto + confianza + líneas (PaddleOCR sidecar). */
 export interface OcrClient {
-  recognize(image: Buffer): Promise<{ rawText: string; confidence: number }>;
+  recognize(image: Buffer): Promise<OcrResult>;
 }
 
 /** Lector de MRZ: extrae las 3 líneas TD1 crudas del dorso (OCR-B). */
@@ -61,7 +74,7 @@ export interface BarcodeReader {
 export class PaddleOcrClient implements OcrClient {
   constructor(private baseUrl: string = OCR_SIDECAR_URL) {}
 
-  async recognize(image: Buffer): Promise<{ rawText: string; confidence: number }> {
+  async recognize(image: Buffer): Promise<OcrResult> {
     const res = await fetch(`${this.baseUrl}/ocr`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -70,12 +83,48 @@ export class PaddleOcrClient implements OcrClient {
     if (!res.ok) {
       throw new Error(`OCR sidecar HTTP ${res.status}`);
     }
-    const data = (await res.json()) as { text?: string; confidence?: number };
+    const data = (await res.json()) as {
+      text?: string;
+      confidence?: number;
+      lines?: Array<{ text?: unknown; score?: unknown; box?: unknown }>;
+    };
     return {
       rawText: data.text ?? "",
       confidence: typeof data.confidence === "number" ? data.confidence : 0,
+      lines: normalizeLines(data.lines),
     };
   }
+}
+
+/**
+ * Normaliza las líneas crudas del sidecar a `OcrLine[]`. Descarta cajas
+ * malformadas (sin 4 esquinas numéricas) — el anclaje por posición necesita
+ * cajas válidas; una caja basura es peor que ninguna.
+ */
+function normalizeLines(
+  raw: Array<{ text?: unknown; score?: unknown; box?: unknown }> | undefined
+): OcrLine[] {
+  if (!Array.isArray(raw)) return [];
+  const out: OcrLine[] = [];
+  for (const l of raw) {
+    const text = typeof l.text === "string" ? l.text : "";
+    const score = typeof l.score === "number" ? l.score : 0;
+    const box = l.box;
+    if (!Array.isArray(box) || box.length < 4) continue;
+    const corners = box.slice(0, 4).map((p) => {
+      if (!Array.isArray(p) || p.length < 2) return null;
+      const x = Number(p[0]);
+      const y = Number(p[1]);
+      return Number.isFinite(x) && Number.isFinite(y) ? ([x, y] as [number, number]) : null;
+    });
+    if (corners.some((c) => c === null)) continue;
+    out.push({
+      text,
+      score,
+      box: corners as OcrLine["box"],
+    });
+  }
+  return out;
 }
 
 /** Ordena 3 líneas MRZ TD1 por estructura (NO alfabéticamente). */
@@ -90,16 +139,27 @@ function orderTd1(lines: string[]): string[] {
   return rest.length >= 2 ? [rest[0], rest[1], nameLine] : lines;
 }
 
-/** MRZ por OCR del dorso: usa el sidecar y quita ruido para aislar 3 líneas de 30 chars. */
+/**
+ * MRZ por OCR del dorso. Filtro de candidatas MEJORADO:
+ *   - una línea TD1 tiene ~30 chars (alfabeto MRZ A-Z0-9<);
+ *   - se EXCLUYEN rótulos: puras letras (sin dígitos ni `<`) y < 28 chars
+ *     (p.ej. "JEFEDPTOIDENTIFICACIONES").
+ * El OCR confunde `<`↔`C`/`K`: NO intentamos arreglarlo; guardamos crudo.
+ *
+ * Acepta un `OcrResult` ya calculado (para no OCR-ear el dorso dos veces): si se
+ * provee, lo usa; si no, llama al sidecar.
+ */
 export class OcrMrzReader implements MrzReader {
-  async readLines(back: Buffer, ocr: OcrClient): Promise<string[]> {
-    const { rawText } = await ocr.recognize(back);
+  async readLines(back: Buffer, ocr: OcrClient, pre?: OcrResult): Promise<string[]> {
+    const { rawText } = pre ?? (await ocr.recognize(back));
     const candidates = rawText
       .split(/\r?\n/)
       .map((l) => l.replace(/\s+/g, "").toUpperCase())
-      .filter((l) => /^[A-Z0-9<]{20,}$/.test(l));
-    // TD1 = 3 líneas; tomamos las 3 más largas del alfabeto MRZ y las ordenamos por
-    // estructura TD1 (NO alfabéticamente: eso intercambiaba L1/L2 y rompía el parseo).
+      .filter((l) => /^[A-Z0-9<]{20,}$/.test(l))
+      // Excluí rótulos: puras letras (ni dígitos ni `<`) y cortos (<28).
+      .filter((l) => !(/^[A-Z]+$/.test(l) && l.length < 28));
+    // TD1 = 3 líneas; tomamos las 3 más largas del alfabeto MRZ y las ordenamos
+    // por estructura TD1 (NO alfabéticamente).
     const top3 = candidates.sort((a, b) => b.length - a.length).slice(0, 3);
     return orderTd1(top3);
   }
@@ -131,7 +191,7 @@ export class ZxingBarcodeReader implements BarcodeReader {
 }
 
 // ---------------------------------------------------------------------------
-// Parsing MRZ (parser `mrz`, ICAO 9303 TD1).
+// Parsing MRZ (parser `mrz`, ICAO 9303 TD1). BEST-EFFORT — no decide passed.
 // ---------------------------------------------------------------------------
 
 const EMPTY_MRZ: MrzData = {
@@ -158,12 +218,8 @@ const EMPTY_MRZ: MrzData = {
  * YYMMDD (MRZ) → ISO 8601 YYYY-MM-DD. Ventana de siglo simple.
  *
  * SUPOSICIÓN DE SIGLO (MRZ trae sólo 2 dígitos de año):
- *   - Expiración (`isExpiry=true`): SIEMPRE 20xx. Una cédula vigente caduca en este
- *     siglo; no existen vencimientos en 19xx en circulación.
+ *   - Expiración (`isExpiry=true`): SIEMPRE 20xx (no hay vencimientos 19xx vigentes).
  *   - Nacimiento (`isExpiry=false`): pivote en el año-actual de 2 dígitos `now`.
- *     `yy > now` ⇒ 19xx (p.ej. con now=26, '90' → 1990); en otro caso 20xx
- *     (p.ej. '10' → 2010). Limitación conocida: no distingue centenarios (alguien
- *     nacido en 2026 vs un futuro 19xx imposible); suficiente para cédula adulta.
  */
 function mrzDateToIso(yymmdd: string | null | undefined, isExpiry: boolean): string {
   if (!yymmdd || !/^\d{6}$/.test(yymmdd)) return "";
@@ -177,8 +233,7 @@ function mrzDateToIso(yymmdd: string | null | undefined, isExpiry: boolean): str
 
 /**
  * Forma mínima del resultado de `mrz`.parse() que consumimos (ICAO 9303). Tipamos
- * el borde del import dinámico contra esta interfaz propia (no dependemos del .d.ts
- * del paquete) y normalizamos de inmediato a nuestro MrzData.
+ * el borde del import dinámico contra esta interfaz propia.
  */
 interface MrzParseResult {
   valid: boolean;
@@ -224,6 +279,354 @@ async function parseMrz(lines: string[]): Promise<MrzData> {
 }
 
 // ---------------------------------------------------------------------------
+// Anclaje por posición de los campos impresos (FUENTE AUTORITATIVA).
+// ---------------------------------------------------------------------------
+
+/** Una línea OCR con su centro precomputado (cx, cy) en píxeles. */
+interface AnchorLine {
+  text: string;
+  score: number;
+  cx: number;
+  cy: number;
+  /** Ancho/alto aproximados de la caja (para tolerancias). */
+  w: number;
+  h: number;
+}
+
+/** Centro y dimensiones de una caja de 4 esquinas. */
+function toAnchorLines(lines: OcrLine[]): AnchorLine[] {
+  return lines.map((l) => {
+    const xs = l.box.map((p) => p[0]);
+    const ys = l.box.map((p) => p[1]);
+    const minX = Math.min(...xs);
+    const maxX = Math.max(...xs);
+    const minY = Math.min(...ys);
+    const maxY = Math.max(...ys);
+    return {
+      text: l.text,
+      score: l.score,
+      cx: (minX + maxX) / 2,
+      cy: (minY + maxY) / 2,
+      w: maxX - minX,
+      h: maxY - minY,
+    };
+  });
+}
+
+/** Normaliza para comparar etiquetas/textos: sin acentos, mayúsculas, sin símbolos. */
+function canon(s: string): string {
+  return s
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .toUpperCase()
+    .replace(/[^A-Z0-9 ]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/** ¿`text` es (o contiene) la etiqueta `label`? Comparación canónica. */
+function isLabel(text: string, label: string): boolean {
+  const t = canon(text);
+  const l = canon(label);
+  return t === l || t.includes(l);
+}
+
+/** Encuentra la línea-etiqueta que matchea `label` (la de mayor score). */
+function findLabel(lines: AnchorLine[], label: string): AnchorLine | undefined {
+  return lines
+    .filter((l) => isLabel(l.text, label))
+    .sort((a, b) => b.score - a.score)[0];
+}
+
+/**
+ * Valor anclado DEBAJO de una etiqueta: la línea cuyo centro está más abajo
+ * (cy mayor) y razonablemente alineada en X con la etiqueta, la más cercana
+ * hacia abajo. Excluye otras etiquetas conocidas (no devolvemos un rótulo).
+ */
+function valueBelow(
+  lines: AnchorLine[],
+  label: AnchorLine,
+  opts: {
+    maxDx?: number;
+    maxDy?: number;
+    minScore?: number;
+    exclude?: AnchorLine[];
+    /**
+     * Predicado de FORMA esperada del valor. El frente de la cédula PY tiene un
+     * fondo de guilloche/watermark que el OCR fragmenta en ruido ("CAL", "WAL",
+     * "AYREPUBLIC"...) salpicado entre la etiqueta y su valor real. Sin filtro,
+     * `valueBelow` devuelve el fragmento de ruido más cercano en Y. Con `accept`,
+     * se devuelve el candidato MÁS CERCANO que pasa el predicado, saltando el ruido.
+     * Si no se provee, se acepta cualquier texto (comportamiento histórico).
+     */
+    accept?: (text: string) => boolean;
+  } = {}
+): string {
+  const maxDx = opts.maxDx ?? 280;
+  const maxDy = opts.maxDy ?? 220;
+  const minScore = opts.minScore ?? 0.3;
+  const exclude = new Set(opts.exclude ?? []);
+  const accept = opts.accept;
+  const candidates = lines
+    .filter((l) => l !== label && !exclude.has(l))
+    .filter((l) => l.score >= minScore)
+    .filter((l) => l.cy > label.cy) // debajo
+    .filter((l) => l.cy - label.cy <= maxDy)
+    .filter((l) => Math.abs(l.cx - label.cx) <= maxDx)
+    .filter((l) => (accept ? accept(l.text) : true))
+    .sort((a, b) => a.cy - b.cy); // la más cercana hacia abajo primero
+  return candidates[0]?.text.trim() ?? "";
+}
+
+/** Atajo: localiza la etiqueta y devuelve su valor-debajo (o "" si no hay). */
+function fieldBelow(
+  lines: AnchorLine[],
+  label: string,
+  labels: AnchorLine[],
+  opts?: { maxDx?: number; maxDy?: number; minScore?: number; accept?: (text: string) => boolean }
+): string {
+  const lbl = findLabel(lines, label);
+  if (!lbl) return "";
+  return valueBelow(lines, lbl, { ...opts, exclude: labels });
+}
+
+/** Valor a la DERECHA en la misma fila (para "Nº": dígitos a la derecha del rótulo). */
+function valueRight(
+  lines: AnchorLine[],
+  anchor: AnchorLine,
+  test: (t: string) => boolean,
+  opts: { maxDy?: number; minScore?: number } = {}
+): string {
+  const maxDy = opts.maxDy ?? 60;
+  const minScore = opts.minScore ?? 0.3;
+  const candidates = lines
+    .filter((l) => l !== anchor && l.score >= minScore)
+    .filter((l) => Math.abs(l.cy - anchor.cy) <= maxDy)
+    .filter((l) => l.cx > anchor.cx)
+    .filter((l) => test(l.text))
+    .sort((a, b) => a.cx - b.cx);
+  return candidates[0]?.text.trim() ?? "";
+}
+
+/** ¿El texto contiene una fecha impresa DD-MM-YYYY (o con / .)? */
+function looksLikeDate(s: string): boolean {
+  return /\d{2}[\/.\-]\d{2}[\/.\-]\d{4}/.test(s);
+}
+
+/** "DD-MM-YYYY" (o con / .) → ISO "YYYY-MM-DD". "" si no matchea. */
+function printedDateToIso(s: string): string {
+  const m = s.match(/(\d{2})[\/.\-](\d{2})[\/.\-](\d{4})/);
+  if (!m) return "";
+  return `${m[3]}-${m[2]}-${m[1]}`;
+}
+
+/** Etiquetas conocidas del frente y dorso (para excluirlas como valores). */
+const KNOWN_LABELS = [
+  "APELLIDOS",
+  "NOMBRES",
+  "FECHA DE VENCIMIENTO",
+  "FECHA DE NACIMIENTO",
+  "SEXO",
+  "DONANTE",
+  "LUGAR DE NACIMIENTO",
+  "NACIONALIDAD",
+  "ESTADO CIVIL",
+  "FECHA DE EMISION",
+  "REPUBLICA DEL PARAGUAY",
+  "CEDULA DE IDENTIDAD CIVIL",
+  "IDENTIDAD CIVIL",
+];
+
+function collectKnownLabels(lines: AnchorLine[]): AnchorLine[] {
+  const out: AnchorLine[] = [];
+  for (const lbl of KNOWN_LABELS) {
+    const found = findLabel(lines, lbl);
+    if (found) out.push(found);
+  }
+  return out;
+}
+
+/** Estructura vacía de extracción (fail-closed): todos los campos en blanco. */
+function emptyExtracted(): ExtractedDocument {
+  return {
+    documento: { pais: "", tipo: "", numeroCedula: "", specimen: false },
+    titular: {
+      apellidos: "",
+      nombres: "",
+      fechaNacimiento: "",
+      sexo: "",
+      lugarNacimiento: { ciudad: "", departamento: "" },
+      nacionalidad: "PARAGUAYA",
+      estadoCivil: "",
+      donante: false,
+      firma: "Sin firma",
+    },
+    documentoFisico: { fechaEmision: "", fechaVencimiento: "", chip: true, codigoBarras: false },
+    registroInterno: { ic: "", ubicacion: "" },
+    autoridadEmisora: { nombre: "", cargo: "", dependencia: "" },
+    mrz: { linea1: "", linea2: "", linea3: "", paisCodigo: "" },
+  };
+}
+
+/**
+ * Extrae los campos del FRENTE por anclaje posición→etiqueta (FUENTE AUTORITATIVA).
+ * Best-effort: cada campo se setea sólo si su ancla existe; lo demás queda en blanco.
+ */
+function extractFront(frontLines: OcrLine[], extracted: ExtractedDocument): void {
+  const lines = toAnchorLines(frontLines);
+  const labels = collectKnownLabels(lines);
+
+  // País / tipo: presencia textual (watermarks/rótulos). Canon tolera acentos/símbolos.
+  const allText = lines.map((l) => canon(l.text)).join(" ");
+  if (/REPUBLICA DEL PARAGUAY/.test(allText)) {
+    extracted.documento.pais = "REPUBLICA DEL PARAGUAY";
+  }
+  if (/IDENTIDAD CIVIL/.test(allText)) {
+    extracted.documento.tipo = "Cedula de Identidad Civil";
+  }
+  // Specimen: muestras llevan la palabra "SPECIMEN"/"MUESTRA".
+  extracted.documento.specimen = /\bSPECIMEN\b|\bMUESTRA\b/.test(allText);
+
+  // Apellidos / Nombres (valor debajo de la etiqueta). Sólo letras válidas.
+  const apellidos = cleanName(fieldBelow(lines, "APELLIDOS", labels));
+  if (apellidos) extracted.titular.apellidos = apellidos;
+  const nombres = cleanName(fieldBelow(lines, "NOMBRES", labels));
+  if (nombres) extracted.titular.nombres = nombres;
+
+  // Fecha de vencimiento. `accept` salta fragmentos de guilloche: sólo acepta el
+  // candidato con forma DD-MM-YYYY.
+  const venc = printedDateToIso(
+    fieldBelow(lines, "FECHA DE VENCIMIENTO", labels, { accept: looksLikeDate })
+  );
+  if (venc) extracted.documentoFisico.fechaVencimiento = venc;
+
+  // Fecha de nacimiento. Idem: el valor "13-11-1997" está debajo, con ruido en medio.
+  const nac = printedDateToIso(
+    fieldBelow(lines, "FECHA DE NACIMIENTO", labels, { accept: looksLikeDate })
+  );
+  if (nac) extracted.titular.fechaNacimiento = nac;
+
+  // Sexo (MASCULINO/FEMENINO). El fragmento de watermark "CAL" queda más cerca en Y
+  // que "MASCULINO"; `accept` lo descarta y toma el valor real.
+  const sexoRaw = canon(
+    fieldBelow(lines, "SEXO", labels, { accept: (t) => /MASCULINO|FEMENINO/.test(canon(t)) })
+  );
+  if (/MASCULINO|FEMENINO/.test(sexoRaw)) {
+    extracted.titular.sexo = sexoRaw.includes("FEM") ? "FEMENINO" : "MASCULINO";
+  }
+
+  // Donante (SI/NO).
+  const donanteRaw = canon(fieldBelow(lines, "DONANTE", labels));
+  if (donanteRaw === "SI" || donanteRaw === "NO") {
+    extracted.titular.donante = donanteRaw === "SI";
+  }
+
+  // Lugar de nacimiento: "CIUDAD-DEPARTAMENTO" (splitea por "-" si está).
+  const lugar = fieldBelow(lines, "LUGAR DE NACIMIENTO", labels);
+  if (lugar) {
+    const parts = lugar.split(/\s*-\s*/);
+    extracted.titular.lugarNacimiento.ciudad = (parts[0] ?? "").trim();
+    extracted.titular.lugarNacimiento.departamento = (parts[1] ?? "").trim();
+  }
+
+  // Nº de cédula: el rótulo "Nº"/"No" con los dígitos a la DERECHA, en la misma fila.
+  const noLabel = lines
+    .filter((l) => /^N[º°O]?\.?$/i.test(l.text.trim()) || canon(l.text) === "NO")
+    .sort((a, b) => b.score - a.score)[0];
+  if (noLabel) {
+    const num = valueRight(lines, noLabel, (t) => /\d{5,8}/.test(t.replace(/\D/g, "")));
+    const digits = num.replace(/\D/g, "");
+    if (digits.length >= 5) extracted.documento.numeroCedula = digits;
+  }
+  // Fallback: si no encontramos por ancla "Nº", buscamos una línea de 6-8 dígitos
+  // que NO sea una fecha (heurística defensiva, sólo si quedó vacío). Excluimos
+  // tokens con forma DD-MM-YYYY: "12-07-2033" colapsa a "12072033" (8 dígitos) y
+  // robaría el lugar del Nº real.
+  if (!extracted.documento.numeroCedula) {
+    const cand = lines
+      .filter((l) => !/\d{2}[\/.\-]\d{2}[\/.\-]\d{4}/.test(l.text))
+      .map((l) => l.text.replace(/\D/g, ""))
+      .find((d) => d.length >= 6 && d.length <= 8);
+    if (cand) extracted.documento.numeroCedula = cand;
+  }
+}
+
+/**
+ * Extrae los campos del DORSO por anclaje (mismo patrón). Best-effort.
+ */
+function extractBack(backLines: OcrLine[], extracted: ExtractedDocument): void {
+  const lines = toAnchorLines(backLines);
+  const labels = collectKnownLabels(lines);
+  const allText = lines.map((l) => canon(l.text)).join(" ");
+
+  // Estado civil (SOL/CAS/VIU/DIV — habitualmente abreviado).
+  const estado = canon(fieldBelow(lines, "ESTADO CIVIL", labels));
+  if (estado) extracted.titular.estadoCivil = estado.split(" ")[0];
+
+  // Nacionalidad.
+  const nacio = canon(fieldBelow(lines, "NACIONALIDAD", labels));
+  if (nacio) extracted.titular.nacionalidad = nacio;
+
+  // Fecha de emisión.
+  const emis = printedDateToIso(fieldBelow(lines, "FECHA DE EMISION", labels));
+  if (emis) extracted.documentoFisico.fechaEmision = emis;
+
+  // IC: formato 999-9999999-999-999.
+  const icMatch = allText.replace(/\s+/g, "").match(/\d{3}-?\d{7}-?\d{3}-?\d{3}/);
+  // El allText canónico quitó los guiones; buscamos sobre el texto crudo concatenado.
+  const rawJoin = lines.map((l) => l.text).join(" ");
+  const ic = rawJoin.match(/\d{3}-\d{7}-\d{3}-\d{3}/);
+  if (ic) extracted.registroInterno.ic = ic[0];
+  else if (icMatch) extracted.registroInterno.ic = icMatch[0];
+
+  // Ubicación: formato PN-...
+  const ubi = rawJoin.match(/\bP[NM]-[A-Z0-9\-]+/i);
+  if (ubi) extracted.registroInterno.ubicacion = ubi[0].toUpperCase();
+
+  // Código de barras: texto "AA"+dígitos presente → true.
+  extracted.documentoFisico.codigoBarras = /\bA{2}\d{3,}/.test(rawJoin.replace(/\s+/g, ""));
+
+  // Autoridad emisora: líneas arriba-derecha del dorso (nombre/cargo/dependencia).
+  // Heurística: las líneas con más texto en la mitad derecha y parte superior.
+  extractAuthority(lines, extracted);
+}
+
+/**
+ * Autoridad emisora: tomamos las líneas de la zona superior-derecha que no sean
+ * etiquetas/valores ya consumidos y que parezcan nombre/cargo/dependencia.
+ * Heurística tolerante (best-effort): firma con cargo policial ("COMISARIO"),
+ * dependencia ("JEFE DPTO"/"IDENTIFICACIONES") y el nombre propio.
+ */
+function extractAuthority(lines: AnchorLine[], extracted: ExtractedDocument): void {
+  const dependencia = lines.find((l) => /JEFE|DPTO|IDENTIFICACION/.test(canon(l.text)));
+  if (dependencia) extracted.autoridadEmisora.dependencia = dependencia.text.trim();
+  const cargo = lines.find((l) => /COMISARIO|PRINCIPAL|MCP|OFICIAL/.test(canon(l.text)));
+  if (cargo) extracted.autoridadEmisora.cargo = cargo.text.trim();
+  // El nombre: una línea de 2-3 palabras alfabéticas cercana al cargo, distinta de él.
+  if (cargo) {
+    const nameCand = lines
+      .filter((l) => l !== cargo && l !== dependencia)
+      .filter((l) => Math.abs(l.cy - cargo.cy) <= 180)
+      .filter((l) => /^[A-Za-zÀ-ſ ]{4,40}$/.test(l.text.trim()))
+      .filter((l) => !/COMISARIO|JEFE|DPTO|IDENTIFICACION|REPUBLICA|PARAGUAY/.test(canon(l.text)))
+      .sort((a, b) => a.cy - b.cy)[0];
+    if (nameCand) extracted.autoridadEmisora.nombre = nameCand.text.trim();
+  }
+}
+
+/** Limpia un valor de nombre: sólo letras/espacios, recorta basura, mínimo 2 chars. */
+function cleanName(s: string): string {
+  const v = s
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .replace(/[^A-Za-z ]+.*$/s, "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .toUpperCase();
+  return v.length >= 2 ? v : "";
+}
+
+// ---------------------------------------------------------------------------
 // Recorte de la foto del titular (frente) vía SCRFD.
 // ---------------------------------------------------------------------------
 
@@ -259,7 +662,7 @@ async function cropDocFace(front: Buffer, engine: Engine): Promise<DocFaceCrop |
 }
 
 // ---------------------------------------------------------------------------
-// Autenticidad por cruce (§6.c).
+// Autenticidad por cruce (§6.c) — MRZ ya NO bloquea.
 // ---------------------------------------------------------------------------
 
 function norm(s: string): string {
@@ -270,154 +673,156 @@ function norm(s: string): string {
     .toUpperCase();
 }
 
+/** Fin-del-día de una fecha ISO ≥ ahora (vigente todo el día de vencimiento). */
+function notExpired(iso: string): boolean {
+  return iso !== "" && new Date(`${iso}T23:59:59.999Z`) >= new Date();
+}
+
 /**
- * Cruce de autenticidad (§6.c). Modelo duro/blando:
+ * Cruce de autenticidad (§6.c) REESCRITO. Modelo:
  *
- *   - DUROS (siempre cuentan para `consistent`): los cruces MRZ-intrínsecos
- *     `check_digits` (dígitos verificadores ICAO) y `not_expired`. Son la garantía
- *     de que `consistent` nunca puede ser vacuamente-true.
- *   - DUROS CONDICIONALES: `doc_number_match` y `mrz_vs_ocr_name` cuentan SOLO si el
- *     OCR del frente aportó el dato (Nº/apellido). Si el OCR no lo devolvió, el cruce
- *     se trata como NO-DISPONIBLE (soft) y NO reprueba — un documento genuino con MRZ
- *     válido puede llegar a `consistent=true` aunque el OCR del frente venga pobre.
- *     Cuando el dato SÍ está y no cuadra, sí reprueba (anti-falsificación).
- *   - BLANDO: `barcode_vs_doc_number` (best-effort; el barcode puede no leerse).
+ *   - DUROS (cuentan para `consistent`): campos impresos REQUERIDOS presentes
+ *     (apellidos, nombres, numeroCedula, fechaNacimiento, fechaVencimiento) +
+ *     documento no vencido. Esto es exactamente la base de `passed`.
+ *   - SOFT (informativos, NO bloquean): consistencia MRZ↔frente (nombre/Nº) SOLO
+ *     si el MRZ parseó válido. Nunca reprueban — el MRZ es best-effort.
  *
- * Exportada para test (verifica el camino verified del propio módulo).
+ * Exportada para test.
  */
-export function crossCheck(mrz: MrzData, ocr: OcrData, barcode: BarcodeData): Authenticity {
+export function crossCheck(
+  extracted: ExtractedDocument,
+  mrz: MrzData,
+  barcode: BarcodeData
+): Authenticity {
   const checks: AuthenticityCheck[] = [];
-  // Cruces que cuentan para `consistent`. Arrancamos con los DUROS intrínsecos del
-  // MRZ → garantiza que `hard` nunca esté vacío (evita vacuous-true).
   const hard: boolean[] = [];
 
-  // 1) Dígitos verificadores del MRZ (auto-consistencia ICAO 9303). DURO.
+  // 1) Campos impresos requeridos presentes. DURO.
+  const required: Array<[string, string]> = [
+    ["apellidos", extracted.titular.apellidos],
+    ["nombres", extracted.titular.nombres],
+    ["numeroCedula", extracted.documento.numeroCedula],
+    ["fechaNacimiento", extracted.titular.fechaNacimiento],
+    ["fechaVencimiento", extracted.documentoFisico.fechaVencimiento],
+  ];
+  const missing = required.filter(([, v]) => !v).map(([k]) => k);
   checks.push({
-    name: "check_digits",
-    passed: mrz.valid,
-    detail: mrz.valid ? "MRZ check digits OK" : "MRZ check digits inválidos",
+    name: "printed_fields_present",
+    passed: missing.length === 0,
+    detail: missing.length ? `faltan: ${missing.join(",")}` : "campos impresos OK",
   });
-  hard.push(mrz.valid);
+  hard.push(missing.length === 0);
 
-  // 2) No vencido. DURO. Comparamos contra el FIN DEL DÍA (UTC) de la fecha de
-  // vencimiento: un documento que vence HOY sigue vigente todo el día (no a las 00:00).
-  const notExpired =
-    mrz.expirationDate !== "" &&
-    new Date(`${mrz.expirationDate}T23:59:59.999Z`) >= new Date();
+  // 2) No vencido (campo impreso autoritativo). DURO.
+  const exp = extracted.documentoFisico.fechaVencimiento;
+  const live = notExpired(exp);
   checks.push({
     name: "not_expired",
-    passed: notExpired,
-    detail: `expira=${mrz.expirationDate || "?"}`,
+    passed: live,
+    detail: `vence=${exp || "?"}`,
   });
-  hard.push(notExpired);
+  hard.push(live);
 
-  // 3) Nº de documento MRZ ↔ OCR del frente. DURO sólo si el OCR aportó el Nº.
-  const ocrNum = ocr.fields.documentNumber ? norm(ocr.fields.documentNumber) : "";
-  const mrzNum = norm(mrz.documentNumber);
-  if (ocrNum) {
-    const docNumMatch = !!mrzNum && (mrzNum.includes(ocrNum) || ocrNum.includes(mrzNum));
-    checks.push({
-      name: "doc_number_match",
-      passed: docNumMatch,
-      detail: `mrz=${mrz.documentNumber} ocr=${ocr.fields.documentNumber ?? "?"}`,
-    });
-    hard.push(docNumMatch);
-  } else {
-    checks.push({
-      name: "doc_number_match",
-      passed: true,
-      detail: "no disponible (OCR frente sin Nº) — soft",
-    });
+  // 3) MRZ check-digits. SOFT (informativo) — NO entra en `hard`.
+  checks.push({
+    name: "mrz_check_digits",
+    passed: mrz.valid,
+    detail: mrz.valid ? "MRZ check digits OK" : "MRZ no validó (best-effort)",
+  });
+
+  // 4) Cruces MRZ↔frente SÓLO si el MRZ parseó válido. SOFT.
+  if (mrz.valid) {
+    const ocrNum = norm(extracted.documento.numeroCedula);
+    const mrzNum = norm(mrz.documentNumber);
+    if (ocrNum && mrzNum) {
+      const m = mrzNum.includes(ocrNum) || ocrNum.includes(mrzNum);
+      checks.push({
+        name: "mrz_vs_front_number",
+        passed: m,
+        detail: `mrz=${mrz.documentNumber} front=${extracted.documento.numeroCedula}`,
+      });
+    }
+    const ocrSur = norm(extracted.titular.apellidos);
+    const mrzSur = norm(mrz.surname);
+    if (ocrSur && mrzSur) {
+      const m = mrzSur.includes(ocrSur) || ocrSur.includes(mrzSur);
+      checks.push({
+        name: "mrz_vs_front_name",
+        passed: m,
+        detail: `mrz=${mrz.surname} front=${extracted.titular.apellidos}`,
+      });
+    }
   }
 
-  // 4) Apellido MRZ ↔ OCR. DURO sólo si el OCR aportó el apellido.
-  const ocrSurname = ocr.fields.surname ? norm(ocr.fields.surname) : "";
-  const mrzSurname = norm(mrz.surname);
-  if (ocrSurname) {
-    const nameMatch =
-      !!mrzSurname && (mrzSurname.includes(ocrSurname) || ocrSurname.includes(mrzSurname));
-    checks.push({
-      name: "mrz_vs_ocr_name",
-      passed: nameMatch,
-      detail: `mrz=${mrz.surname} ocr=${ocr.fields.surname ?? "?"}`,
-    });
-    hard.push(nameMatch);
-  } else {
-    checks.push({
-      name: "mrz_vs_ocr_name",
-      passed: true,
-      detail: "no disponible (OCR frente sin apellido) — soft",
-    });
-  }
-
-  // 5) Serial del barcode ↔ Nº de documento (cruce dorso↔frente). BLANDO.
+  // 5) Barcode ↔ Nº. SOFT.
   if (barcode.text) {
     const bc = norm(barcode.text);
-    const serialMatch = bc.includes(mrzNum) || mrzNum.includes(bc);
+    const num = norm(extracted.documento.numeroCedula);
     checks.push({
-      name: "barcode_vs_doc_number",
-      passed: serialMatch,
+      name: "barcode_vs_number",
+      passed: !!num && (bc.includes(num) || num.includes(bc)),
       detail: `barcode=${barcode.text}`,
     });
   }
 
-  // consistent = todos los cruces DUROS pasan. `hard` siempre contiene al menos
-  // check_digits + not_expired, así que nunca es vacuamente-true.
+  // consistent = sólo los cruces DUROS (impresos presentes + no vencido).
+  // Los SOFT (MRZ/barcode) nunca bloquean.
   const consistent = hard.every((p) => p);
   return { consistent, checks };
 }
 
 // ---------------------------------------------------------------------------
-// Orquestación del módulo.
+// Backfill de MrzData con los datos AUTORITATIVOS del frente/dorso.
 // ---------------------------------------------------------------------------
 
 /**
- * Parsea campos estructurados del texto OCR del frente (cédula PY). Best-effort.
+ * Rellena los campos de DATO de `mrz` con los valores autoritativos del OCR
+ * impreso, SIN tocar `valid`/`checkDigits`/`rawLines` (esos siguen reflejando el
+ * parseo genuino del MRZ). Razón: `pipeline.ts:extractedFrom` construye la
+ * identidad verificada desde `document.mrz` (ci/nombre/fechaNac/nacionalidad). Si
+ * el MRZ vino basura pero el frente es bueno, la identidad debe persistir igual.
  *
- * Nombres (surname/givenNames): se extraen SOLO si se puede anclar la línea a las
- * etiquetas del frente ("APELLIDOS"/"NOMBRES", insensible a acentos). Si no hay
- * ancla confiable, los nombres quedan SIN setear — deliberadamente: un nombre OCR
- * presente-pero-errado convierte el cruce 'mrz_vs_ocr_name' en un check DURO que
- * reprueba (rechaza un documento genuino). Dejarlo sin setear lo trata como soft /
- * no-disponible y no bloquea (el nombre autoritativo sale del MRZ del dorso).
- *
- * NOTA: exportado para test (cruce/parse del propio módulo).
+ * Debe llamarse DESPUÉS de `crossCheck` (que compara el MRZ genuino vs frente).
  */
-export function parseOcrFields(rawText: string): OcrData["fields"] {
-  const fields: OcrData["fields"] = {};
-  const numMatch = rawText.match(/\b(\d{6,8})\b/);
-  if (numMatch) fields.documentNumber = numMatch[1];
-  const dateMatches = rawText.match(/\b(\d{2}[\/.-]\d{2}[\/.-]\d{4})\b/g);
-  if (dateMatches && dateMatches.length >= 1) {
-    const toIso = (d: string) => {
-      const [dd, mm, yyyy] = d.split(/[\/.-]/);
-      return `${yyyy}-${mm}-${dd}`;
-    };
-    fields.dateOfBirth = toIso(dateMatches[0]);
-    if (dateMatches.length >= 2) fields.expirationDate = toIso(dateMatches[dateMatches.length - 1]);
-  }
-
-  // Nombres anclados por etiqueta. Normalizamos acentos para tolerar "APELLIDO(S)"
-  // sin tilde. Sólo letras/espacios en el valor (descartamos números/símbolos).
-  const noAccents = rawText.normalize("NFD").replace(/[̀-ͯ]/g, "");
-  const value = (re: RegExp): string | undefined => {
-    const m = noAccents.match(re);
-    if (!m) return undefined;
-    const v = m[1]
-      .replace(/[^A-Za-zÀ-ſ ]+.*$/s, "") // corta en el primer no-nombre
-      .trim()
-      .replace(/\s+/g, " ");
-    return v.length >= 2 ? v : undefined;
+function backfillMrzFromExtracted(mrz: MrzData, extracted: ExtractedDocument): MrzData {
+  return {
+    ...mrz,
+    documentNumber: extracted.documento.numeroCedula || mrz.documentNumber,
+    surname: extracted.titular.apellidos || mrz.surname,
+    givenNames: extracted.titular.nombres || mrz.givenNames,
+    dateOfBirth: extracted.titular.fechaNacimiento || mrz.dateOfBirth,
+    sex: extracted.titular.sexo || mrz.sex,
+    expirationDate: extracted.documentoFisico.fechaVencimiento || mrz.expirationDate,
+    nationality: extracted.titular.nacionalidad || mrz.nationality,
   };
-  // "APELLIDO(S): PEREZ" / "APELLIDOS GONZALEZ" (con o sin dos puntos).
-  const surname = value(/APELLIDOS?\s*:?\s*([A-Za-zÀ-ſ][^\r\n]*)/i);
-  if (surname) fields.surname = surname;
-  // "NOMBRE(S): JUAN CARLOS".
-  const given = value(/NOMBRES?\s*:?\s*([A-Za-zÀ-ſ][^\r\n]*)/i);
-  if (given) fields.givenNames = given;
+}
 
+// ---------------------------------------------------------------------------
+// Parser legacy del texto OCR del frente (compat: pipeline.ts lee ocr.fields).
+// ---------------------------------------------------------------------------
+
+/**
+ * Pobla `OcrData.fields` desde el JSON `extracted` (FUENTE AUTORITATIVA). Lo
+ * mantenemos porque `pipeline.ts` (líneas 439/464/523) sigue leyendo
+ * `ocr.fields.surname` y `ocr.confidence`. Firma compat-estable.
+ *
+ * Exportado para test.
+ */
+export function parseOcrFields(extracted: ExtractedDocument): OcrData["fields"] {
+  const fields: OcrData["fields"] = {};
+  if (extracted.documento.numeroCedula) fields.documentNumber = extracted.documento.numeroCedula;
+  if (extracted.titular.apellidos) fields.surname = extracted.titular.apellidos;
+  if (extracted.titular.nombres) fields.givenNames = extracted.titular.nombres;
+  if (extracted.titular.fechaNacimiento) fields.dateOfBirth = extracted.titular.fechaNacimiento;
+  if (extracted.documentoFisico.fechaVencimiento)
+    fields.expirationDate = extracted.documentoFisico.fechaVencimiento;
+  if (extracted.titular.nacionalidad) fields.nationality = extracted.titular.nacionalidad;
   return fields;
 }
+
+// ---------------------------------------------------------------------------
+// Orquestación del módulo.
+// ---------------------------------------------------------------------------
 
 export interface DocumentDeps {
   ocr: OcrClient;
@@ -429,29 +834,39 @@ export interface DocumentDeps {
 export class DocumentModule {
   /**
    * Ejecuta el módulo. Fail-closed: cualquier error de OCR/sidecar/parse deja
-   * passed=false (el documento no acredita nada). No lanza: convierte el fallo en
-   * un DocumentResult no-aprobado para que el pipeline lo registre como check.
+   * passed=false. No lanza: convierte el fallo en un DocumentResult no-aprobado.
    */
   async run(front: Buffer, back: Buffer, deps: DocumentDeps): Promise<DocumentResult> {
     let mrz: MrzData = { ...EMPTY_MRZ };
     let barcode: BarcodeData = { format: "", text: "" };
-    let ocr: OcrData = { rawText: "", fields: {}, confidence: 0 };
     let docFaceCrop: DocFaceCrop | null = null;
+    const extracted = emptyExtracted();
+    let frontConfidence = 0;
+    let frontRawText = "";
 
-    // OCR del frente (datos + recorte de foto).
+    // OCR del FRENTE (datos autoritativos + recorte de foto).
+    let frontOcr: OcrResult | null = null;
     try {
-      const ocrFront = await deps.ocr.recognize(front);
-      ocr = {
-        rawText: ocrFront.rawText,
-        fields: parseOcrFields(ocrFront.rawText),
-        confidence: ocrFront.confidence,
-      };
+      frontOcr = await deps.ocr.recognize(front);
+      frontConfidence = frontOcr.confidence;
+      frontRawText = frontOcr.rawText;
+      extractFront(frontOcr.lines, extracted);
     } catch (e) {
-      ocr = { rawText: "", fields: {}, confidence: 0 };
       // eslint-disable-next-line no-console
       console.warn(`[document] OCR frente falló: ${(e as Error).message}`);
     }
 
+    // OCR del DORSO (campos del dorso + reuso para MRZ — un solo OCR).
+    let backOcr: OcrResult | null = null;
+    try {
+      backOcr = await deps.ocr.recognize(back);
+      extractBack(backOcr.lines, extracted);
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.warn(`[document] OCR dorso falló: ${(e as Error).message}`);
+    }
+
+    // Recorte de la foto del titular (frente).
     try {
       docFaceCrop = await cropDocFace(front, deps.engine);
     } catch (e) {
@@ -459,25 +874,60 @@ export class DocumentModule {
       console.warn(`[document] recorte de foto falló: ${(e as Error).message}`);
     }
 
-    // MRZ del dorso (fuente autoritativa).
+    // MRZ del dorso (BEST-EFFORT). Reusa el OCR del dorso ya calculado.
     try {
-      const lines = await deps.mrzReader.readLines(back, deps.ocr);
+      const lines =
+        deps.mrzReader instanceof OcrMrzReader && backOcr
+          ? await deps.mrzReader.readLines(back, deps.ocr, backOcr)
+          : await deps.mrzReader.readLines(back, deps.ocr);
       mrz = await parseMrz(lines);
     } catch (e) {
       // eslint-disable-next-line no-console
       console.warn(`[document] lectura MRZ falló: ${(e as Error).message}`);
     }
+    // Guardamos las líneas crudas del MRZ en el JSON estructurado (best-effort).
+    extracted.mrz.linea1 = mrz.rawLines[0] ?? "";
+    extracted.mrz.linea2 = mrz.rawLines[1] ?? "";
+    extracted.mrz.linea3 = mrz.rawLines[2] ?? "";
+    // paisCodigo sólo si el MRZ parseó válido.
+    extracted.mrz.paisCodigo = mrz.valid ? mrz.issuingCountry : "";
 
-    // Barcode del dorso (serial). No bloqueante si no se lee.
+    // Barcode del dorso (serial). No bloqueante.
     try {
       barcode = await deps.barcodeReader.read(back);
     } catch {
       barcode = { format: "", text: "" };
     }
+    // Si el barcode se leyó, refuerza la presencia del código de barras.
+    if (barcode.text) extracted.documentoFisico.codigoBarras = true;
 
-    const authenticity = crossCheck(mrz, ocr, barcode);
-    // passed exige: MRZ con dígitos válidos + cruces duros consistentes + foto recortable.
-    const passed = mrz.valid && authenticity.consistent && docFaceCrop !== null;
+    // Autenticidad por cruce: compara el MRZ GENUINO contra el frente (SOFT) ANTES
+    // de hacer backfill — si no, el MRZ se compararía contra sí mismo.
+    const authenticity = crossCheck(extracted, mrz, barcode);
+
+    // Backfill de los campos de DATO del MRZ con los autoritativos del frente/dorso
+    // (mantiene `valid`/`checkDigits` honestos). Necesario para pipeline.extractedFrom.
+    mrz = backfillMrzFromExtracted(mrz, extracted);
+
+    // OcrData de compat (pipeline lee ocr.fields / ocr.confidence).
+    const ocr: OcrData = {
+      rawText: frontRawText,
+      fields: parseOcrFields(extracted),
+      confidence: frontConfidence,
+    };
+
+    // passed (CAMBIO CLAVE): campos impresos requeridos + no vencido + foto recortable.
+    // El MRZ ya NO decide.
+    const requiredPresent =
+      !!extracted.titular.apellidos &&
+      !!extracted.titular.nombres &&
+      !!extracted.documento.numeroCedula &&
+      !!extracted.titular.fechaNacimiento &&
+      !!extracted.documentoFisico.fechaVencimiento;
+    const passed =
+      requiredPresent &&
+      notExpired(extracted.documentoFisico.fechaVencimiento) &&
+      docFaceCrop !== null;
 
     return {
       documentType: "ci_py",
@@ -485,6 +935,7 @@ export class DocumentModule {
       barcode,
       ocr,
       docFaceCrop,
+      extracted,
       authenticity,
       passed,
     };

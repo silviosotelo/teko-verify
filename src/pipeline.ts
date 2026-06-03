@@ -422,10 +422,20 @@ export async function processSession(
 // Sub-rutinas.
 // ---------------------------------------------------------------------------
 
+/**
+ * Motivos de rechazo del módulo `document`. El MRZ es INFORMATIVO (best-effort):
+ * sus checks NUNCA producen motivos de rechazo. Excluimos:
+ *   - el check `mrz_check_digits` de `authenticity.checks` (depende de mrz.valid);
+ *   - el motivo legacy `doc:mrz_invalid` (eliminado por completo).
+ * Sólo los cruces DUROS (campos impresos presentes, no vencido, foto) rechazan.
+ */
+const MRZ_SOFT_CHECKS = new Set(["mrz_check_digits", "mrz_vs_front_number", "mrz_vs_front_name"]);
+
 function documentReasons(document: DocumentResult): string[] {
   const r = ["document_rejected"];
-  for (const c of document.authenticity.checks) if (!c.passed) r.push(`doc:${c.name}`);
-  if (!document.mrz.valid) r.push("doc:mrz_invalid");
+  for (const c of document.authenticity.checks) {
+    if (!c.passed && !MRZ_SOFT_CHECKS.has(c.name)) r.push(`doc:${c.name}`);
+  }
   if (!document.docFaceCrop) r.push("doc:no_face_on_document");
   return r;
 }
