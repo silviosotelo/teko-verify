@@ -420,6 +420,67 @@ function printedDateToIso(s: string): string {
   return `${m[3]}-${m[2]}-${m[1]}`;
 }
 
+/**
+ * Palabras de FONDO/ruido del frente de la cédula PY: el watermark
+ * "REPÚBLICA DEL PARAGUAY" y la guilloche se fragmentan en estas tokens
+ * (vistos en el OCR real: "DEL", "PARA", "ICA", "PAR", "AYREPUBLIC", ...).
+ * NUNCA pueden ser un apellido/nombre. Comparación canónica (sin acentos).
+ */
+const NAME_STOPWORDS = new Set([
+  "DEL",
+  "DE",
+  "LA",
+  "LAS",
+  "LOS",
+  "EL",
+  "Y",
+  "PARA",
+  "PAR",
+  "ICA",
+  "REPUBLICA",
+  "REPUBLIC",
+  "PARAGUAY",
+  "REPUBLICADELPARAGUAY",
+  "AYREPUBLIC",
+  "AYREPUBLICA",
+  "CEDULA",
+  "IDENTIDAD",
+  "CIVIL",
+  "APELLIDOS",
+  "NOMBRES",
+  "DONANTE",
+  "SEXO",
+  "FECHA",
+  "NACIMIENTO",
+  "VENCIMIENTO",
+  "LUGAR",
+]);
+
+/**
+ * Predicado de PLAUSIBILIDAD de un valor de nombre (apellidos/nombres). El fondo
+ * guilloche/watermark del frente salpica ruido entre la etiqueta y su valor real;
+ * sin este filtro `valueBelow` devuelve el fragmento más cercano en Y (p.ej. "DEL"
+ * del watermark "REPÚBLICA DEL PARAGUAY"). Un nombre real:
+ *   - tras canon, queda sólo en letras+espacios;
+ *   - cada token tiene ≥4 chars (descarta "DEL","PAR","ICA","Y"...);
+ *   - no es una stopword de fondo;
+ *   - longitud total razonable (≥4, ≤40).
+ */
+function looksLikeName(s: string): boolean {
+  const c = canon(s);
+  if (!c) return false;
+  if (!/^[A-Z ]+$/.test(c)) return false; // sólo letras y espacios
+  if (c.length < 4 || c.length > 40) return false;
+  const tokens = c.split(" ").filter(Boolean);
+  if (tokens.length === 0) return false;
+  // Al menos un token "fuerte" (≥4 chars y no-stopword); ninguna stopword sola.
+  const strong = tokens.filter((t) => t.length >= 4 && !NAME_STOPWORDS.has(t));
+  if (strong.length === 0) return false;
+  // Rechazá si el texto ENTERO colapsa a una stopword conocida.
+  if (NAME_STOPWORDS.has(c.replace(/ /g, ""))) return false;
+  return true;
+}
+
 /** Etiquetas conocidas del frente y dorso (para excluirlas como valores). */
 const KNOWN_LABELS = [
   "APELLIDOS",
@@ -487,10 +548,18 @@ function extractFront(frontLines: OcrLine[], extracted: ExtractedDocument): void
   // Specimen: muestras llevan la palabra "SPECIMEN"/"MUESTRA".
   extracted.documento.specimen = /\bSPECIMEN\b|\bMUESTRA\b/.test(allText);
 
-  // Apellidos / Nombres (valor debajo de la etiqueta). Sólo letras válidas.
-  const apellidos = cleanName(fieldBelow(lines, "APELLIDOS", labels));
+  // Apellidos / Nombres (valor debajo de la etiqueta). `accept: looksLikeName`
+  // salta el ruido del watermark/guilloche ("DEL","PARA","ICA"...) que en capturas
+  // movidas/comprimidas cae más cerca en Y que el valor real. Sin este filtro el
+  // anclaje agarraba "DEL" (de "REPÚBLICA DEL PARAGUAY") como apellido. maxDx
+  // ampliado: en la captura real el valor puede quedar levemente desalineado en X.
+  const apellidos = cleanName(
+    fieldBelow(lines, "APELLIDOS", labels, { accept: looksLikeName, maxDx: 360 })
+  );
   if (apellidos) extracted.titular.apellidos = apellidos;
-  const nombres = cleanName(fieldBelow(lines, "NOMBRES", labels));
+  const nombres = cleanName(
+    fieldBelow(lines, "NOMBRES", labels, { accept: looksLikeName, maxDx: 360 })
+  );
   if (nombres) extracted.titular.nombres = nombres;
 
   // Fecha de vencimiento. `accept` salta fragmentos de guilloche: sólo acepta el
@@ -515,8 +584,15 @@ function extractFront(frontLines: OcrLine[], extracted: ExtractedDocument): void
     extracted.titular.sexo = sexoRaw.includes("FEM") ? "FEMENINO" : "MASCULINO";
   }
 
-  // Donante (SI/NO).
-  const donanteRaw = canon(fieldBelow(lines, "DONANTE", labels));
+  // Donante (SI/NO). `accept` salta el ruido y los valores de campos vecinos que
+  // caen entre la etiqueta DONANTE y su valor (p.ej. "SILVIO ANDRES" de NOMBRES,
+  // que en la captura real se interpone en Y). Sólo acepta tokens SI/NO exactos.
+  const donanteRaw = canon(
+    fieldBelow(lines, "DONANTE", labels, {
+      accept: (t) => /^(SI|NO)$/.test(canon(t)),
+      maxDy: 260,
+    })
+  );
   if (donanteRaw === "SI" || donanteRaw === "NO") {
     extracted.titular.donante = donanteRaw === "SI";
   }
@@ -567,8 +643,12 @@ function extractBack(backLines: OcrLine[], extracted: ExtractedDocument): void {
   const nacio = canon(fieldBelow(lines, "NACIONALIDAD", labels));
   if (nacio) extracted.titular.nacionalidad = nacio;
 
-  // Fecha de emisión.
-  const emis = printedDateToIso(fieldBelow(lines, "FECHA DE EMISION", labels));
+  // Fecha de emisión. `accept: looksLikeDate` (igual que nacimiento/vencimiento):
+  // salta fragmentos de guilloche/ruido y sólo toma el candidato con forma
+  // DD-MM-YYYY. Sin este filtro el anclaje devolvía ruido y fechaEmision quedaba "".
+  const emis = printedDateToIso(
+    fieldBelow(lines, "FECHA DE EMISION", labels, { accept: looksLikeDate })
+  );
   if (emis) extracted.documentoFisico.fechaEmision = emis;
 
   // IC: formato 999-9999999-999-999.
@@ -608,7 +688,13 @@ function extractAuthority(lines: AnchorLine[], extracted: ExtractedDocument): vo
       .filter((l) => l !== cargo && l !== dependencia)
       .filter((l) => Math.abs(l.cy - cargo.cy) <= 180)
       .filter((l) => /^[A-Za-zÀ-ſ ]{4,40}$/.test(l.text.trim()))
-      .filter((l) => !/COMISARIO|JEFE|DPTO|IDENTIFICACION|REPUBLICA|PARAGUAY/.test(canon(l.text)))
+      .filter(
+        (l) =>
+          !/COMISARIO|JEFE|DPTO|IDENTIFICACION|REPUBLICA|PARAGUAY/.test(canon(l.text))
+      )
+      // No tomar una ETIQUETA conocida como nombre (en la captura real el
+      // candidato más cercano al cargo era el rótulo "ESTADO CIVIL").
+      .filter((l) => !KNOWN_LABELS.some((lbl) => isLabel(l.text, lbl)))
       .sort((a, b) => a.cy - b.cy)[0];
     if (nameCand) extracted.autoridadEmisora.nombre = nameCand.text.trim();
   }

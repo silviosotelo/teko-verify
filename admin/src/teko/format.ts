@@ -15,6 +15,17 @@ export function fmtDate(iso: string | null | undefined): string {
 
 export function fmtDateOnly(iso: string | null | undefined): string {
     if (!iso) return '—'
+    // Las fechas date-only ("YYYY-MM-DD") NO deben pasar por `new Date(iso)`:
+    // el constructor las interpreta como medianoche UTC y `toLocaleDateString`
+    // las re-renderiza en hora local (UTC-3 en PY), restando un día. Parseamos
+    // los componentes Y-M-D a mano y formateamos DD/MM/YYYY sin zona horaria.
+    const dateOnly = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso.trim())
+    if (dateOnly) {
+        const [, , mm, dd] = dateOnly
+        const yyyy = dateOnly[1]
+        return `${dd}/${mm}/${yyyy}`
+    }
+    // Fallback para strings con hora (timestamp completo): usamos Date normal.
     const d = new Date(iso)
     if (isNaN(d.getTime())) return iso
     return d.toLocaleDateString('es-PY', {

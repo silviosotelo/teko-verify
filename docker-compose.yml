@@ -26,6 +26,9 @@ services:
       # Operador admin bootstrap (se crea al arrancar si admin_operators está vacía).
       TEKO_ADMIN_BOOTSTRAP_USER: "admin"
       TEKO_ADMIN_BOOTSTRAP_PASSWORD: "TekoAdmin2026!"
+      # Evidencia: alinear con el volumen teko-evidence (montado en /data/evidence).
+      # Sin esto el default /data/teko/evidence cae en la capa efímera y se pierde en cada rebuild.
+      TEKO_EVIDENCE_DIR: "/data/evidence"
     volumes:
       # Modelos ONNX montados desde el host (no se hornean en la imagen).
       - ./models:/app/models:ro
