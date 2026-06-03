@@ -1,41 +1,30 @@
-import { Navigate, Route, Routes } from 'react-router-dom'
-import { isAuthenticated } from './api/auth'
-import { TenantProvider } from './context/TenantContext'
-import Layout from './components/Layout'
-import LoginPage from './pages/Login'
-import DashboardPage from './pages/Dashboard'
-import SessionsPage from './pages/Sessions'
-import SessionDetailPage from './pages/SessionDetail'
-import TenantsPage from './pages/Tenants'
-import ApiKeysPage from './pages/ApiKeys'
-import AuditPage from './pages/Audit'
+import { BrowserRouter } from 'react-router'
+import Theme from '@/components/template/Theme'
+import Layout from '@/components/layouts'
+import { AuthProvider } from '@/auth'
+import { TenantProvider } from '@/teko/TenantContext'
+import Views from '@/views'
+import appConfig from './configs/app.config'
+import './locales'
 
-function RequireAuth({ children }: { children: JSX.Element }) {
-  if (!isAuthenticated()) return <Navigate to="/login" replace />
-  return children
+if (appConfig.enableMock) {
+    import('./mock')
 }
 
-export default function App() {
-  return (
-    <Routes>
-      <Route path="/login" element={<LoginPage />} />
-      <Route
-        element={
-          <RequireAuth>
-            <TenantProvider>
-              <Layout />
-            </TenantProvider>
-          </RequireAuth>
-        }
-      >
-        <Route path="/" element={<DashboardPage />} />
-        <Route path="/sessions" element={<SessionsPage />} />
-        <Route path="/sessions/:sessionId" element={<SessionDetailPage />} />
-        <Route path="/tenants" element={<TenantsPage />} />
-        <Route path="/api-keys" element={<ApiKeysPage />} />
-        <Route path="/audit" element={<AuditPage />} />
-      </Route>
-      <Route path="*" element={<Navigate to="/" replace />} />
-    </Routes>
-  )
+function App() {
+    return (
+        <Theme>
+            <BrowserRouter basename="/admin-ui">
+                <AuthProvider>
+                    <TenantProvider>
+                        <Layout>
+                            <Views />
+                        </Layout>
+                    </TenantProvider>
+                </AuthProvider>
+            </BrowserRouter>
+        </Theme>
+    )
 }
+
+export default App

@@ -1,24 +1,28 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
-import path from 'path'
+import path from 'path';
+import dynamicImport from 'vite-plugin-dynamic-import'
 
-// La app del dashboard se sirve bajo /admin-ui/ (estático en el backend).
-// base controla cómo resuelven los assets; outDir → dist (lo monta el compose).
+// https://vitejs.dev/config/
 export default defineConfig({
-  plugins: [react()],
   base: '/admin-ui/',
+  plugins: [react(), dynamicImport()],
+  assetsInclude: ['**/*.md'],
   resolve: {
-    alias: { '@': path.join(__dirname, 'src') },
-  },
-  build: {
-    outDir: 'dist',
-    chunkSizeWarningLimit: 1200,
-  },
-  server: {
-    port: 5400,
-    proxy: {
-      // En dev, proxyeamos /admin al backend para same-origin.
-      '/admin': { target: 'http://localhost:4400', changeOrigin: true },
+    alias: {
+      '@': path.join(__dirname, 'src'),
     },
   },
+  server: {
+    proxy: {
+      '/admin': {
+        target: 'http://localhost:3000',
+        changeOrigin: true,
+        secure: false
+      }
+    }
+  },
+  build: {
+    outDir: 'dist'
+  }
 })
