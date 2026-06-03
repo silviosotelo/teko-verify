@@ -21,9 +21,15 @@ services:
       MATCH_THRESHOLD: "0.40"
       LIVENESS_THRESHOLD: "0.70"
       GLASSES_MAX: "0.50"
+      # Base pública para construir el verificationUrl (se ajusta al dominio del túnel).
+      PUBLIC_BASE_URL: "${PUBLIC_BASE_URL:-http://localhost:4400}"
     volumes:
       # Modelos ONNX montados desde el host (no se hornean en la imagen).
       - ./models:/app/models:ro
+      # SPA de captura (HTML autocontenido), iterable sin rebuild.
+      - ./web/dist:/app/web/dist:ro
+      # Migraciones disponibles para `npm run migrate` (no se hornean en la imagen).
+      - ./migrations:/app/migrations:ro
       # Evidencia en disco (patrón v9) + job de retención.
       - teko-evidence:/data/evidence
     depends_on:

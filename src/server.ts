@@ -101,6 +101,15 @@ if (fs.existsSync(WEB_DIST)) {
   app.use("/app", express.static(WEB_DIST));
 }
 
+// La SPA de captura (HTML autocontenido) se sirve en GET /verify/:token. Se monta
+// DESPUÉS del captureRouter: como el router no define GET /:token, cae acá. Las
+// llamadas de datos (/verify/:token/consent, /selfie, etc.) las maneja el router.
+app.get("/verify/:token", (_req: Request, res: Response) => {
+  const idx = path.join(WEB_DIST, "index.html");
+  if (fs.existsSync(idx)) res.sendFile(idx);
+  else res.status(404).type("text/plain").send("Teko Verify: capture UI no disponible");
+});
+
 const ADMIN_DIST = process.env.TEKO_ADMIN_DIST || path.resolve(__dirname, "..", "admin", "dist");
 if (fs.existsSync(ADMIN_DIST)) {
   app.use("/admin-ui", express.static(ADMIN_DIST));
