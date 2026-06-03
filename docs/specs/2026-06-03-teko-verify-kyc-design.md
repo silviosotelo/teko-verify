@@ -156,7 +156,7 @@ Todas las tablas llevan `tenant_id`; toda query/API key queda scopeada a su tena
 |---|---|---|---|
 | Detect/align/embed | SCRFD-10G + ArcFace facenox (de v9) | onnxruntime-node | Base de todo |
 | Quality/pose | Landmarks SCRFD (yaw/pitch/roll) + luma/Laplaciano | node | Brillo, nitidez, frontalidad |
-| Anti-anteojos | Qualcomm face_attrib_net (TFLite→ONNX) | onnxruntime-node | Ojos abiertos, anteojos, máscara, lentes sol. Paridad con lo validado en Flutter |
+| Anti-anteojos | Qualcomm face_attrib_net (**ONNX oficial de HF**, `face_attrib_net-onnx-float.zip`) | onnxruntime-node | Ojos abiertos, anteojos, máscara, lentes sol. Sin conversión; validar carga en ORT ~1.17 |
 | Liveness/PAD | Silent-Face-Anti-Spoofing (MiniFASNet) | onnxruntime-node | Pasivo, RGB, print/replay. Opcional: desafío activo (parpadeo/giro en frames) |
 | MRZ TD1 (dorso) | OCR de las 3 líneas + parser `mrz` (dígitos verificadores) | node + OCR | **Fuente autoritativa** (ICAO 9303 TD1, OCR-B muy legible) |
 | Barcode 1D (dorso) | `zxing` (Code128) | node | Serial del documento (cruce con Nº del frente) |
@@ -263,6 +263,6 @@ Ley N° 7593/2025 de Protección de Datos Personales (PY), promulgada 27-11-2025
 - ✅ Consola de administración de tenants → **en alcance** (ver §4/§8).
 - ✅ Normativa → **Ley N° 7593/2025** (ver §12).
 - **Set de evaluación**: ¿de dónde salen cédulas reales etiquetadas (reales/spoof/mismatch/vencidas) para calibrar umbrales (liveness FAR/FRR, match 1:1, OCR)? (posible reuso del background de dataset OCR médico).
-- **Conversión Qualcomm TFLite→ONNX**: validar paridad en onnxruntime-node; fallback a sidecar Python tflite si la conversión no es fiel.
+- **Modelo de anteojos**: ONNX oficial de Qualcomm (`face_attrib_net-onnx-float.zip` de HF release_assets, ORT 1.24.3) — sin conversión; validar que cargue en onnxruntime-node ~1.17.
 - **Chip eMRTD (L4)**: lectura NFC + Passive Authentication como camino de alta-confianza futuro (necesita app/lector NFC).
 - Sub-proyectos A (núcleo SSI) y C (credenciales) → specs futuros.

@@ -1,0 +1,12 @@
+node_modules
+dist
+web/node_modules
+web/src
+web/*.mjs
+web/shots
+fixtures
+*.log
+.git
+.env
+.env.*
+!.env.example

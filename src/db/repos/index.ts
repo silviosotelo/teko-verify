@@ -1,0 +1,37 @@
+/**
+ * Barrel de repositorios de la capa de datos.
+ *
+ * Se exportan como namespaces porque cada repo comparte nombres (create/getById/...).
+ * Uso: `import { repos } from "./db/repos"; await repos.sessions.create(...)`.
+ * Todos los métodos (salvo las dos excepciones de auth documentadas) reciben
+ * tenantId como primer parámetro y aceptan un Executor opcional (pool o PoolClient).
+ */
+export * as tenants from "./tenants";
+export * as apiKeys from "./apiKeys";
+export * as sessions from "./sessions";
+export * as checks from "./checks";
+export * as identities from "./identities";
+export * as evidence from "./evidence";
+export * as auditLog from "./auditLog";
+export * as consents from "./consents";
+
+import * as tenants from "./tenants";
+import * as apiKeys from "./apiKeys";
+import * as sessions from "./sessions";
+import * as checks from "./checks";
+import * as identities from "./identities";
+import * as evidence from "./evidence";
+import * as auditLog from "./auditLog";
+import * as consents from "./consents";
+
+/** Agrupador único para inyección/uso conveniente. */
+export const repos = {
+  tenants,
+  apiKeys,
+  sessions,
+  checks,
+  identities,
+  evidence,
+  auditLog,
+  consents,
+} as const;

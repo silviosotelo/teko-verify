@@ -1,0 +1,62 @@
+# Teko Verify — stack on-prem (server 34). Red interna privada; solo el
+# servicio node publica puerto al host. PostgreSQL propio y dedicado.
+services:
+  teko-verify:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: teko-verify:latest
+    restart: unless-stopped
+    ports:
+      - "4400:4400"
+    environment:
+      PORT: "4400"
+      DATABASE_URL: "postgres://teko:teko@postgres:5432/teko"
+      OCR_SIDECAR_URL: "http://paddleocr-sidecar:8001"
+      TEKO_DETECTOR_MODEL: "/app/models/scrfd_10g_bnkps.onnx"
+      TEKO_RECOGNIZER_MODEL: "/app/models/recognizer.onnx"
+      TEKO_PAD_MODEL: "/app/models/pad_minifasnet.onnx"
+      TEKO_GLASSES_MODEL: "/app/models/face_attrib_net.onnx"
+      TOKEN_TTL_MIN: "15"
+      MATCH_THRESHOLD: "0.40"
+      LIVENESS_THRESHOLD: "0.70"
+      GLASSES_MAX: "0.50"
+    volumes:
+      # Modelos ONNX montados desde el host (no se hornean en la imagen).
+      - ./models:/app/models:ro
+      # Evidencia en disco (patrón v9) + job de retención.
+      - teko-evidence:/data/evidence
+    depends_on:
+      postgres:
+        condition: service_healthy
+      paddleocr-sidecar:
+        condition: service_started
+
+  paddleocr-sidecar:
+    build:
+      context: .
+      dockerfile: Dockerfile.ocr
+    image: teko-verify-ocr:latest
+    restart: unless-stopped
+    # Sin "ports": solo accesible en la red interna por teko-verify.
+    expose:
+      - "8001"
+
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: teko
+      POSTGRES_PASSWORD: teko
+      POSTGRES_DB: teko
+    volumes:
+      - teko-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U teko -d teko"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  teko-pgdata:
+  teko-evidence:

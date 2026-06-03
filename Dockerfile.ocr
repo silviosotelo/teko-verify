@@ -1,0 +1,25 @@
+# Teko Verify — sidecar OCR (PaddleOCR + FastAPI). On-prem, sin APIs externas.
+# Expone POST /ocr; lo consume document.ts vía OCR_SIDECAR_URL.
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Dependencias de sistema que PaddleOCR/OpenCV necesitan.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libgl1 \
+        libglib2.0-0 \
+        libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# paddlepaddle (CPU) + paddleocr + servidor.
+RUN pip install --no-cache-dir \
+        paddlepaddle==2.6.1 \
+        paddleocr==2.7.3 \
+        fastapi==0.115.6 \
+        "uvicorn[standard]==0.34.0" \
+        python-multipart==0.0.20
+
+COPY ocr ./ocr
+
+EXPOSE 8001
+CMD ["uvicorn", "ocr.app:app", "--host", "0.0.0.0", "--port", "8001"]

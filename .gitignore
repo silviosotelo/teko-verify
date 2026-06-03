@@ -1,0 +1,14 @@
+node_modules/
+dist/
+*.log
+.env
+.env.local
+.env.*.local
+models/*.onnx
+models/*.zip
+evidence/
+uploads/
+coverage/
+.DS_Store
+__pycache__/
+ocr/.venv/
