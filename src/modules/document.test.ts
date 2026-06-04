@@ -12,11 +12,12 @@
 import { describe, it, expect } from "vitest";
 import {
   crossCheck,
+  crossFillFromMrz,
   detectTd1Lines,
   extractFrontDebug,
   parseMrz,
 } from "./document";
-import type { BarcodeData, ExtractedDocument, OcrLine } from "../types";
+import type { BarcodeData, ExtractedDocument, MrzData, OcrLine } from "../types";
 
 /** Construye una OcrLine a partir de centro+tamaño (caja axis-aligned). */
 function line(text: string, score: number, cx: number, cy: number, w = 120, h = 18): OcrLine {
@@ -111,6 +112,88 @@ describe("document — formato VIEJO (etiqueta combinada APELLIDOS, NOMBRES)", (
     expect(dbg.anchors.nombres?.text).toBe("JULIO CESAR");
     // Ambos anclados a la MISMA etiqueta combinada.
     expect(dbg.anchors.apellidos?.labelBox).toEqual(dbg.anchors.nombres?.labelBox);
+  });
+});
+
+// ===========================================================================
+// FRENTE FORMATO NUEVO — cédula real SOTELO CAYO (CI 2962683). Fixture con las
+// CAJAS OCR REALES (sidecar PaddleOCR, /admin/ocr-debug sobre el frente). Layout
+// distinto al de SOTELO MACHUCA: FECHA DE VENCIMIENTO arriba-derecha, FECHA DE
+// NACIMIENTO + SEXO abajo, LUGAR abajo, Nº abajo-izquierda FUSIONADO con dígitos.
+//
+// Bugs que cubre (todos vistos en el OCR real):
+//   - etiqueta "FECHA" degradada a "FEGHA" → findDateLabel ya no exige "FECHA".
+//   - "LUGAR DE NACIMIENTO" (score 1.0) NO debe ganarle a la etiqueta NAC.
+//   - valor de vencimiento "16=12-2035" (separador `=` por OCR) debe parsear.
+//   - Nº fusionado "N2962683" debe anclar (CI con caja en anchors).
+// ===========================================================================
+
+/** OcrLine desde una caja [x1,y1,x2,y2] axis-aligned (esquinas reales del sidecar). */
+function lineBox(text: string, score: number, x1: number, y1: number, x2: number, y2: number): OcrLine {
+  return {
+    text,
+    score,
+    box: [
+      [x1, y1],
+      [x2, y1],
+      [x2, y2],
+      [x1, y2],
+    ],
+  };
+}
+
+/** OCR REAL del frente CAYO (cajas exactas capturadas del sidecar). */
+const CAYO_FRONT: OcrLine[] = [
+  lineBox("DEL", 1.0, 264, 70, 305, 92),
+  lineBox("REPUBLISADELPARAGUAY", 0.88, 430, 67, 1318, 127),
+  lineBox("Cedula de Identidad Sivil", 0.92, 434, 142, 924, 189),
+  lineBox("APELLIDOS", 1.0, 527, 250, 674, 281),
+  lineBox("FECHA DEVENCIMIENTO", 0.99, 1117, 248, 1426, 278),
+  lineBox("SOTELO", 0.92, 534, 280, 736, 329),
+  lineBox("16=12-2035", 0.98, 1162, 281, 1393, 326),
+  lineBox("NOMBRES", 1.0, 523, 387, 660, 422),
+  lineBox("DONANTE", 1.0, 1208, 386, 1341, 424),
+  lineBox("CAYO", 0.96, 531, 416, 671, 467),
+  lineBox("SI", 0.85, 1238, 414, 1292, 464),
+  lineBox("FEGHA-DENACIMIENTOUCAC", 0.91, 523, 766, 864, 800),
+  lineBox("SEXO", 0.99, 878, 766, 960, 801),
+  lineBox("22-04-1969", 0.98, 527, 807, 768, 855),
+  lineBox("MASCULINO", 1.0, 894, 807, 1184, 855),
+  lineBox("N2962683", 0.97, 83, 846, 355, 908),
+  lineBox("LUGAR DE NACIMIENTO", 1.0, 524, 863, 825, 897),
+  lineBox("LUQUE", 1.0, 526, 906, 704, 958),
+];
+
+describe("document — frente FORMATO NUEVO (SOTELO CAYO, CI 2962683)", () => {
+  const dbg = extractFrontDebug(CAYO_FRONT);
+  const ex = dbg.extracted;
+
+  it("apellidos / nombres", () => {
+    expect(ex.titular.apellidos).toBe("SOTELO");
+    expect(ex.titular.nombres).toBe("CAYO");
+  });
+
+  it("fecha de NACIMIENTO se ancla pese a 'FECHA'→'FEGHA' degradado (no la roba LUGAR)", () => {
+    expect(ex.titular.fechaNacimiento).toBe("1969-04-22");
+  });
+
+  it("fecha de VENCIMIENTO parsea con separador OCR '=' (16=12-2035)", () => {
+    expect(ex.documentoFisico.fechaVencimiento).toBe("2035-12-16");
+  });
+
+  it("sexo y lugar", () => {
+    expect(ex.titular.sexo).toBe("MASCULINO");
+    expect(ex.titular.lugarNacimiento.ciudad).toBe("LUQUE");
+  });
+
+  it("CI fusionado 'N2962683' → valor + ANCLA (box en anchors)", () => {
+    expect(ex.documento.numeroCedula).toBe("2962683");
+    expect(dbg.anchors.ci?.text).toBe("N2962683");
+    expect(dbg.anchors.ci?.box).toBeDefined();
+  });
+
+  it("donante Sí", () => {
+    expect(ex.titular.donante).toBe(true);
   });
 });
 
@@ -252,6 +335,80 @@ describe("MRZ TD1 — cruce frente↔MRZ (crossCheck, SOFT)", () => {
     // Sin MRZ no se agregan los checks de cruce; los DUROS (impresos + no vencido) pasan.
     expect(auth.checks.find((c) => c.name === "mrz_vs_front_number")).toBeUndefined();
     expect(auth.consistent).toBe(true);
+  });
+});
+
+// ===========================================================================
+// CROSS-FILL MRZ→FRENTE (crossFillFromMrz). Recupera campos VACÍOS del frente
+// desde el MRZ del dorso, SÓLO si el CI del MRZ cruza con el del frente. Fail-
+// closed: CI no coincidente ⇒ NO rellena (no se mezclan identidades).
+// ===========================================================================
+
+describe("document — cross-fill MRZ→frente (crossFillFromMrz)", () => {
+  /** Frente CAYO con las FECHAS perdidas por el OCR (lo que el bug producía). */
+  function cayoFrontMissingDates(): ExtractedDocument {
+    return {
+      documento: { pais: "REPUBLICA DEL PARAGUAY", tipo: "Cedula de Identidad Civil", numeroCedula: "2962683", specimen: false },
+      titular: {
+        apellidos: "SOTELO", nombres: "CAYO", fechaNacimiento: "", sexo: "MASCULINO",
+        lugarNacimiento: { ciudad: "LUQUE", departamento: "" }, nacionalidad: "PARAGUAYA",
+        estadoCivil: "", donante: true, firma: "Sin firma",
+      },
+      documentoFisico: { fechaEmision: "", fechaVencimiento: "", chip: true, codigoBarras: false },
+      registroInterno: { ic: "", ubicacion: "" },
+      autoridadEmisora: { nombre: "", cargo: "", dependencia: "" },
+      mrz: { linea1: "", linea2: "", linea3: "", paisCodigo: "" },
+    };
+  }
+
+  /** MRZ del dorso CAYO con CI 2962683 en optionalData y fechas válidas. */
+  function cayoMrz(): MrzData {
+    return {
+      ...emptyMrz(),
+      documentNumber: "AA1802315",
+      optionalData: "2962683 0207",
+      surname: "SOTELO", givenNames: "CAYO", nationality: "PRY",
+      dateOfBirth: "1969-04-22", sex: "MASCULINO", expirationDate: "2035-12-16",
+    };
+  }
+
+  it("CI coincidente: rellena fechas vacías del frente desde el MRZ y marca source=mrz", () => {
+    const ex = crossFillFromMrz(cayoFrontMissingDates(), cayoMrz());
+    expect(ex.titular.fechaNacimiento).toBe("1969-04-22");
+    expect(ex.documentoFisico.fechaVencimiento).toBe("2035-12-16");
+    expect(ex.fieldSources?.fechaNacimiento).toBe("mrz");
+    expect(ex.fieldSources?.fechaVencimiento).toBe("mrz");
+  });
+
+  it("NUNCA pisa un valor del frente ya presente (monotónico)", () => {
+    const front = cayoFrontMissingDates();
+    front.titular.fechaNacimiento = "1969-04-22"; // ya leído del frente
+    const mrz = { ...cayoMrz(), dateOfBirth: "1900-01-01" }; // MRZ distinto
+    const ex = crossFillFromMrz(front, mrz);
+    expect(ex.titular.fechaNacimiento).toBe("1969-04-22"); // se respeta el frente
+    expect(ex.fieldSources?.fechaNacimiento).toBeUndefined(); // no marcado
+  });
+
+  it("CI NO coincidente: NO rellena nada (fail-closed, no mezcla identidades)", () => {
+    const front = cayoFrontMissingDates();
+    const mrz = { ...cayoMrz(), documentNumber: "ZZ0000000", optionalData: "9999999 0000" };
+    const ex = crossFillFromMrz(front, mrz);
+    expect(ex.titular.fechaNacimiento).toBe("");
+    expect(ex.documentoFisico.fechaVencimiento).toBe("");
+    expect(ex.fieldSources).toBeUndefined();
+  });
+
+  it("frente sin CI: NO puede cruzar ⇒ NO rellena", () => {
+    const front = cayoFrontMissingDates();
+    front.documento.numeroCedula = "";
+    const ex = crossFillFromMrz(front, cayoMrz());
+    expect(ex.titular.fechaNacimiento).toBe("");
+  });
+
+  it("MRZ vacío (dorso degradado): no-op", () => {
+    const front = cayoFrontMissingDates();
+    const ex = crossFillFromMrz(front, emptyMrz());
+    expect(ex.titular.fechaNacimiento).toBe("");
   });
 });
 

@@ -247,6 +247,14 @@ export interface ExtractedDocument {
     linea3: string;
     paisCodigo: string;
   };
+  /**
+   * PROCEDENCIA por campo (additivo, opcional). Marca de qué fuente se obtuvo un
+   * campo cuando NO vino del frente impreso: típicamente `"mrz"` cuando el cross-fill
+   * rellenó un campo vacío del frente desde el MRZ del dorso (CI coincidente). Los
+   * campos leídos del frente NO se listan (la ausencia de entrada ⇒ origen frente).
+   * Sólo informativo/auditoría; no altera ninguna decisión de `passed`/`consistent`.
+   */
+  fieldSources?: Record<string, "mrz">;
 }
 
 /** Recorte de la foto del titular extraída del documento (para el match 1:1). */

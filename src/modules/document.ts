@@ -516,14 +516,25 @@ function valueRight(
   return candidates[0]?.text.trim() ?? "";
 }
 
-/** ¿El texto contiene una fecha impresa DD-MM-YYYY (o con / .)? */
+/**
+ * Clase de SEPARADORES de una fecha impresa DD?MM?YYYY. Incluye `=` porque el OCR
+ * confunde el guion del separador con `=` en algunos frames (real CAYO: el
+ * vencimiento "16-12-2035" se leyó "16=12-2035"). Una sola fuente de verdad: la
+ * usan `looksLikeDate`, `printedDateToIso` y la EXCLUSIÓN de fechas del fallback de
+ * CI (`oldFormatCiFallback`), para que "16=12-2035" no cuele como 8 dígitos de CI.
+ */
+const DATE_SEP = "[\\/.\\-=]";
+const DATE_RE = new RegExp(`\\d{2}${DATE_SEP}\\d{2}${DATE_SEP}\\d{4}`);
+const DATE_CAP_RE = new RegExp(`(\\d{2})${DATE_SEP}(\\d{2})${DATE_SEP}(\\d{4})`);
+
+/** ¿El texto contiene una fecha impresa DD-MM-YYYY (o con / . =)? */
 function looksLikeDate(s: string): boolean {
-  return /\d{2}[\/.\-]\d{2}[\/.\-]\d{4}/.test(s);
+  return DATE_RE.test(s);
 }
 
-/** "DD-MM-YYYY" (o con / .) → ISO "YYYY-MM-DD". "" si no matchea. */
+/** "DD-MM-YYYY" (o con / . =) → ISO "YYYY-MM-DD". "" si no matchea. */
 function printedDateToIso(s: string): string {
-  const m = s.match(/(\d{2})[\/.\-](\d{2})[\/.\-](\d{4})/);
+  const m = s.match(DATE_CAP_RE);
   if (!m) return "";
   return `${m[3]}-${m[2]}-${m[1]}`;
 }
@@ -685,18 +696,31 @@ function resolveOldNames(
 }
 
 /**
- * Localiza una etiqueta de FECHA tolerante al ruido OCR. El formato viejo lee
- * "FECHA DE VENCIMENTO" (sin la "I") que NO matchea por substring contra
- * "FECHA DE VENCIMIENTO". Anclamos por el token distintivo del canon ("VENC" /
- * "NAC") en una línea que además empieza con "FECHA". TARGETED, no fuzzing
- * global: en el formato nuevo "FECHA DE VENCIMIENTO" sigue conteniendo "VENC"
- * → mismo ancla, cero regresión; "VENC" no aparece en "NACIMIENTO".
+ * Localiza una etiqueta de FECHA tolerante al ruido OCR.
+ *
+ * EVOLUCIÓN (caso real CAYO, frente formato NUEVO): el OCR degrada la palabra
+ * "FECHA" en sí (visto: "FEGHA DE NACIMIENTO" — C→G). Exigir `includes("FECHA")`
+ * VACIABA la fecha de nacimiento aunque el valor "22-04-1969" se leía perfecto
+ * justo debajo. Por eso ya NO exigimos "FECHA": anclamos por el token DISTINTIVO
+ * del campo, que es robusto al ruido:
+ *   - VENC  → la línea-etiqueta contiene "VENC" (de VENCIMIENTO/VENCIMENTO).
+ *   - NAC   → la línea-etiqueta contiene "NACIMIENTO" (o, tolerante, "NAC...").
+ *
+ * GUARDA CRÍTICA para NAC: "LUGAR DE NACIMIENTO" también contiene "NACIMIENTO" y
+ * suele leerse con score 1.00 (> el de "FEGHA...NACIMIENTO" degradado), así que sin
+ * filtro GANARÍA el sort-por-score y su valor-debajo (la CIUDAD, p.ej. "LUQUE") no
+ * es una fecha → nac quedaría vacío. EXCLUIMOS toda etiqueta que contenga "LUGAR".
+ * Verificado: con esto, line "FEGHA-DENACIMIENTOUCAC" gana y "22-04-1969" ancla.
  */
 function findDateLabel(lines: AnchorLine[], token: "VENC" | "NAC"): AnchorLine | undefined {
+  const needle = token === "VENC" ? "VENC" : "NAC";
   return lines
     .filter((l) => {
       const c = canon(l.text);
-      return c.includes("FECHA") && c.includes(token);
+      if (!c.includes(needle)) return false;
+      // NAC: "LUGAR DE NACIMIENTO" también matchea "NAC" — excluir el lugar.
+      if (token === "NAC" && c.includes("LUGAR")) return false;
+      return true;
     })
     .sort((a, b) => b.score - a.score)[0];
 }
@@ -930,14 +954,25 @@ function extractFront(frontLines: OcrLine[], extracted: ExtractedDocument): void
     extracted.titular.lugarNacimiento.departamento = (parts[1] ?? "").trim();
   }
 
-  // Nº de cédula: el rótulo "Nº"/"No" con los dígitos a la DERECHA, en la misma fila.
-  const noLabel = lines
-    .filter((l) => /^N[º°O]?\.?$/i.test(l.text.trim()) || canon(l.text) === "NO")
-    .sort((a, b) => b.score - a.score)[0];
-  if (noLabel) {
-    const num = valueRight(lines, noLabel, (t) => /\d{5,8}/.test(t.replace(/\D/g, "")));
-    const digits = num.replace(/\D/g, "");
+  // Nº de cédula. Dos sub-casos de anclaje (en orden de preferencia):
+  //   (a) FUSIONADO: el OCR junta el rótulo y los dígitos en UN token "Nº2962683"
+  //       (real CAYO, formato nuevo: "N2962683"). Una sola línea con forma
+  //       "N[º°o]? + 6-8 dígitos" → el valor (y su ancla) ES esa misma línea.
+  //   (b) SEPARADO: rótulo "Nº" con los dígitos a la DERECHA en la misma fila
+  //       (layouts donde el OCR los separa).
+  const fusedNo = findFusedCiLine(lines);
+  if (fusedNo) {
+    const digits = fusedNo.text.replace(/\D/g, "");
     if (digits.length >= 5) extracted.documento.numeroCedula = digits;
+  } else {
+    const noLabel = lines
+      .filter((l) => /^N[º°O]?\.?$/i.test(l.text.trim()) || canon(l.text) === "NO")
+      .sort((a, b) => b.score - a.score)[0];
+    if (noLabel) {
+      const num = valueRight(lines, noLabel, (t) => /\d{5,8}/.test(t.replace(/\D/g, "")));
+      const digits = num.replace(/\D/g, "");
+      if (digits.length >= 5) extracted.documento.numeroCedula = digits;
+    }
   }
   // Fallback: si no encontramos por ancla "Nº", buscamos una línea de 6-8 dígitos
   // que NO sea una fecha (heurística defensiva, sólo si quedó vacío). Excluimos
@@ -956,9 +991,28 @@ function extractFront(frontLines: OcrLine[], extracted: ExtractedDocument): void
  * MÁS A LA DERECHA (spec §formato-viejo). Excluimos DD-MM-YYYY: "26-03-2028"
  * colapsa a 8 dígitos y robaría el lugar. Devuelve "" si no hay candidato.
  */
+/**
+ * Detecta la línea del Nº de cédula cuando el OCR FUSIONA el rótulo "Nº" con los
+ * dígitos en un solo token (real CAYO frente nuevo: "N2962683"). Acepta el prefijo
+ * N / Nº / N° / No / N. seguido de 6-8 dígitos (con posibles separadores OCR como
+ * espacios/puntos que se descartan al contar). NO matchea una fecha (ya no empieza
+ * por N) ni un IC. Devuelve la línea de mayor score; la propia línea es a la vez el
+ * valor Y su ancla posicional (no hay rótulo separado).
+ */
+function findFusedCiLine(lines: AnchorLine[]): AnchorLine | undefined {
+  return lines
+    .filter((l) => {
+      const t = l.text.trim();
+      if (!/^N[º°o.]?\s?\d/i.test(t)) return false; // arranca con N + (rótulo opc) + dígito
+      const digits = t.replace(/\D/g, "");
+      return digits.length >= 6 && digits.length <= 8;
+    })
+    .sort((a, b) => b.score - a.score)[0];
+}
+
 function oldFormatCiFallback(lines: AnchorLine[]): string {
   const cand = lines
-    .filter((l) => !/\d{2}[\/.\-]\d{2}[\/.\-]\d{4}/.test(l.text))
+    .filter((l) => !DATE_RE.test(l.text))
     .map((l) => ({ d: l.text.replace(/\D/g, ""), cx: l.cx, cy: l.cy }))
     .filter((o) => o.d.length >= 6 && o.d.length <= 8)
     // Más abajo primero; a igual fila, más a la derecha.
@@ -1157,27 +1211,43 @@ export function extractFrontDebug(frontLines: OcrLine[]): FrontDebug {
     record("lugarNacimiento", lugarLine, "LUGAR DE NACIMIENTO");
   }
 
-  // Nº de cédula: rótulo "Nº" con dígitos a la DERECHA (anclaje horizontal).
-  const noLabel = lines
-    .filter((l) => /^N[º°O]?\.?$/i.test(l.text.trim()) || canon(l.text) === "NO")
-    .sort((a, b) => b.score - a.score)[0];
-  if (noLabel) {
-    const numLine = lines
-      .filter((l) => l !== noLabel && l.score >= 0.3)
-      .filter((l) => Math.abs(l.cy - noLabel.cy) <= 60)
-      .filter((l) => l.cx > noLabel.cx)
-      .filter((l) => /\d{5,8}/.test(l.text.replace(/\D/g, "")))
-      .sort((a, b) => a.cx - b.cx)[0];
-    if (numLine) {
-      const digits = numLine.text.replace(/\D/g, "");
-      if (digits.length >= 5) {
-        extracted.documento.numeroCedula = digits;
-        anchors["ci"] = {
-          lineIndex: numLine.idx,
-          box: boxOf(frontLines, numLine.idx),
-          labelBox: boxOf(frontLines, noLabel.idx),
-          text: numLine.text.trim(),
-        };
+  // Nº de cédula. (a) FUSIONADO "Nº2962683" en un token (real CAYO): el valor y su
+  // ancla SON esa línea (labelBox = su propia caja). (b) SEPARADO: rótulo "Nº" con
+  // dígitos a la DERECHA. Mismo orden de preferencia que extractFront.
+  const fusedNo = findFusedCiLine(lines);
+  if (fusedNo) {
+    const digits = fusedNo.text.replace(/\D/g, "");
+    if (digits.length >= 5) {
+      extracted.documento.numeroCedula = digits;
+      anchors["ci"] = {
+        lineIndex: fusedNo.idx,
+        box: boxOf(frontLines, fusedNo.idx),
+        labelBox: boxOf(frontLines, fusedNo.idx),
+        text: fusedNo.text.trim(),
+      };
+    }
+  } else {
+    const noLabel = lines
+      .filter((l) => /^N[º°O]?\.?$/i.test(l.text.trim()) || canon(l.text) === "NO")
+      .sort((a, b) => b.score - a.score)[0];
+    if (noLabel) {
+      const numLine = lines
+        .filter((l) => l !== noLabel && l.score >= 0.3)
+        .filter((l) => Math.abs(l.cy - noLabel.cy) <= 60)
+        .filter((l) => l.cx > noLabel.cx)
+        .filter((l) => /\d{5,8}/.test(l.text.replace(/\D/g, "")))
+        .sort((a, b) => a.cx - b.cx)[0];
+      if (numLine) {
+        const digits = numLine.text.replace(/\D/g, "");
+        if (digits.length >= 5) {
+          extracted.documento.numeroCedula = digits;
+          anchors["ci"] = {
+            lineIndex: numLine.idx,
+            box: boxOf(frontLines, numLine.idx),
+            labelBox: boxOf(frontLines, noLabel.idx),
+            text: numLine.text.trim(),
+          };
+        }
       }
     }
   }
@@ -1443,6 +1513,70 @@ export function crossCheck(
 }
 
 // ---------------------------------------------------------------------------
+// Cross-fill MRZ→frente (ADITIVO, fail-closed). Recupera campos que el OCR del
+// FRENTE perdió, tomándolos del MRZ del dorso — SÓLO si el CI del MRZ cruza con
+// el CI del frente (evita mezclar identidades).
+// ---------------------------------------------------------------------------
+
+/**
+ * ¿El CI del MRZ (documentNumber o, en la cédula PY, el CI real en optionalData)
+ * coincide con el CI del frente? Reusa el mismo criterio de inclusión bidireccional
+ * que `crossCheck.mrz_vs_front_number`. Si el frente NO tiene CI, NO hay cómo cruzar
+ * → false (fail-closed: no rellenamos a ciegas).
+ */
+function mrzCiMatchesFront(extracted: ExtractedDocument, mrz: MrzData): boolean {
+  const ocrNum = norm(extracted.documento.numeroCedula);
+  if (!ocrNum) return false;
+  const mrzNum = norm(mrz.documentNumber);
+  const mrzOpt = norm(mrz.optionalData ?? "");
+  const matchIn = (hay: string) => !!hay && (hay.includes(ocrNum) || ocrNum.includes(hay));
+  return matchIn(mrzNum) || matchIn(mrzOpt);
+}
+
+/**
+ * Rellena en el FRENTE (`extracted`) los campos que quedaron VACÍOS tras el OCR,
+ * tomándolos del MRZ del dorso. ADITIVO + FAIL-CLOSED:
+ *   - SÓLO actúa si el CI del MRZ cruza con el CI del frente (`mrzCiMatchesFront`);
+ *     si no cruza (o falta), NO toca NADA (no se mezclan identidades).
+ *   - NUNCA pisa un valor ya presente del frente (monotónico: sólo llena blancos).
+ *   - Cada campo rellenado se marca en `extracted.fieldSources[campo] = "mrz"`.
+ *
+ * Campos cubiertos: fechaNacimiento, fechaVencimiento, sexo, apellidos, nombres
+ * (los que el MRZ TD1 trae y el frente puede perder). Muta `extracted` in-place y
+ * lo devuelve. Exportada para test.
+ *
+ * Debe llamarse DESPUÉS de `crossCheck` (que compara el MRZ GENUINO vs el frente);
+ * si se rellenara antes, el cruce compararía el MRZ contra valores copiados del MRZ.
+ */
+export function crossFillFromMrz(extracted: ExtractedDocument, mrz: MrzData): ExtractedDocument {
+  if (!mrzCiMatchesFront(extracted, mrz)) return extracted;
+  const mark = (field: string) => {
+    (extracted.fieldSources ??= {})[field] = "mrz";
+  };
+  if (!extracted.titular.fechaNacimiento && mrz.dateOfBirth) {
+    extracted.titular.fechaNacimiento = mrz.dateOfBirth;
+    mark("fechaNacimiento");
+  }
+  if (!extracted.documentoFisico.fechaVencimiento && mrz.expirationDate) {
+    extracted.documentoFisico.fechaVencimiento = mrz.expirationDate;
+    mark("fechaVencimiento");
+  }
+  if (!extracted.titular.sexo && mrz.sex) {
+    extracted.titular.sexo = mrz.sex;
+    mark("sexo");
+  }
+  if (!extracted.titular.apellidos && mrz.surname) {
+    extracted.titular.apellidos = mrz.surname;
+    mark("apellidos");
+  }
+  if (!extracted.titular.nombres && mrz.givenNames) {
+    extracted.titular.nombres = mrz.givenNames;
+    mark("nombres");
+  }
+  return extracted;
+}
+
+// ---------------------------------------------------------------------------
 // Backfill de MrzData con los datos AUTORITATIVOS del frente/dorso.
 // ---------------------------------------------------------------------------
 
@@ -1635,8 +1769,16 @@ export class DocumentModule {
     if (barcode.text) extracted.documentoFisico.codigoBarras = true;
 
     // Autenticidad por cruce: compara el MRZ GENUINO contra el frente (SOFT) ANTES
-    // de hacer backfill — si no, el MRZ se compararía contra sí mismo.
+    // de hacer backfill/cross-fill — si no, el MRZ se compararía contra sí mismo.
     const authenticity = crossCheck(extracted, mrz, barcode);
+
+    // CROSS-FILL MRZ→FRENTE (aditivo, fail-closed): recupera campos que el OCR del
+    // FRENTE perdió (fechas/sexo/nombre) desde el MRZ del dorso, SÓLO si el CI del
+    // MRZ cruza con el del frente. Nunca pisa un valor ya presente. Se corre DESPUÉS
+    // de crossCheck (cruce contra el MRZ genuino) y ANTES de calcular `passed`, así
+    // un campo recuperado del MRZ puede satisfacer los requeridos. No-op si el MRZ
+    // vino vacío (dorso degradado) o si el CI no cruza.
+    crossFillFromMrz(extracted, mrz);
 
     // Backfill de los campos de DATO del MRZ con los autoritativos del frente/dorso
     // (mantiene `valid`/`checkDigits` honestos). Necesario para pipeline.extractedFrom.
