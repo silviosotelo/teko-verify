@@ -40,11 +40,30 @@ function isPng(buf: Buffer): boolean {
   return true;
 }
 
+/** ¿El buffer empieza con la firma PDF ("%PDF" = 25 50 44 46)? */
+function isPdf(buf: Buffer): boolean {
+  return (
+    buf.length >= 4 &&
+    buf[0] === 0x25 &&
+    buf[1] === 0x50 &&
+    buf[2] === 0x44 &&
+    buf[3] === 0x46
+  );
+}
+
 /**
- * Decodifica base64/data-URL a Buffer validando tipo real (JPEG/PNG por magic bytes)
- * y cap de tamaño. Firma estable (un solo argumento): la consume api/capture.ts.
+ * Decodifica base64/data-URL a Buffer validando tipo real (por magic bytes) y cap de
+ * tamaño. Firma estable (primer argumento). `opts.allowPdf` AMPLÍA el set permitido a
+ * PDF SÓLO en los sitios de ingesta de DOCUMENTO (cédula frente/dorso) y en los
+ * endpoints admin: el PDF se rasteriza a imagen aguas arriba (ver lib/raster.ts) ANTES
+ * del pipeline. Las entradas que NO son documento (selfie/frames) siguen JPEG/PNG-only
+ * (fail-closed: no se afloja el hardening de inputs faciales con un formato que ahí no
+ * tiene sentido).
  */
-export function decodeBase64Image(b64: string | undefined): Buffer {
+export function decodeBase64Image(
+  b64: string | undefined,
+  opts: { allowPdf?: boolean } = {}
+): Buffer {
   if (!b64) throw new Error("imagen ausente");
   let s = b64.trim();
   if (s.includes(",") && s.toLowerCase().startsWith("data:")) {
@@ -60,8 +79,14 @@ export function decodeBase64Image(b64: string | undefined): Buffer {
     );
   }
   // Tipo real por contenido, no por el prefijo data: (anti-spoof de content-type).
-  if (!isJpeg(buf) && !isPng(buf)) {
-    throw new Error("tipo de imagen no permitido (solo JPEG/PNG)");
+  const okImage = isJpeg(buf) || isPng(buf);
+  const okPdf = !!opts.allowPdf && isPdf(buf);
+  if (!okImage && !okPdf) {
+    throw new Error(
+      opts.allowPdf
+        ? "tipo de archivo no permitido (solo JPEG/PNG/PDF)"
+        : "tipo de imagen no permitido (solo JPEG/PNG)"
+    );
   }
   return buf;
 }

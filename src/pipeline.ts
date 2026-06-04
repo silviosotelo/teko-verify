@@ -46,6 +46,24 @@ import type {
 } from "./types";
 import { decision as decideVerdict } from "./modules/decision";
 import { match as matchEmbeddings } from "./modules/match";
+import { ensureRasterImage } from "./lib/raster";
+
+/**
+ * Normaliza las imágenes de DOCUMENTO a raster decodificable por sharp: si docFront/
+ * docBack vinieron como PDF (cédula escaneada), rasteriza su 1ª página a PNG. Un solo
+ * chokepoint al entrar al pipeline: así TODO lo que consume esas imágenes (módulo
+ * document, fallback de match `embed(docFront)`, recorte `docCropper.crop(docFront)` y
+ * la evidencia que se persiste) recibe una imagen, nunca el PDF crudo. La selfie/frames
+ * NO se tocan (siempre JPEG/PNG). FAIL-CLOSED: si la rasterización falla, propaga el
+ * error y el caller (processSession/computeChecks) lo convierte en estado 'error'.
+ */
+async function rasterizeDocImages(images: CapturedImages): Promise<CapturedImages> {
+  const [docFront, docBack] = await Promise.all([
+    ensureRasterImage(images.docFront),
+    ensureRasterImage(images.docBack),
+  ]);
+  return { ...images, docFront, docBack };
+}
 
 // ---------------------------------------------------------------------------
 // Contratos inyectables.
@@ -276,6 +294,11 @@ export async function processSession(
   const policy = effectivePolicy(session, tenantPolicy);
 
   try {
+    // === 0) NORMALIZA DOCUMENTO PDF→imagen (cédula escaneada) ============== //
+    // Si docFront/docBack llegaron como PDF, rasteriza a PNG ANTES de cualquier
+    // módulo. Un solo punto: document + match + crop + evidencia ven la imagen.
+    images = await rasterizeDocImages(images);
+
     // === 1) QUALITY (recuperable → needs_recapture) ======================= //
     const quality = await deps.modules.quality(
       images.selfie,
@@ -585,6 +608,11 @@ export async function computeChecks(
   // LoA por sesión: el nivel pedido por la sesión manda sobre el de la policy.
   const policy = effectivePolicy(session, tenantPolicy);
   try {
+    // === 0) NORMALIZA DOCUMENTO PDF→imagen (cédula escaneada) ============== //
+    // Si docFront/docBack llegaron como PDF, rasteriza a PNG ANTES de cualquier
+    // módulo. Un solo punto: document + match + crop + evidencia ven la imagen.
+    images = await rasterizeDocImages(images);
+
     // === 1) QUALITY (recuperable → needs_recapture) ======================= //
     const quality = await deps.modules.quality(
       images.selfie,

@@ -224,8 +224,11 @@ captureRouter.post("/:token/document", async (req: Request, res: Response) => {
   if (!session) return;
   if (!requireCapturable(session, res)) return;
   try {
-    const front = decodeBase64Image(req.body?.front);
-    const back = decodeBase64Image(req.body?.back);
+    // Frente/dorso aceptan PDF (cédula escaneada): se guardan crudos y el pipeline
+    // (computeChecks/processSession en /submit /preview) los rasteriza a imagen antes
+    // del OCR. La selfie/frames siguen JPEG/PNG-only (sin allowPdf).
+    const front = decodeBase64Image(req.body?.front, { allowPdf: true });
+    const back = decodeBase64Image(req.body?.back, { allowPdf: true });
     await evidenceStore.save(session.tenantId, session.id, "doc_front", front);
     await evidenceStore.save(session.tenantId, session.id, "doc_back", back);
     const resp: UploadResponse = { ok: true, state: "capturing" };

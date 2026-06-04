@@ -31,6 +31,7 @@ import {
 import { adminLoginRateLimiter } from "../lib/rateLimit";
 import { mergePolicy } from "../lib/policy";
 import { decodeBase64Image } from "../lib/images";
+import { ensureRasterImage } from "../lib/raster";
 import { computeChecks } from "../pipeline";
 import { realPipelineDeps } from "../pipelineDeps";
 import { decision as decideVerdict } from "../modules/decision";
@@ -489,11 +490,13 @@ adminRouter.post("/test-verify", canWrite, async (req: Request, res: Response) =
     }
 
     // Decodifica las 3 imágenes (base64 o data URL). Fail-closed: input inválido → 400.
+    // El FRENTE/DORSO del documento aceptan PDF (cédula escaneada): computeChecks los
+    // rasteriza a imagen aguas arriba. La selfie sigue JPEG/PNG-only.
     let selfie: Buffer, front: Buffer, back: Buffer;
     try {
       selfie = decodeBase64Image(req.body?.selfie);
-      front = decodeBase64Image(req.body?.front);
-      back = decodeBase64Image(req.body?.back);
+      front = decodeBase64Image(req.body?.front, { allowPdf: true });
+      back = decodeBase64Image(req.body?.back, { allowPdf: true });
     } catch (e) {
       res.status(400).json({ error: "invalid_images", detail: (e as Error).message });
       return;
@@ -667,10 +670,14 @@ adminRouter.post("/ocr-debug", canWrite, async (req: Request, res: Response) => 
       return;
     }
 
-    // Decodifica la imagen (fail-closed: JPEG/PNG por magic bytes, cap de tamaño).
+    // Decodifica la imagen (fail-closed: JPEG/PNG/PDF por magic bytes, cap de tamaño).
+    // Si es PDF (cédula escaneada), rasteriza la 1ª página a PNG: TODO lo de abajo
+    // (OCR, anclas, metadata, echo base64) opera sobre la imagen rasterizada, así el
+    // overlay del Inspector calza con la imagen que devuelve la respuesta.
     let raw: Buffer;
     try {
-      raw = decodeBase64Image(req.body?.image);
+      raw = decodeBase64Image(req.body?.image, { allowPdf: true });
+      raw = await ensureRasterImage(raw);
     } catch (e) {
       res.status(400).json({ error: "invalid_image", detail: (e as Error).message });
       return;
@@ -680,11 +687,11 @@ adminRouter.post("/ocr-debug", canWrite, async (req: Request, res: Response) => 
 
     // ---- variant="production": camino de extracción REAL del pipeline ---------
     if (variant === "production") {
-      // Dorso OPCIONAL (para el cross-fill MRZ): se acepta `back` base64.
+      // Dorso OPCIONAL (para el cross-fill MRZ): se acepta `back` base64 (o PDF).
       let back: Buffer | undefined;
       if (req.body?.back) {
         try {
-          back = decodeBase64Image(req.body.back);
+          back = await ensureRasterImage(decodeBase64Image(req.body.back, { allowPdf: true }));
         } catch {
           back = undefined; // dorso inválido → seguimos sólo con el frente
         }

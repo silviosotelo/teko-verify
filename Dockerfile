@@ -13,6 +13,13 @@ RUN npm run build
 FROM node:22-bookworm-slim
 WORKDIR /app
 
+# poppler-utils provee `pdftoppm`, usado por lib/raster.ts para rasterizar cédulas
+# que llegan como PDF (frente/dorso escaneados) a imagen ANTES del OCR. Va en la etapa
+# RUNTIME (no sólo build) para que el binario quede en la imagen final.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends poppler-utils \
+    && rm -rf /var/lib/apt/lists/*
+
 # Solo deps de producción (onnxruntime-node + sharp prebuilts, pg, express, etc.).
 COPY package.json ./
 RUN npm install --omit=dev --no-audit --no-fund
