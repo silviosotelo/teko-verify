@@ -10,8 +10,13 @@
  * ("VENCIMENTO"), nacimiento, sexo, lugar y CI suelto sin rótulo "Nº".
  */
 import { describe, it, expect } from "vitest";
-import { extractFrontDebug } from "./document";
-import type { OcrLine } from "../types";
+import {
+  crossCheck,
+  detectTd1Lines,
+  extractFrontDebug,
+  parseMrz,
+} from "./document";
+import type { BarcodeData, ExtractedDocument, OcrLine } from "../types";
 
 /** Construye una OcrLine a partir de centro+tamaño (caja axis-aligned). */
 function line(text: string, score: number, cx: number, cy: number, w = 120, h = 18): OcrLine {
@@ -108,3 +113,162 @@ describe("document — formato VIEJO (etiqueta combinada APELLIDOS, NOMBRES)", (
     expect(dbg.anchors.apellidos?.labelBox).toEqual(dbg.anchors.nombres?.labelBox);
   });
 });
+
+// ===========================================================================
+// MRZ TD1 (dorso de la cédula PY). Vectores: el canónico ICAO 9303 (ANNA
+// ERIKSSON) y un dorso PY REAL capturado del sidecar (SOTELO MACHUCA). Verifica
+// parseo de campos, dígitos verificadores (7-3-1), normalización de sexo,
+// reordenamiento de líneas desordenadas y el cruce frente↔MRZ con el CI en
+// `optional1` (particularidad de la cédula PY).
+// ===========================================================================
+
+/**
+ * Dorso PY REAL (sidecar PaddleOCR, sesión e027db99). `documentNumber` = SERIAL
+ * "AA0014114"; el NÚMERO DE CÉDULA "4895448" va en `optional1`. Dígitos
+ * verificadores TODOS válidos (la captura fue limpia). Líneas en orden TD1.
+ */
+const PY_MRZ_REAL = [
+  "INPRYAA001411414895448<0207<<<",
+  "9711138M3307124PRY<<<<<<<<<<<5",
+  "SOTELO<MACHUCA<<SILVIO<ANDRES<",
+];
+
+/** Vector canónico TD1 de ICAO 9303 (ANNA MARIA ERIKSSON) — oráculo de campos. */
+const ICAO_TD1 = [
+  "I<UTOD231458907<<<<<<<<<<<<<<<",
+  "7408122F1204159UTO<<<<<<<<<<<6",
+  "ERIKSSON<<ANNA<MARIA<<<<<<<<<<",
+];
+
+describe("MRZ TD1 — parser sobre vectores reales/canónicos", () => {
+  it("dorso PY real: parsea campos + check digits válidos", async () => {
+    const mrz = await parseMrz(PY_MRZ_REAL);
+    expect(mrz.surname).toBe("SOTELO MACHUCA");
+    expect(mrz.givenNames).toBe("SILVIO ANDRES");
+    expect(mrz.issuingCountry).toBe("PRY");
+    expect(mrz.nationality).toBe("PRY");
+    // En la cédula PY el documentNumber del MRZ es el SERIAL de la tarjeta.
+    expect(mrz.documentNumber).toBe("AA0014114");
+    // El CI real "4895448" vive en optional1.
+    expect(mrz.optionalData).toContain("4895448");
+    // Fechas YYMMDD → ISO con ventana de siglo (nac 1997, venc 2033).
+    expect(mrz.dateOfBirth).toBe("1997-11-13");
+    expect(mrz.expirationDate).toBe("2033-07-12");
+    // Sexo normalizado al convenio del frente.
+    expect(mrz.sex).toBe("MASCULINO");
+    // Dígitos verificadores ICAO 7-3-1 — la captura limpia valida.
+    expect(mrz.checkDigits.documentNumber).toBe(true);
+    expect(mrz.checkDigits.dateOfBirth).toBe(true);
+    expect(mrz.checkDigits.expirationDate).toBe(true);
+    expect(mrz.checkDigits.composite).toBe(true);
+    expect(mrz.valid).toBe(true);
+  });
+
+  it("vector canónico ICAO TD1 (ERIKSSON): campos + sexo femenino", async () => {
+    const mrz = await parseMrz(ICAO_TD1);
+    expect(mrz.surname).toBe("ERIKSSON");
+    expect(mrz.givenNames).toBe("ANNA MARIA");
+    expect(mrz.documentNumber).toBe("D23145890");
+    expect(mrz.dateOfBirth).toBe("1974-08-12");
+    expect(mrz.expirationDate).toBe("2012-04-15");
+    // "female" del parser → "FEMENINO".
+    expect(mrz.sex).toBe("FEMENINO");
+    // Los dígitos verificadores propios (doc/nac/venc/composite) son válidos
+    // aunque `valid` global sea false (UTO no es un país ISO real).
+    expect(mrz.checkDigits.documentNumber).toBe(true);
+    expect(mrz.checkDigits.dateOfBirth).toBe(true);
+    expect(mrz.checkDigits.expirationDate).toBe(true);
+    expect(mrz.checkDigits.composite).toBe(true);
+  });
+
+  it("reordena 3 líneas TD1 desordenadas a su estructura canónica", () => {
+    // Mezcladas: nombres primero, luego línea 2, luego línea 1.
+    const shuffled = [PY_MRZ_REAL[2], PY_MRZ_REAL[1], PY_MRZ_REAL[0]];
+    const ordered = detectTd1Lines(shuffled);
+    expect(ordered).toEqual(PY_MRZ_REAL);
+  });
+
+  it("detectTd1Lines descarta rótulos y ruido del dorso", () => {
+    // Texto crudo del dorso real: etiquetas + datos + las 3 líneas MRZ.
+    const texts = [
+      "ESTADO CIVIL",
+      "NACIONALIDAD",
+      "PARAGUAYA",
+      "AA0014114",
+      ...PY_MRZ_REAL,
+    ];
+    const ordered = detectTd1Lines(texts);
+    expect(ordered).toEqual(PY_MRZ_REAL);
+  });
+
+  it("líneas insuficientes → MrzData vacío (fail-closed, no inventa)", async () => {
+    const mrz = await parseMrz(["INPRYAA001411414895448<0207<<<"]);
+    expect(mrz.valid).toBe(false);
+    expect(mrz.surname).toBe("");
+    expect(mrz.rawLines.length).toBe(1);
+  });
+});
+
+describe("MRZ TD1 — cruce frente↔MRZ (crossCheck, SOFT)", () => {
+  /** Frente autoritativo de la misma persona (SOTELO MACHUCA, CI 4895448). */
+  function frontExtracted(): ExtractedDocument {
+    return {
+      documento: { pais: "REPUBLICA DEL PARAGUAY", tipo: "Cedula de Identidad Civil", numeroCedula: "4895448", specimen: false },
+      titular: {
+        apellidos: "SOTELO MACHUCA",
+        nombres: "SILVIO ANDRES",
+        fechaNacimiento: "1997-11-13",
+        sexo: "MASCULINO",
+        lugarNacimiento: { ciudad: "ASUNCION", departamento: "" },
+        nacionalidad: "PARAGUAYA",
+        estadoCivil: "",
+        donante: true,
+        firma: "Sin firma",
+      },
+      documentoFisico: { fechaEmision: "", fechaVencimiento: "2033-07-12", chip: true, codigoBarras: false },
+      registroInterno: { ic: "", ubicacion: "" },
+      autoridadEmisora: { nombre: "", cargo: "", dependencia: "" },
+      mrz: { linea1: "", linea2: "", linea3: "", paisCodigo: "" },
+    };
+  }
+  const noBarcode: BarcodeData = { format: "", text: "" };
+
+  it("CI del frente matchea el optional1 del MRZ (no el serial)", async () => {
+    const mrz = await parseMrz(PY_MRZ_REAL);
+    const auth = crossCheck(frontExtracted(), mrz, noBarcode);
+    const numCheck = auth.checks.find((c) => c.name === "mrz_vs_front_number");
+    expect(numCheck?.passed).toBe(true); // 4895448 ∈ optional1, aunque ≠ AA0014114
+  });
+
+  it("apellido y sexo del MRZ cruzan con el frente (SOFT)", async () => {
+    const mrz = await parseMrz(PY_MRZ_REAL);
+    const auth = crossCheck(frontExtracted(), mrz, noBarcode);
+    expect(auth.checks.find((c) => c.name === "mrz_vs_front_name")?.passed).toBe(true);
+    expect(auth.checks.find((c) => c.name === "mrz_vs_front_sex")?.passed).toBe(true);
+  });
+
+  it("MRZ ausente NO reprueba: consistent depende sólo de los campos impresos", () => {
+    const auth = crossCheck(frontExtracted(), { ...emptyMrz() }, noBarcode);
+    // Sin MRZ no se agregan los checks de cruce; los DUROS (impresos + no vencido) pasan.
+    expect(auth.checks.find((c) => c.name === "mrz_vs_front_number")).toBeUndefined();
+    expect(auth.consistent).toBe(true);
+  });
+});
+
+/** MrzData vacío para tests (mismo shape que EMPTY_MRZ interno). */
+function emptyMrz(): import("../types").MrzData {
+  return {
+    rawLines: [],
+    documentType: "",
+    issuingCountry: "",
+    documentNumber: "",
+    surname: "",
+    givenNames: "",
+    nationality: "",
+    dateOfBirth: "",
+    sex: "",
+    expirationDate: "",
+    checkDigits: { documentNumber: false, dateOfBirth: false, expirationDate: false, composite: false },
+    valid: false,
+  };
+}

@@ -149,19 +149,31 @@ function orderTd1(lines: string[]): string[] {
  * Acepta un `OcrResult` ya calculado (para no OCR-ear el dorso dos veces): si se
  * provee, lo usa; si no, llama al sidecar.
  */
+/**
+ * Detecta las 3 líneas MRZ TD1 candidatas a partir del texto OCR crudo del dorso
+ * y las ordena por estructura TD1. Núcleo COMPARTIDO entre `OcrMrzReader` (lectura
+ * a partir de líneas separadas por `\n`) y el Inspector OCR (lectura a partir de
+ * los textos de las cajas). EXPORTADO para el Inspector y los tests.
+ *
+ * Acepta texto multilínea o un arreglo de textos (uno por caja OCR).
+ */
+export function detectTd1Lines(input: string | string[]): string[] {
+  const rawLines = Array.isArray(input) ? input : input.split(/\r?\n/);
+  const candidates = rawLines
+    .map((l) => l.replace(/\s+/g, "").toUpperCase())
+    .filter((l) => /^[A-Z0-9<]{20,}$/.test(l))
+    // Excluí rótulos: puras letras (ni dígitos ni `<`) y cortos (<28).
+    .filter((l) => !(/^[A-Z]+$/.test(l) && l.length < 28));
+  // TD1 = 3 líneas; tomamos las 3 más largas del alfabeto MRZ y las ordenamos
+  // por estructura TD1 (NO alfabéticamente).
+  const top3 = candidates.sort((a, b) => b.length - a.length).slice(0, 3);
+  return orderTd1(top3);
+}
+
 export class OcrMrzReader implements MrzReader {
   async readLines(back: Buffer, ocr: OcrClient, pre?: OcrResult): Promise<string[]> {
     const { rawText } = pre ?? (await ocr.recognize(back));
-    const candidates = rawText
-      .split(/\r?\n/)
-      .map((l) => l.replace(/\s+/g, "").toUpperCase())
-      .filter((l) => /^[A-Z0-9<]{20,}$/.test(l))
-      // Excluí rótulos: puras letras (ni dígitos ni `<`) y cortos (<28).
-      .filter((l) => !(/^[A-Z]+$/.test(l) && l.length < 28));
-    // TD1 = 3 líneas; tomamos las 3 más largas del alfabeto MRZ y las ordenamos
-    // por estructura TD1 (NO alfabéticamente).
-    const top3 = candidates.sort((a, b) => b.length - a.length).slice(0, 3);
-    return orderTd1(top3);
+    return detectTd1Lines(rawText);
   }
 }
 
@@ -241,7 +253,43 @@ interface MrzParseResult {
   details: Array<{ field: string; valid: boolean }>;
 }
 
-async function parseMrz(lines: string[]): Promise<MrzData> {
+/**
+ * Normaliza el sexo del MRZ al convenio del FRENTE ("MASCULINO"/"FEMENINO").
+ *
+ * BUG HISTÓRICO: la librería `mrz` devuelve `sex` como `"male"`/`"female"`
+ * (no `"M"`/`"F"` ni el convenio español del frente). El parser copiaba ese valor
+ * crudo a `mrz.sex`, así que el cruce MRZ↔frente comparaba "male" vs "MASCULINO"
+ * (siempre distinto) y el backfill podía dejar `sex` en inglés. Mapeamos a la
+ * misma convención del OCR impreso. Tolerante a "M"/"F"/"male"/"female"/"hombre".
+ */
+function normalizeMrzSex(raw: string | null | undefined): string {
+  if (!raw) return "";
+  const s = raw.trim().toUpperCase();
+  if (s === "M" || s.startsWith("MALE") || s.startsWith("MASC") || s.startsWith("HOMBRE")) {
+    return "MASCULINO";
+  }
+  if (s === "F" || s.startsWith("FEMALE") || s.startsWith("FEM") || s.startsWith("MUJER")) {
+    return "FEMENINO";
+  }
+  return "";
+}
+
+/**
+ * Lee la validez de un dígito verificador de `r.details`. La librería `mrz` nombra
+ * las entradas de CHECK-DIGIT con el sufijo `CheckDigit`
+ * (`documentNumberCheckDigit`, `birthDateCheckDigit`, `expirationDateCheckDigit`,
+ * `compositeCheckDigit`). Las entradas SIN sufijo (`documentNumber`, `birthDate`,
+ * `expirationDate`) son la validez de FORMATO del campo, NO del dígito.
+ *
+ * BUG HISTÓRICO: el parser leía las entradas sin sufijo, así que `checkDigits`
+ * reflejaba el formato del campo y no la verificación ICAO 7-3-1. Verificado contra
+ * el vector canónico TD1 (ANNA ERIKSSON) y un dorso PY real.
+ */
+function detailValid(details: MrzParseResult["details"], field: string): boolean {
+  return !!details.find((d) => d.field === field)?.valid;
+}
+
+export async function parseMrz(lines: string[]): Promise<MrzData> {
   if (lines.length < 3) return { ...EMPTY_MRZ, rawLines: lines };
   try {
     const mod = (await import("mrz")) as unknown as {
@@ -249,10 +297,10 @@ async function parseMrz(lines: string[]): Promise<MrzData> {
     };
     const r = mod.parse(lines);
     const f = r.fields;
-    const dn = !!r.details.find((d) => d.field === "documentNumber")?.valid;
-    const dob = !!r.details.find((d) => d.field === "birthDate")?.valid;
-    const exp = !!r.details.find((d) => d.field === "expirationDate")?.valid;
-    const comp = !!r.details.find((d) => d.field === "compositeCheckDigit")?.valid;
+    const dn = detailValid(r.details, "documentNumberCheckDigit");
+    const dob = detailValid(r.details, "birthDateCheckDigit");
+    const exp = detailValid(r.details, "expirationDateCheckDigit");
+    const comp = detailValid(r.details, "compositeCheckDigit");
     return {
       rawLines: lines,
       documentType: f.documentCode ?? "",
@@ -262,7 +310,7 @@ async function parseMrz(lines: string[]): Promise<MrzData> {
       givenNames: f.firstName ?? "",
       nationality: f.nationality ?? "",
       dateOfBirth: mrzDateToIso(f.birthDate, false),
-      sex: f.sex ?? "",
+      sex: normalizeMrzSex(f.sex),
       expirationDate: mrzDateToIso(f.expirationDate, true),
       optionalData: f.optional1 ?? undefined,
       checkDigits: {
@@ -276,6 +324,18 @@ async function parseMrz(lines: string[]): Promise<MrzData> {
   } catch {
     return { ...EMPTY_MRZ, rawLines: lines };
   }
+}
+
+/**
+ * Helper del Inspector OCR: dado el texto de las cajas OCR de una imagen, detecta
+ * si parece un DORSO con MRZ TD1 y, si hay ≥3 líneas candidatas, las parsea.
+ * Devuelve `null` cuando NO hay MRZ (p.ej. la imagen es un frente) — así el
+ * Inspector sólo agrega el bloque `mrz` cuando realmente lo hay. ADITIVO.
+ */
+export async function detectMrzFromOcrTexts(texts: string[]): Promise<MrzData | null> {
+  const lines = detectTd1Lines(texts);
+  if (lines.length < 3) return null;
+  return parseMrz(lines);
 }
 
 // ---------------------------------------------------------------------------
@@ -1320,16 +1380,27 @@ export function crossCheck(
     detail: mrz.valid ? "MRZ check digits OK" : "MRZ no validó (best-effort)",
   });
 
-  // 4) Cruces MRZ↔frente SÓLO si el MRZ parseó válido. SOFT.
-  if (mrz.valid) {
+  // 4) Cruces MRZ↔frente. SOFT (informativos, nunca bloquean). GATING: se disparan
+  // cuando el MRZ TRAE LOS CAMPOS (no cuando `valid`). En un dorso PY real el OCR
+  // suele degradar ≥1 char y `valid` puede ser false aunque los campos sean buenos;
+  // exigir `valid` haría que el cruce NO sume señal NUNCA en producción. Fail-open:
+  // si el MRZ no trae el campo, no se agrega el check (no se penaliza su ausencia).
+  const mrzHasFields = !!(mrz.surname || mrz.documentNumber || mrz.optionalData);
+  if (mrzHasFields) {
+    // CI: en la cédula PY el `documentNumber` del MRZ es el SERIAL de la tarjeta
+    // (p.ej. "AA0014114") y el NÚMERO DE CÉDULA va en `optional1` (p.ej.
+    // "4895448 0207"). Por eso comparamos el CI del frente contra AMBOS campos:
+    // documentNumber Y optionalData. Verificado contra un dorso PY real.
     const ocrNum = norm(extracted.documento.numeroCedula);
     const mrzNum = norm(mrz.documentNumber);
-    if (ocrNum && mrzNum) {
-      const m = mrzNum.includes(ocrNum) || ocrNum.includes(mrzNum);
+    const mrzOpt = norm(mrz.optionalData ?? "");
+    if (ocrNum && (mrzNum || mrzOpt)) {
+      const matchIn = (hay: string) => !!hay && (hay.includes(ocrNum) || ocrNum.includes(hay));
+      const m = matchIn(mrzNum) || matchIn(mrzOpt);
       checks.push({
         name: "mrz_vs_front_number",
         passed: m,
-        detail: `mrz=${mrz.documentNumber} front=${extracted.documento.numeroCedula}`,
+        detail: `mrz.doc=${mrz.documentNumber} mrz.opt=${mrz.optionalData ?? ""} front=${extracted.documento.numeroCedula}`,
       });
     }
     const ocrSur = norm(extracted.titular.apellidos);
@@ -1340,6 +1411,16 @@ export function crossCheck(
         name: "mrz_vs_front_name",
         passed: m,
         detail: `mrz=${mrz.surname} front=${extracted.titular.apellidos}`,
+      });
+    }
+    // Sexo: MRZ ya normalizado a MASCULINO/FEMENINO (mismo convenio que el frente).
+    const ocrSex = norm(extracted.titular.sexo);
+    const mrzSex = norm(mrz.sex);
+    if (ocrSex && mrzSex) {
+      checks.push({
+        name: "mrz_vs_front_sex",
+        passed: ocrSex === mrzSex,
+        detail: `mrz=${mrz.sex} front=${extracted.titular.sexo}`,
       });
     }
   }
@@ -1539,8 +1620,10 @@ export class DocumentModule {
     extracted.mrz.linea1 = mrz.rawLines[0] ?? "";
     extracted.mrz.linea2 = mrz.rawLines[1] ?? "";
     extracted.mrz.linea3 = mrz.rawLines[2] ?? "";
-    // paisCodigo sólo si el MRZ parseó válido.
-    extracted.mrz.paisCodigo = mrz.valid ? mrz.issuingCountry : "";
+    // paisCodigo: el código de país emisor del MRZ (ISO-3, p.ej. "PRY"). Se publica
+    // si el parser lo resolvió, AUNQUE el MRZ no valide globalmente: `issuingState`
+    // es un campo de FORMATO estable que sobrevive al ruido de check-digits del OCR.
+    extracted.mrz.paisCodigo = mrz.issuingCountry || "";
 
     // Barcode del dorso (serial). No bloqueante.
     try {

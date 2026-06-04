@@ -37,6 +37,7 @@ import { decision as decideVerdict } from "../modules/decision";
 import sharp from "sharp";
 import {
   PaddleOcrClient,
+  detectMrzFromOcrTexts,
   extractFrontDebug,
   upscaleForOcr,
 } from "../modules/document";
@@ -693,6 +694,11 @@ adminRouter.post("/ocr-debug", canWrite, async (req: Request, res: Response) => 
     // Extracción REAL del frente, instrumentada, sobre las MISMAS líneas.
     const { extracted, anchors } = extractFrontDebug(lines);
 
+    // MRZ (DORSO): si la imagen es un dorso con MRZ TD1, detectamos y parseamos las
+    // 3 líneas para inspección visual. ADITIVO: `mrz` es `null` cuando la imagen es
+    // un frente (sin MRZ). No altera el contrato existente (lines/extracted/anchors).
+    const mrz = await detectMrzFromOcrTexts(lines.map((l) => l.text));
+
     res.json({
       variant,
       width,
@@ -702,6 +708,7 @@ adminRouter.post("/ocr-debug", canWrite, async (req: Request, res: Response) => 
       lines: lines.map((l) => ({ text: l.text, score: l.score, box: l.box })),
       extracted,
       anchors,
+      mrz,
     });
   } catch (e) {
     res.status(500).json({ error: "ocr_debug_failed", detail: (e as Error).message });
