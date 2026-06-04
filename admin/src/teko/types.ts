@@ -177,7 +177,11 @@ export interface TestSessionResponse {
 }
 
 // ---- Playground OCR (Inspector OCR) ----
-export type OcrDebugVariant = 'raw' | 'deskew-upscale'
+export type OcrDebugVariant = 'production' | 'raw' | 'deskew-upscale'
+
+// Origen por campo en el camino de PRODUCCIÓN: OCR del frente crudo, fallback
+// ampliado, o cross-fill desde el MRZ del dorso.
+export type OcrFieldSource = 'front' | 'upscale' | 'mrz'
 
 // Caja de 4 esquinas [[x,y],...] en píxeles de `imageUsed`.
 export type OcrBox = [
@@ -213,6 +217,16 @@ export interface OcrDebugResponse {
     lines: OcrDebugLine[]
     extracted: ExtractedDocument | null
     anchors: Record<string, OcrFieldAnchor>
+    // Ángulo (0/90/270) aplicado para enderezar el frente antes de anclar.
+    // INFORMATIVO: las cajas de anchors se reportan en el espacio de la imagen
+    // original, así que el overlay calza sin rotar `imageUsed`.
+    angle?: number
+    // Sólo en variant="production": origen por campo (front/upscale/mrz).
+    sources?: Record<string, OcrFieldSource>
+    // Sólo en variant="production": ¿corrió el fallback ampliado?
+    usedUpscaleFallback?: boolean
+    // Sólo en variant="production" con dorso: MRZ TD1 detectado (o null).
+    mrz?: unknown
 }
 
 // Identidad rica extraída del documento (checks[document].detail.extracted).

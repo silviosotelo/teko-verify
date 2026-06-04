@@ -52,6 +52,25 @@ const FIELD_LABEL: Record<string, string> = {
     donante: 'Donante',
 }
 
+// Mapea la clave de campo del UI a la clave del mapa `sources` del backend
+// (production). El campo "ci" del UI es "numeroCedula" en el extracted/sources.
+const SOURCE_KEY: Record<string, string> = {
+    apellidos: 'apellidos',
+    nombres: 'nombres',
+    ci: 'numeroCedula',
+    fechaNacimiento: 'fechaNacimiento',
+    fechaVencimiento: 'fechaVencimiento',
+    sexo: 'sexo',
+    lugarNacimiento: 'lugarNacimiento',
+}
+
+// Etiqueta legible del origen de un campo en producción.
+const SOURCE_LABEL: Record<string, string> = {
+    front: 'frente',
+    upscale: 'ampliado',
+    mrz: 'MRZ',
+}
+
 // Devuelve el valor presentable de un campo extraído (o '' si vacío).
 function fieldValue(ex: OcrDebugResponse['extracted'], field: string): string {
     if (!ex) return ''
@@ -177,7 +196,10 @@ function BoxOverlay({
 const OcrDebugView = () => {
     const [file, setFile] = useState<File | null>(null)
     const [previewUrl, setPreviewUrl] = useState<string | null>(null)
-    const [variant, setVariant] = useState<OcrDebugVariant>('raw')
+    // Dorso OPCIONAL (sólo variant="production"): habilita el cross-fill MRZ→frente.
+    const [backFile, setBackFile] = useState<File | null>(null)
+    const backInputRef = useRef<HTMLInputElement>(null)
+    const [variant, setVariant] = useState<OcrDebugVariant>('production')
     const [running, setRunning] = useState(false)
     const [error, setError] = useState<string | null>(null)
     const [data, setData] = useState<OcrDebugResponse | null>(null)
@@ -211,7 +233,13 @@ const OcrDebugView = () => {
         setHoveredLine(null)
         try {
             const b64 = await fileToBase64(file)
-            const res = await tekoApi.ocrDebug({ image: b64, variant })
+            // Dorso sólo aporta en producción (cross-fill MRZ). En los modos de
+            // diagnóstico el backend lo ignora.
+            const back =
+                variant === 'production' && backFile
+                    ? await fileToBase64(backFile)
+                    : undefined
+            const res = await tekoApi.ocrDebug({ image: b64, variant, back })
             setData(res)
         } catch (e) {
             setError((e as Error).message)
@@ -253,8 +281,11 @@ const OcrDebugView = () => {
             <div className="mb-6">
                 <h3 className="mb-1">Inspector OCR</h3>
                 <p className="text-gray-500">
-                    Subí el frente de una cédula y mirá qué detecta PaddleOCR
-                    (cajas + scores) y qué línea ancló cada campo el extractor.
+                    Subí el frente de una cédula y mirá lo que extrae el
+                    pipeline REAL (modo Producción, por defecto): cajas + scores
+                    de PaddleOCR, qué línea ancló cada campo y de dónde salió
+                    cada dato (frente / ampliado / MRZ). Los modos Crudo y
+                    Enderezado + ampliado son sólo para diagnóstico.
                 </p>
             </div>
 
@@ -294,6 +325,38 @@ const OcrDebugView = () => {
                         </div>
                     </div>
 
+                    {variant === 'production' && (
+                        <div>
+                            <div className="mb-2 text-sm font-semibold heading-text">
+                                Dorso (opcional, para cross-fill MRZ)
+                            </div>
+                            <div className="flex items-center gap-3">
+                                <Button
+                                    variant="default"
+                                    onClick={() =>
+                                        backInputRef.current?.click()
+                                    }
+                                >
+                                    Elegir dorso
+                                </Button>
+                                <span className="max-w-[12rem] truncate text-xs text-gray-400">
+                                    {backFile ? backFile.name : 'Sin dorso'}
+                                </span>
+                                <input
+                                    ref={backInputRef}
+                                    type="file"
+                                    accept="image/*"
+                                    className="hidden"
+                                    onChange={(e) => {
+                                        const f = e.target.files?.[0]
+                                        if (f) setBackFile(f)
+                                        e.target.value = ''
+                                    }}
+                                />
+                            </div>
+                        </div>
+                    )}
+
                     <div>
                         <div className="mb-2 text-sm font-semibold heading-text">
                             Variante
@@ -304,15 +367,20 @@ const OcrDebugView = () => {
                                 setVariant(val as OcrDebugVariant)
                             }
                         >
+                            <Segment.Item value="production">
+                                Producción
+                            </Segment.Item>
                             <Segment.Item value="raw">Crudo</Segment.Item>
                             <Segment.Item value="deskew-upscale">
                                 Enderezado + ampliado
                             </Segment.Item>
                         </Segment>
                         <p className="mt-2 max-w-xs text-xs text-gray-400">
-                            {variant === 'raw'
-                                ? 'La imagen tal cual fue subida.'
-                                : 'Pasa por doc-crop (endereza) + upscale a 1600px. Puede leer MENOS campos: el anclaje está tuneado al frame nativo.'}
+                            {variant === 'production'
+                                ? 'Lo que extrae el pipeline REAL: OCR del crudo + fallback ampliado (si faltan campos) + cross-fill desde el MRZ del dorso. Normaliza cédulas rotadas 90°. Modo recomendado.'
+                                : variant === 'raw'
+                                  ? 'Diagnóstico: la imagen tal cual fue subida, sin fallback ni cross-fill.'
+                                  : 'Diagnóstico: doc-crop (endereza) + upscale a 1600px. Puede leer MENOS campos: el anclaje está tuneado al frame nativo.'}
                         </p>
                     </div>
 
@@ -416,6 +484,13 @@ const OcrDebugView = () => {
                                         Pasá el mouse por un campo para resaltar
                                         su ancla (verde) y su etiqueta (azul).
                                     </p>
+                                    {!!data.angle && (
+                                        <p className="mb-3 text-xs text-amber-600 dark:text-amber-300">
+                                            Frente tratado como rotado{' '}
+                                            {data.angle}° (texto vertical):
+                                            enderezado antes de anclar.
+                                        </p>
+                                    )}
                                     <table className="w-full text-sm">
                                         <tbody>
                                             {fields.map((f) => {
@@ -425,6 +500,10 @@ const OcrDebugView = () => {
                                                 )
                                                 const anchor = data.anchors[f]
                                                 const empty = !value
+                                                const src =
+                                                    data.sources?.[
+                                                        SOURCE_KEY[f] ?? f
+                                                    ]
                                                 return (
                                                     <tr
                                                         key={f}
@@ -453,6 +532,15 @@ const OcrDebugView = () => {
                                                             {empty
                                                                 ? 'vacío'
                                                                 : value}
+                                                            {src && (
+                                                                <span className="ml-2 rounded bg-sky-100 px-1.5 py-0.5 text-[10px] font-normal text-sky-700 dark:bg-sky-500/20 dark:text-sky-100">
+                                                                    {
+                                                                        SOURCE_LABEL[
+                                                                            src
+                                                                        ]
+                                                                    }
+                                                                </span>
+                                                            )}
                                                         </td>
                                                         <td className="py-2 text-right">
                                                             {anchor ? (

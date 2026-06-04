@@ -210,6 +210,61 @@ describe("document — frente FORMATO NUEVO (SOTELO CAYO, CI 2962683)", () => {
 });
 
 // ===========================================================================
+// FRENTE ROTADO 90° (texto VERTICAL). Cajas REALES capturadas del sidecar sobre
+// /tmp/batch/53212_208863-0 (ESQUIVEL D., CI 6508008): la imagen llega portrait en
+// píxeles pero el texto corre en vertical (cajas alto≫ancho). Sin normalización de
+// orientación, el valor de cada fecha cae con `cy < cy(etiqueta)` → `lineBelow` lo
+// descarta → fechaNac/fechaVenc VACÍAS pese a leerse con score 0.99; y el par
+// apellidos/nombres sale INVERTIDO. Este test queda ROJO sin el fix (orientación).
+// ===========================================================================
+
+/** OCR REAL del frente ROTADO 90° (cajas exactas del sidecar, axis-aligned). */
+const ROTATED_FRONT: OcrLine[] = [
+  lineBox("16-07-2030", 0.99, 228, 93, 268, 295),
+  lineBox("FECHA DE VENCIMIENTO", 0.99, 270, 91, 307, 459),
+  lineBox("ASUNCION", 1.0, 323, 91, 364, 303),
+  lineBox("LUGAR DE NACIMIENTO", 0.96, 366, 89, 402, 444),
+  lineBox("31-07-1993", 1.0, 415, 88, 459, 292),
+  lineBox("FECHA DE NACIMIENTO", 0.97, 457, 87, 499, 439),
+  lineBox("ALINA MACARENA", 1.0, 501, 89, 544, 445),
+  lineBox("GALDONA MONTANER", 1.0, 546, 90, 585, 523),
+  lineBox("APELLIDOS, NOMBRES", 0.97, 585, 89, 625, 428),
+  lineBox("REPUBLICA DEL PARAGUAY", 1.0, 704, 237, 761, 978),
+  lineBox("Cedula de Identidad Civil", 0.99, 658, 340, 704, 887),
+  lineBox("Femenino", 1.0, 413, 629, 458, 820),
+  lineBox("6508008", 0.43, 140, 933, 193, 1139),
+];
+
+describe("document — frente ROTADO 90° (texto vertical, ESQUIVEL D. CI 6508008)", () => {
+  const { extracted: ex } = extractFrontDebug(ROTATED_FRONT);
+
+  it("fechaNacimiento se ancla pese a la rotación (valor al costado, no debajo)", () => {
+    expect(ex.titular.fechaNacimiento).toBe("1993-07-31");
+  });
+
+  it("fechaVencimiento se ancla pese a la rotación", () => {
+    expect(ex.documentoFisico.fechaVencimiento).toBe("2030-07-16");
+  });
+
+  it("apellidos / nombres NO salen invertidos (orden de filas tras enderezar)", () => {
+    // Formato viejo (etiqueta combinada "APELLIDOS, NOMBRES"): 1ª fila=apellidos.
+    expect(ex.titular.apellidos).toBe("GALDONA MONTANER");
+    expect(ex.titular.nombres).toBe("ALINA MACARENA");
+  });
+
+  it("normaliza la orientación (la imagen estaba rotada -90° = 270° CCW) y lo reporta en angle", () => {
+    // El chooser prueba {90,270} y se queda con el que ancla MÁS campos requeridos:
+    // 270° endereza este frame (todos los valores caen DEBAJO de su etiqueta).
+    expect(extractFrontDebug(ROTATED_FRONT).angle).toBe(270);
+  });
+
+  it("una cédula UPRIGHT no se reorienta (angle=0, sin regresión)", () => {
+    // CAYO_FRONT es upright: el chooser NO debe tocarlo.
+    expect(extractFrontDebug(CAYO_FRONT).angle).toBe(0);
+  });
+});
+
+// ===========================================================================
 // MRZ TD1 (dorso de la cédula PY). Vectores: el canónico ICAO 9303 (ANNA
 // ERIKSSON) y un dorso PY REAL capturado del sidecar (SOTELO MACHUCA). Verifica
 // parseo de campos, dígitos verificadores (7-3-1), normalización de sexo,

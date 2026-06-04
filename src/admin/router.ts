@@ -39,6 +39,7 @@ import {
   PaddleOcrClient,
   detectMrzFromOcrTexts,
   extractFrontDebug,
+  runFrontProduction,
   upscaleForOcr,
 } from "../modules/document";
 import type { OcrLine } from "../types";
@@ -650,14 +651,19 @@ adminRouter.post(
 // 4) Devuelve todo en el espacio de coordenadas de `imageUsed` (la imagen
 //    efectivamente OCR-eada), incluidos width/height (de sharp metadata).
 // MUTACIÓN cero, pero requiere canWrite (corre el pipeline OCR del operador).
-const OCR_DEBUG_VARIANTS = new Set(["raw", "deskew-upscale"]);
+// variant="production" (DEFAULT del Inspector): corre el camino de extracción de
+//    PRODUCCIÓN (raw-first + fallback sólo-amplía + cross-fill MRZ si se manda
+//    `back`), igual que el pipeline real. Reporta `sources` por campo (front/
+//    upscale/mrz). `raw`/`deskew-upscale` quedan como variantes de DIAGNÓSTICO.
+const OCR_DEBUG_VARIANTS = new Set(["production", "raw", "deskew-upscale"]);
+const OCR_DEBUG_ALLOWED = ["production", "raw", "deskew-upscale"];
 
 adminRouter.post("/ocr-debug", canWrite, async (req: Request, res: Response) => {
   try {
     const variant =
-      typeof req.body?.variant === "string" ? req.body.variant : "raw";
+      typeof req.body?.variant === "string" ? req.body.variant : "production";
     if (!OCR_DEBUG_VARIANTS.has(variant)) {
-      res.status(400).json({ error: "invalid_variant", allowed: ["raw", "deskew-upscale"] });
+      res.status(400).json({ error: "invalid_variant", allowed: OCR_DEBUG_ALLOWED });
       return;
     }
 
@@ -670,6 +676,44 @@ adminRouter.post("/ocr-debug", canWrite, async (req: Request, res: Response) => 
       return;
     }
 
+    const ocrClient = new PaddleOcrClient();
+
+    // ---- variant="production": camino de extracción REAL del pipeline ---------
+    if (variant === "production") {
+      // Dorso OPCIONAL (para el cross-fill MRZ): se acepta `back` base64.
+      let back: Buffer | undefined;
+      if (req.body?.back) {
+        try {
+          back = decodeBase64Image(req.body.back);
+        } catch {
+          back = undefined; // dorso inválido → seguimos sólo con el frente
+        }
+      }
+      // Resultado autoritativo (extracted + sources) = MISMO front-path de run().
+      const prod = await runFrontProduction(raw, ocrClient, back);
+      // Para el overlay del frente: OCR del crudo + anclas instrumentadas (mismas
+      // decisiones de anclaje, incluida la normalización de orientación 90°).
+      const frontOcr = await ocrClient.recognize(raw);
+      const { anchors, angle } = extractFrontDebug(frontOcr.lines);
+      const meta = await sharp(raw).metadata();
+      res.json({
+        variant,
+        width: meta.width ?? 0,
+        height: meta.height ?? 0,
+        imageUsed: raw.toString("base64"),
+        confidence: frontOcr.confidence,
+        lines: frontOcr.lines.map((l) => ({ text: l.text, score: l.score, box: l.box })),
+        extracted: prod.extracted,
+        anchors,
+        angle,
+        sources: prod.sources,
+        usedUpscaleFallback: prod.usedUpscaleFallback,
+        mrz: prod.mrz,
+      });
+      return;
+    }
+
+    // ---- variants de DIAGNÓSTICO ("raw" / "deskew-upscale") -------------------
     // Imagen EFECTIVA según variante. Todo (lines/anchors/width/height) se reporta
     // en SU espacio de coordenadas.
     let imageUsed = raw;
@@ -687,12 +731,11 @@ adminRouter.post("/ocr-debug", canWrite, async (req: Request, res: Response) => 
     const height = meta.height ?? 0;
 
     // OCR del sidecar sobre la imagen efectiva → líneas NORMALIZADAS + confianza.
-    const ocrClient = new PaddleOcrClient();
     const ocr = await ocrClient.recognize(imageUsed);
     const lines: OcrLine[] = ocr.lines;
 
     // Extracción REAL del frente, instrumentada, sobre las MISMAS líneas.
-    const { extracted, anchors } = extractFrontDebug(lines);
+    const { extracted, anchors, angle } = extractFrontDebug(lines);
 
     // MRZ (DORSO): si la imagen es un dorso con MRZ TD1, detectamos y parseamos las
     // 3 líneas para inspección visual. ADITIVO: `mrz` es `null` cuando la imagen es
@@ -708,6 +751,7 @@ adminRouter.post("/ocr-debug", canWrite, async (req: Request, res: Response) => 
       lines: lines.map((l) => ({ text: l.text, score: l.score, box: l.box })),
       extracted,
       anchors,
+      angle,
       mrz,
     });
   } catch (e) {

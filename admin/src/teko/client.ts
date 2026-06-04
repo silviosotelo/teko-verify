@@ -218,7 +218,11 @@ export const tekoApi = {
     // ---- Playground OCR (Inspector OCR) ----
     // Sube una imagen de cédula (frente, base64), corre PaddleOCR + el extractor
     // real y devuelve cajas/scores + campos + anclas (qué línea ancló cada campo).
-    ocrDebug(body: { image: string; variant?: OcrDebugVariant }) {
+    ocrDebug(body: {
+        image: string
+        variant?: OcrDebugVariant
+        back?: string
+    }) {
         return request<OcrDebugResponse>('POST', '/ocr-debug', body)
     },
 }

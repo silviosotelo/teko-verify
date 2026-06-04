@@ -688,7 +688,15 @@ function resolveOldNames(
   //   excluyendo el lugar de nacimiento (dy≈300 ≫ 101): la guarda fail-closed se
   //   sostiene sólo con maxDy. El piso 80 conserva el comportamiento en `raw`
   //   (h≈18 → piso 80, dy≈35 ≤ 80).
-  const maxDy = Math.max(80, combinedLabel.h * 1.8);
+  // FLOOR 95 (no 80): en un frente ROTADO 90° enderezado, la caja-etiqueta queda
+  // con `h` ≈ el ANCHO de glifo original (~40px), así que `h*1.8≈72` recortaba la
+  // 2ª fila de valor (nombres, a Δy≈82) → identidad VACÍA. Subir SÓLO el piso (no el
+  // multiplicador) admite la 2ª fila sin tocar el camino UPSCALE viejo, que está
+  // dominado por el multiplicador (h≈56 → 56*1.8≈101 ≥ 95, intacto por construcción).
+  // La seguridad fail-closed vive en `maxRowGap` (adyacencia), no acá: el lugar de
+  // nacimiento queda a Δy≈261 (≫ cualquier maxDy), así que ensanchar el piso no puede
+  // colar el par {nombre, lugar}.
+  const maxDy = Math.max(95, combinedLabel.h * 1.8);
   // ADYACENCIA también escalada: en raw las dos filas distan ~18px; upscaleadas
   // ~48px y el 50 fijo las clareaba por sólo 2px (frágil). `max(50, label.h)` da
   // ≈56 a escala upscale. Seguro: maxDy ya excluye el lugar, así que aflojar el
@@ -826,11 +834,142 @@ function fillMissingFront(dst: ExtractedDocument, src: ExtractedDocument): void 
   if (!dst.documento.tipo && src.documento.tipo) dst.documento.tipo = src.documento.tipo;
 }
 
+// ---------------------------------------------------------------------------
+// Normalización de ORIENTACIÓN del frente (cédulas escaneadas/fotografiadas a 90°).
+//
+// HALLAZGO (lote real de 57 cédulas, 2026-06): varios frentes llegan ROTADOS 90°
+// (la imagen es portrait en píxeles, pero el TEXTO corre en vertical). En esos
+// frames, el valor impreso no cae DEBAJO de su etiqueta en coordenadas de imagen
+// sino AL COSTADO (la relación etiqueta→valor del documento está rotada). Todo el
+// anclaje (`lineBelow`, `resolveOldNames`, `findDateLabel`, `valueRight`, y cada
+// umbral en píxeles) compara POSICIONES RELATIVAS, que son invariantes a una
+// rotación rígida: si rotamos las 4 esquinas de cada caja para volver el documento
+// a su orientación de lectura ANTES de extraer, todo lo de abajo funciona sin
+// tocarse. Verificado con boxes reales: la fecha "16-07-2030" (caja 40×202, alto≫
+// ancho = texto vertical) y su etiqueta "FECHA DE VENCIMIENTO" (37×368) quedaban
+// con `cy(valor) < cy(etiqueta)` → el filtro `l.cy > label.cy` de `lineBelow` las
+// descartaba → fechaNac/fechaVenc VACÍAS pese a leerse con score 0.99. Además el
+// par apellidos/nombres salía INVERTIDO (mismo frame rotado).
+//
+// PaddleOCR devuelve cajas AXIS-ALIGNED (el orden de esquinas NO codifica dirección
+// de lectura), así que NO se puede discriminar 90 vs 270 por geometría pura. Por eso
+// el chooser es AUTO-VALIDANTE: sólo cuando el frente es claramente VERTICAL prueba
+// {90°, 270°}, corre el extractor REAL bajo cada candidato y se queda con el que
+// ancla MÁS campos requeridos. Un frente UPRIGHT (horizontal) usa ángulo 0 =
+// transformación IDENTIDAD → AnchorLines byte-idénticas → CERO regresión (y las 3
+// cédulas conocidas, todas upright, quedan intactas por construcción). No tratamos
+// 180° (el lote no tiene ninguno y agregarlo sólo sumaría riesgo de regresión en
+// upright). FAIL-CLOSED: si ningún candidato ancla campos, el resultado queda vacío.
+// ---------------------------------------------------------------------------
+
+/** Rota un punto (x,y) por `angleDeg` ∈ {0,90,180,270} (sentido matemático CCW). */
+function rotatePoint(x: number, y: number, angleDeg: number): [number, number] {
+  switch (((angleDeg % 360) + 360) % 360) {
+    case 90:
+      return [-y, x];
+    case 180:
+      return [-x, -y];
+    case 270:
+      return [y, -x];
+    default:
+      return [x, y];
+  }
+}
+
+/**
+ * Rota las 4 esquinas de cada `OcrLine` por `angleDeg`. Sólo importan posiciones
+ * RELATIVAS (el anclaje compara distancias/orden), así que NO normalizamos la
+ * traslación: la rotación rígida ya preserva `cy>label.cy`, `|Δx|`, `Δy` y los
+ * factores de altura (`h*1.8`). Para 90/270 el min/max de las esquinas rotadas
+ * intercambia ancho↔alto automáticamente. `angleDeg=0` devuelve copias idénticas
+ * (identidad). NO muta la entrada.
+ */
+function rotateOcrLines(lines: OcrLine[], angleDeg: number): OcrLine[] {
+  if (((angleDeg % 360) + 360) % 360 === 0) return lines;
+  return lines.map((l) => ({
+    ...l,
+    box: l.box.map((p) => rotatePoint(p[0], p[1], angleDeg)) as OcrLine["box"],
+  }));
+}
+
+/**
+ * ¿El frente está rotado 90° (texto VERTICAL)? Heurística por aspecto de caja: en
+ * un frente UPRIGHT las líneas impresas son anchas-y-bajas (ancho≫alto); en uno
+ * rotado 90° son altas-y-angostas (alto≫ancho). Contamos cajas de texto legible
+ * (score alto, ≥4 chars) verticales vs horizontales y exigimos MAYORÍA CLARA de
+ * verticales para gatear la corrección (gate estricto → no toca upright). Validado
+ * en el lote: rotados dan v≈12-14/h=0; upright dan h≈14-20/v=0 (separación limpia).
+ */
+function looksVertical(lines: OcrLine[]): boolean {
+  let vert = 0;
+  let horz = 0;
+  for (const l of lines) {
+    if (l.score < 0.8) continue;
+    if (l.text.trim().length < 4) continue;
+    const xs = l.box.map((p) => p[0]);
+    const ys = l.box.map((p) => p[1]);
+    const w = Math.max(...xs) - Math.min(...xs);
+    const h = Math.max(...ys) - Math.min(...ys);
+    if (w <= 0 || h <= 0) continue;
+    if (h / w > 1.3) vert++;
+    else if (w / h > 1.3) horz++;
+  }
+  // Mayoría CLARA de verticales (y al menos 3 para no disparar con ruido).
+  return vert >= 3 && vert > horz * 2;
+}
+
+/** Cuenta campos REQUERIDOS no vacíos de un `extracted` (oráculo del chooser). */
+function requiredFieldCount(e: ExtractedDocument): number {
+  let n = 0;
+  if (e.titular.apellidos) n++;
+  if (e.titular.nombres) n++;
+  if (e.titular.fechaNacimiento) n++;
+  if (e.documentoFisico.fechaVencimiento) n++;
+  if (e.documento.numeroCedula) n++;
+  return n;
+}
+
+/**
+ * Devuelve las líneas del frente en su orientación de LECTURA. Si el frente NO se
+ * ve vertical → ángulo 0 (identidad, las mismas líneas). Si se ve vertical, prueba
+ * {90°,270°}, corre el extractor REAL bajo cada candidato y devuelve las líneas del
+ * que ancló MÁS campos requeridos (auto-validante; PaddleOCR no codifica dirección
+ * de lectura). Empate o cero campos en ambos → 90° por defecto (la rotación que más
+ * frecuentemente endereza el lote); el extractor downstream igual fail-closea.
+ *
+ * Devuelve `{ lines, angle }` para que el Inspector pueda rotar también la imagen
+ * de overlay por el MISMO ángulo y que las cajas dibujadas calcen.
+ */
+function orientFrontLines(frontLines: OcrLine[]): { lines: OcrLine[]; angle: number } {
+  if (!looksVertical(frontLines)) return { lines: frontLines, angle: 0 };
+  let best = { lines: rotateOcrLines(frontLines, 90), angle: 90, score: -1 };
+  for (const angle of [90, 270]) {
+    const rotated = rotateOcrLines(frontLines, angle);
+    const probe = emptyExtracted();
+    extractFrontInto(rotated, probe);
+    const score = requiredFieldCount(probe);
+    if (score > best.score) best = { lines: rotated, angle, score };
+  }
+  return { lines: best.lines, angle: best.angle };
+}
+
 /**
  * Extrae los campos del FRENTE por anclaje posición→etiqueta (FUENTE AUTORITATIVA).
- * Best-effort: cada campo se setea sólo si su ancla existe; lo demás queda en blanco.
+ * NORMALIZA primero la orientación (cédulas rotadas 90°) y luego ancla. Best-effort:
+ * cada campo se setea sólo si su ancla existe; lo demás queda en blanco.
  */
 function extractFront(frontLines: OcrLine[], extracted: ExtractedDocument): void {
+  const { lines } = orientFrontLines(frontLines);
+  extractFrontInto(lines, extracted);
+}
+
+/**
+ * Núcleo del anclaje del frente sobre líneas YA orientadas (orientación de lectura).
+ * Separado de `extractFront` para que el chooser de orientación (`orientFrontLines`)
+ * pueda correrlo como sonda bajo cada rotación candidata SIN recursión. Toda la
+ * lógica de anclaje vive acá, intacta.
+ */
+function extractFrontInto(frontLines: OcrLine[], extracted: ExtractedDocument): void {
   const lines = toAnchorLines(frontLines);
   const labels = collectKnownLabels(lines);
 
@@ -1077,6 +1216,14 @@ export interface FieldAnchor {
 export interface FrontDebug {
   extracted: ExtractedDocument;
   anchors: Record<string, FieldAnchor>;
+  /**
+   * Ángulo (0/90/270) que se aplicó para enderezar el frente ANTES de anclar.
+   * INFORMATIVO: las cajas de `anchors` se reportan en el espacio de la IMAGEN
+   * ORIGINAL (mismo índice de línea → misma caja sin rotar), así calzan sobre
+   * `imageUsed` sin rotar la imagen. El Inspector lo muestra como metadato
+   * ("tratado como rotado 90°"); NO debe transformar la imagen con él.
+   */
+  angle: number;
 }
 
 /**
@@ -1092,7 +1239,15 @@ export interface FrontDebug {
  */
 export function extractFrontDebug(frontLines: OcrLine[]): FrontDebug {
   const extracted = emptyExtracted();
-  const lines = toAnchorLines(frontLines);
+  // Endereza la orientación primero (cédulas rotadas 90°): MISMA decisión que
+  // producción (`orientFrontLines`). El ANCLAJE corre sobre las líneas rotadas
+  // (posiciones relativas), pero las CAJAS de las anclas se reportan en el espacio
+  // de la imagen ORIGINAL (vía `boxOf(frontLines, idx)`: `rotateOcrLines` es un
+  // `.map` que preserva el orden, así que `idx` indexa idéntico ambas listas).
+  // Así el overlay calza sobre `imageUsed` SIN rotar la imagen.
+  const { angle } = orientFrontLines(frontLines);
+  const orientedLines = rotateOcrLines(frontLines, angle);
+  const lines = toAnchorLines(orientedLines);
   const labels = collectKnownLabels(lines);
   const anchors: Record<string, FieldAnchor> = {};
 
@@ -1297,7 +1452,7 @@ export function extractFrontDebug(frontLines: OcrLine[]): FrontDebug {
     }
   }
 
-  return { extracted, anchors };
+  return { extracted, anchors, angle };
 }
 
 /**
@@ -1662,6 +1817,132 @@ export function parseOcrFields(extracted: ExtractedDocument): OcrData["fields"] 
     fields.expirationDate = extracted.documentoFisico.fechaVencimiento;
   if (extracted.titular.nacionalidad) fields.nationality = extracted.titular.nacionalidad;
   return fields;
+}
+
+// ---------------------------------------------------------------------------
+// Camino de extracción de PRODUCCIÓN para el Inspector OCR (Fix 2). Reproduce
+// EXACTAMENTE el front-path de `DocumentModule.run`: OCR del frente CRUDO primero
+// (anclaje de referencia) → fallback SÓLO-AMPLÍA-NO-PISA si faltan requeridos →
+// cross-fill MRZ→frente si se provee un DORSO cuyo CI cruza. Reusa los MISMOS
+// helpers que producción (`extractFront`, `frontRequiredMissing`, `fillMissingFront`,
+// `crossFillFromMrz`), NO reimplementa. Devuelve, por campo, el ORIGEN: front (OCR
+// crudo), upscale (fallback ampliado) o mrz (cross-fill del dorso).
+// ---------------------------------------------------------------------------
+
+/** Campos del frente que el Inspector marca con su origen (front/upscale/mrz). */
+const PRODUCTION_SOURCE_FIELDS = [
+  "apellidos",
+  "nombres",
+  "fechaNacimiento",
+  "fechaVencimiento",
+  "sexo",
+  "lugarNacimiento",
+  "numeroCedula",
+  "pais",
+  "tipo",
+] as const;
+
+/** Lee el valor "presente?" de un campo del frente por su nombre lógico. */
+function frontFieldPresent(e: ExtractedDocument, field: string): boolean {
+  switch (field) {
+    case "apellidos":
+      return !!e.titular.apellidos;
+    case "nombres":
+      return !!e.titular.nombres;
+    case "fechaNacimiento":
+      return !!e.titular.fechaNacimiento;
+    case "fechaVencimiento":
+      return !!e.documentoFisico.fechaVencimiento;
+    case "sexo":
+      return !!e.titular.sexo;
+    case "lugarNacimiento":
+      return !!e.titular.lugarNacimiento.ciudad;
+    case "numeroCedula":
+      return !!e.documento.numeroCedula;
+    case "pais":
+      return !!e.documento.pais;
+    case "tipo":
+      return !!e.documento.tipo;
+    default:
+      return false;
+  }
+}
+
+export interface ProductionFrontResult {
+  extracted: ExtractedDocument;
+  /** Origen por campo: "front" (OCR crudo), "upscale" (fallback), "mrz" (dorso). */
+  sources: Record<string, "front" | "upscale" | "mrz">;
+  /** ¿Se corrió el fallback ampliado (faltaban requeridos tras el crudo)? */
+  usedUpscaleFallback: boolean;
+  /** Líneas MRZ TD1 detectadas en el dorso (si se proveyó dorso), informativo. */
+  mrz: MrzData | null;
+}
+
+/**
+ * Ejecuta el front-path de PRODUCCIÓN para el Inspector. `back` opcional: si se
+ * provee, intenta el cross-fill MRZ→frente (sólo si el CI del MRZ cruza con el del
+ * frente; fail-closed). NO corre quality/liveness/match ni recorta la foto — sólo
+ * la extracción de campos del documento, que es lo que el Inspector muestra.
+ */
+export async function runFrontProduction(
+  front: Buffer,
+  ocr: OcrClient,
+  back?: Buffer
+): Promise<ProductionFrontResult> {
+  const extracted = emptyExtracted();
+  const sources: Record<string, "front" | "upscale" | "mrz"> = {};
+
+  // 1) OCR del FRENTE CRUDO (pasada de referencia, igual que producción).
+  try {
+    const frontOcr = await ocr.recognize(front);
+    extractFront(frontOcr.lines, extracted);
+  } catch {
+    /* fail-open: el fallback ampliado puede recuperar */
+  }
+  for (const f of PRODUCTION_SOURCE_FIELDS) {
+    if (frontFieldPresent(extracted, f)) sources[f] = "front";
+  }
+
+  // 2) FALLBACK MONOTÓNICO (sólo-amplía-no-pisa) si faltan requeridos.
+  let usedUpscaleFallback = false;
+  if (frontRequiredMissing(extracted)) {
+    try {
+      const upscaled = await upscaleForOcr(front, 1600);
+      const fb = await ocr.recognize(upscaled);
+      const fbExtracted = emptyExtracted();
+      extractFront(fb.lines, fbExtracted);
+      fillMissingFront(extracted, fbExtracted);
+      usedUpscaleFallback = true;
+    } catch {
+      /* fail-open */
+    }
+    // Campos que aparecieron recién tras el fallback → origen "upscale".
+    for (const f of PRODUCTION_SOURCE_FIELDS) {
+      if (!sources[f] && frontFieldPresent(extracted, f)) sources[f] = "upscale";
+    }
+  }
+
+  // 3) CROSS-FILL MRZ→FRENTE (si hay dorso). Igual que producción: sólo si el CI
+  //    del MRZ cruza con el del frente; nunca pisa un valor ya presente.
+  let mrz: MrzData | null = null;
+  if (back) {
+    try {
+      const backOcr = await ocr.recognize(back);
+      const td1 = detectTd1Lines(backOcr.lines.map((l) => l.text));
+      if (td1.length >= 3) {
+        mrz = await parseMrz(td1);
+        crossFillFromMrz(extracted, mrz);
+      }
+    } catch {
+      /* fail-open: dorso ilegible no rompe el frente */
+    }
+    // crossFillFromMrz marca `extracted.fieldSources[campo]="mrz"`.
+    for (const [f, src] of Object.entries(extracted.fieldSources ?? {})) {
+      sources[f] = src;
+    }
+  }
+
+  return { extracted, sources, usedUpscaleFallback, mrz };
 }
 
 // ---------------------------------------------------------------------------
