@@ -214,6 +214,65 @@ describe("document — frente FORMATO NUEVO (SOTELO CAYO, CI 2962683)", () => {
 });
 
 // ===========================================================================
+// FRENTE ORUE SOSA (CI 4401067) — CAJAS REALES del tier `enhanced` del sidecar
+// (/admin/ocr-debug variant=enhanced sobre /tmp/orue_front.jpg). Layout: FECHA DE
+// VENCIMIENTO arriba-derecha; abajo-izquierda FECHA DE NACIMIENTO con su valor
+// "05-02-1999" DEBAJO, SEXO a la derecha, y más abajo LUGAR DE NACIMIENTO con la
+// CIUDAD "ENCARNACION" debajo.
+//
+// BUG que cubre (anclaje, no legibilidad): el OCR lee "FECHA DENACIMIENTO" (s=0.987)
+// y "05-02-1999" (s=1.00) perfecto, pero la CIUDAD "ENCARNACION" (s=0.99) contiene
+// el substring "NAC" → con el needle viejo `findDateLabel(NAC)` la elegía como
+// rótulo de nacimiento (mayor score) y, al estar ABAJO del valor, `lineBelow` no
+// encontraba la fecha (exige cy_valor > cy_rótulo) → fechaNac VACÍA. Este test queda
+// ROJO sin el fix (needle "NAC"→"NACIM"). VENC no se afecta.
+// ===========================================================================
+
+/** OCR REAL del frente ORUE (tier enhanced, cajas exactas axis-aligned). */
+const ORUE_FRONT: OcrLine[] = [
+  lineBox("REPUBLICA DEL PARAGUAY", 0.981, 454, 90, 1322, 154),
+  lineBox("Cedula de Identidad Civil", 0.980, 464, 162, 946, 215),
+  lineBox("APELLIDOS", 0.999, 552, 271, 694, 304),
+  lineBox("FECHA DE VENCIMIENTO", 0.993, 1128, 265, 1433, 301),
+  lineBox("ORUE SOSA", 0.990, 553, 360, 800, 410),
+  lineBox("24-06-2035", 0.999, 1158, 315, 1368, 356),
+  lineBox("NOMBRES", 0.999, 543, 408, 685, 441),
+  lineBox("MARIA RAQUEL", 0.990, 553, 462, 870, 510),
+  lineBox("FECHA DENACIMIENTO", 0.987, 553, 772, 845, 803),
+  lineBox("SEXO", 0.825, 897, 768, 973, 805),
+  lineBox("05-02-1999", 1.0, 553, 809, 763, 851),
+  lineBox("FEMENINO", 0.997, 896, 804, 1130, 852),
+  lineBox("N4401067", 0.953, 135, 851, 388, 903),
+  lineBox("LUGAR DE NACIMIENTO", 0.971, 554, 862, 845, 898),
+  lineBox("ENCARNACION", 0.995, 556, 896, 872, 942),
+];
+
+describe("document — frente ORUE SOSA (CI 4401067): ENCARNACION no roba NAC", () => {
+  const dbg = extractFrontDebug(ORUE_FRONT);
+  const ex = dbg.extracted;
+
+  it("findDateLabel(NAC) elige el rótulo real (cy≈788), NO 'ENCARNACION' (cy≈919)", () => {
+    // El ancla de fechaNacimiento debe apuntar al valor "05-02-1999", prueba de que
+    // el rótulo correcto ganó el match (con el needle "NAC" viejo, ENCARNACION ganaba
+    // y este campo quedaba sin ancla / vacío).
+    expect(dbg.anchors.fechaNacimiento?.text).toBe("05-02-1999");
+  });
+
+  it("fecha de NACIMIENTO se ancla (05-02-1999 → ISO) pese a ENCARNACION conteniendo 'NAC'", () => {
+    expect(ex.titular.fechaNacimiento).toBe("1999-02-05");
+  });
+
+  it("fecha de VENCIMIENTO sigue anclando (no-regresión)", () => {
+    expect(ex.documentoFisico.fechaVencimiento).toBe("2035-06-24");
+  });
+
+  it("sexo y lugar (no-regresión)", () => {
+    expect(ex.titular.sexo).toBe("FEMENINO");
+    expect(ex.titular.lugarNacimiento.ciudad).toBe("ENCARNACION");
+  });
+});
+
+// ===========================================================================
 // FRENTE ROTADO 90° (texto VERTICAL). Cajas REALES capturadas del sidecar sobre
 // /tmp/batch/53212_208863-0 (ESQUIVEL D., CI 6508008): la imagen llega portrait en
 // píxeles pero el texto corre en vertical (cajas alto≫ancho). Sin normalización de

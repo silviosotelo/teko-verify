@@ -777,16 +777,27 @@ function resolveOldNames(
  * justo debajo. Por eso ya NO exigimos "FECHA": anclamos por el token DISTINTIVO
  * del campo, que es robusto al ruido:
  *   - VENC  → la línea-etiqueta contiene "VENC" (de VENCIMIENTO/VENCIMENTO).
- *   - NAC   → la línea-etiqueta contiene "NACIMIENTO" (o, tolerante, "NAC...").
+ *   - NAC   → la línea-etiqueta contiene "NACIM" (de NACIMIENTO).
  *
- * GUARDA CRÍTICA para NAC: "LUGAR DE NACIMIENTO" también contiene "NACIMIENTO" y
+ * GUARDA CRÍTICA 1 para NAC: "LUGAR DE NACIMIENTO" también contiene "NACIM" y
  * suele leerse con score 1.00 (> el de "FEGHA...NACIMIENTO" degradado), así que sin
  * filtro GANARÍA el sort-por-score y su valor-debajo (la CIUDAD, p.ej. "LUQUE") no
  * es una fecha → nac quedaría vacío. EXCLUIMOS toda etiqueta que contenga "LUGAR".
  * Verificado: con esto, line "FEGHA-DENACIMIENTOUCAC" gana y "22-04-1969" ancla.
+ *
+ * GUARDA CRÍTICA 2 para NAC (caso real ORUE SOSA): el needle NO puede ser sólo
+ * "NAC". La CIUDAD de nacimiento "ENCAR·NAC·ION" (canon "ENCARNACION", score 0.99)
+ * CONTIENE "NAC" como substring y, al estar ABAJO de la etiqueta real, GANABA el
+ * sort-por-score → findDateLabel devolvía "ENCARNACION" (cy≈919) como rótulo NAC.
+ * El valor "05-02-1999" (cy≈830) queda ARRIBA de ese falso rótulo → `lineBelow`
+ * (que exige cy_valor > cy_rótulo) NO lo encontraba → fechaNac VACÍA pese a leerse
+ * con score 1.00. Endurecemos el needle a "NACIM": "ENCARNACION" NO lo contiene
+ * (no hay "M" tras "NACI"), mientras que TODAS las variantes reales del rótulo sí
+ * ("NACIMIENTO", "DENACIMIENTO", "FEGHA-DENACIMIENTOUCAC"). VENC no se ve afectado
+ * (ninguna ciudad/valor contiene "VENC").
  */
 function findDateLabel(lines: AnchorLine[], token: "VENC" | "NAC"): AnchorLine | undefined {
-  const needle = token === "VENC" ? "VENC" : "NAC";
+  const needle = token === "VENC" ? "VENC" : "NACIM";
   return lines
     .filter((l) => {
       const c = canon(l.text);

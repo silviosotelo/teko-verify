@@ -535,17 +535,24 @@ const OcrDebugView = () => {
                                                                     : 'heading-text'
                                                             }`}
                                                         >
-                                                            {empty
-                                                                ? 'vacío'
-                                                                : value}
+                                                            <span>
+                                                                {empty
+                                                                    ? 'vacío'
+                                                                    : value}
+                                                            </span>
+                                                        </td>
+                                                        {/* Origen del dato (frente/ampliado/MRZ) en COLUMNA PROPIA: así al
+                                                            copiar la fila el valor y el badge no se pegan ("ORUE SOSA" + "frente",
+                                                            nunca "ORUESOSAfrente"). El pill es un Tag visualmente separado. */}
+                                                        <td className="py-2 pl-3">
                                                             {src && (
-                                                                <span className="ml-2 rounded bg-sky-100 px-1.5 py-0.5 text-[10px] font-normal text-sky-700 dark:bg-sky-500/20 dark:text-sky-100">
+                                                                <Tag className="border-0 bg-sky-100 text-[10px] font-normal text-sky-700 dark:bg-sky-500/20 dark:text-sky-100">
                                                                     {
                                                                         SOURCE_LABEL[
                                                                             src
                                                                         ]
                                                                     }
-                                                                </span>
+                                                                </Tag>
                                                             )}
                                                         </td>
                                                         <td className="py-2 text-right">
