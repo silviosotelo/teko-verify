@@ -349,6 +349,17 @@ interface ValueBelowOpts {
   minScore?: number;
   exclude?: AnchorLine[];
   /**
+   * Tolerancia vertical RELATIVA a la altura de la etiqueta (px): el gap real
+   * etiqueta→valor escala con el tamaño del texto (cámara más cerca/lejos,
+   * rotación). Un `maxDy` ABSOLUTO tuneado a un frame (48px @ label-height≈39)
+   * VACÍA el apellido cuando la cédula se fotografía más grande (visto real:
+   * label-height≈55 → gap≈66 > 48). Si se provee, el umbral efectivo es
+   * `max(maxDy, label.h * dyHeightFactor)`. NO usar en campos donde una banda
+   * ancha invitaría a otra fila (apellidos sí: la fila siguiente —NOMBRES— está
+   * a ~4-5× la altura de la etiqueta, muy lejos del factor 1.6).
+   */
+  dyHeightFactor?: number;
+  /**
    * Predicado de FORMA esperada del valor. El frente de la cédula PY tiene un
    * fondo de guilloche/watermark que el OCR fragmenta en ruido ("CAL", "WAL",
    * "AYREPUBLIC"...) salpicado entre la etiqueta y su valor real. Sin filtro,
@@ -366,7 +377,13 @@ function lineBelow(
   opts: ValueBelowOpts = {}
 ): AnchorLine | undefined {
   const maxDx = opts.maxDx ?? 280;
-  const maxDy = opts.maxDy ?? 220;
+  const baseMaxDy = opts.maxDy ?? 220;
+  // Umbral Y efectivo: el mayor entre el absoluto y el relativo a la altura de la
+  // etiqueta. Así el anclaje sobrevive a fotos más grandes/rotadas (el gap escala
+  // con el texto) sin abrir la banda en los campos que no lo piden.
+  const maxDy = opts.dyHeightFactor
+    ? Math.max(baseMaxDy, label.h * opts.dyHeightFactor)
+    : baseMaxDy;
   const minScore = opts.minScore ?? 0.3;
   const exclude = new Set(opts.exclude ?? []);
   const accept = opts.accept;
@@ -390,7 +407,7 @@ function fieldBelow(
   lines: AnchorLine[],
   label: string,
   labels: AnchorLine[],
-  opts?: { maxDx?: number; maxDy?: number; minScore?: number; accept?: (text: string) => boolean }
+  opts?: ValueBelowOpts
 ): string {
   const lbl = findLabel(lines, label);
   if (!lbl) return "";
@@ -406,7 +423,7 @@ function findValueLineBelow(
   lines: AnchorLine[],
   label: string,
   labels: AnchorLine[],
-  opts?: { maxDx?: number; maxDy?: number; minScore?: number; accept?: (text: string) => boolean }
+  opts?: ValueBelowOpts
 ): AnchorLine | undefined {
   const lbl = findLabel(lines, label);
   if (!lbl) return undefined;
@@ -494,6 +511,12 @@ function looksLikeName(s: string): boolean {
   if (!c) return false;
   if (!/^[A-Z ]+$/.test(c)) return false; // sólo letras y espacios
   if (c.length < 4 || c.length > 40) return false;
+  // Rechazá fragmentos OCR-corruptos del WATERMARK "REPÚBLICA DEL PARAGUAY". Con
+  // rotación/perspectiva el OCR los junta en una sola tira larga sin espacios
+  // (visto real: "CPUBLICADELPARAGUAYRIEPUB", "AYREPUBLICADELPARAGUAY"). Esa tira
+  // pasaba `looksLikeName` (un token largo, no-stopword) y, con maxDy ampliado,
+  // se colaba como apellido. Una SUBCADENA del watermark NUNCA es un apellido.
+  if (/REPUBLIC|PUBLICA|PARAGUAY/.test(c.replace(/ /g, ""))) return false;
   const tokens = c.split(" ").filter(Boolean);
   if (tokens.length === 0) return false;
   // Al menos un token "fuerte" (≥4 chars y no-stopword); ninguna stopword sola.
@@ -655,12 +678,32 @@ function extractFront(frontLines: OcrLine[], extracted: ExtractedDocument): void
   const nombres = cleanName(nombresLine?.text ?? "");
   if (nombres) extracted.titular.nombres = nombres;
 
+  // GUARDAS (revisadas — validadas contra la imagen real + variantes rotadas):
+  //   1) `maxDy` ya NO es un absoluto frágil. El gap real etiqueta→valor escala con
+  //      el tamaño del texto; un 48px fijo (tuneado a label-height≈39) VACIABA el
+  //      apellido cuando la cédula se fotografía más grande (real: label-height≈55 →
+  //      gap≈66 > 48). Ahora la banda es `max(56, h*1.8)`: admite el valor real
+  //      aunque la foto sea más grande/rotada, y sigue MUY por debajo de la fila
+  //      NOMBRES (a ~4-5× la altura de la etiqueta), que además se excluye por
+  //      identidad (`nombresLine`) y por anti-copia.
+  //   2) `looksLikeName` ahora rechaza por substring el watermark "REPÚBLICA DEL
+  //      PARAGUAY" OCR-corrupto (real: "CPUBLICADELPARAGUAYRIEPUB" se colaba como
+  //      apellido cuando la banda se ampliaba). Con eso, el ÚNICO candidato en banda
+  //      es el apellido verdadero → la selección por cercanía-Y basta (NO se necesita
+  //      preferir score; sería redundante).
+  //   3) `minScore: 0.6` (más estricto que el 0.3 global): el apellido impreso real
+  //      lee score ~0.97-0.99; un blob de ruido OCR de una foto demasiado distorsionada
+  //      lee ~0.39 y NO debe convertirse en apellido. Fail-closed: ante texto ilegible,
+  //      apellidos queda VACÍO (revisión manual), NUNCA basura — un apellido erróneo
+  //      en KYC es peor que uno ausente.
   const apellidosExclude = nombresLine ? [...labels, nombresLine] : labels;
   const apellidos = cleanName(
     fieldBelow(lines, "APELLIDOS", apellidosExclude, {
       accept: looksLikeName,
       maxDx: 360,
-      maxDy: 48,
+      maxDy: 56,
+      dyHeightFactor: 1.8,
+      minScore: 0.6,
     })
   );
   // Anti-copia: apellidos jamás puede quedar igual a nombres (síntoma del bug).
