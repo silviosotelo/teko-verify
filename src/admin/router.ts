@@ -658,8 +658,8 @@ adminRouter.post(
 //    PRODUCCIÓN (raw-first + fallback sólo-amplía + cross-fill MRZ si se manda
 //    `back`), igual que el pipeline real. Reporta `sources` por campo (front/
 //    upscale/mrz). `raw`/`deskew-upscale` quedan como variantes de DIAGNÓSTICO.
-const OCR_DEBUG_VARIANTS = new Set(["production", "raw", "deskew-upscale"]);
-const OCR_DEBUG_ALLOWED = ["production", "raw", "deskew-upscale"];
+const OCR_DEBUG_VARIANTS = new Set(["production", "raw", "deskew-upscale", "enhanced"]);
+const OCR_DEBUG_ALLOWED = ["production", "raw", "deskew-upscale", "enhanced"];
 
 adminRouter.post("/ocr-debug", canWrite, async (req: Request, res: Response) => {
   try {
@@ -738,7 +738,14 @@ adminRouter.post("/ocr-debug", canWrite, async (req: Request, res: Response) => 
     const height = meta.height ?? 0;
 
     // OCR del sidecar sobre la imagen efectiva → líneas NORMALIZADAS + confianza.
-    const ocr = await ocrClient.recognize(imageUsed);
+    // variant="enhanced": pre-proceso de FONDO DE SEGURIDAD (canal verde → blur →
+    // adaptiveThreshold) vía /ocr-enhanced, geometría W×H preservada. Diagnóstico: muestra
+    // qué recupera el 3er tier sobre el watermark. imageUsed = raw (el overlay calza con
+    // las cajas en coordenadas del frente nativo; el sidecar binariza internamente).
+    const ocr =
+      variant === "enhanced" && ocrClient.recognizeEnhanced
+        ? await ocrClient.recognizeEnhanced(imageUsed)
+        : await ocrClient.recognize(imageUsed);
     const lines: OcrLine[] = ocr.lines;
 
     // Extracción REAL del frente, instrumentada, sobre las MISMAS líneas.

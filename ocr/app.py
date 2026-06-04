@@ -176,27 +176,10 @@ def doc_crop(inp: DocCropIn):
     return {"image": base64.b64encode(enc.tobytes()).decode("ascii"), "cropped": cropped}
 
 
-@app.post("/ocr")
-def ocr(inp: OcrIn):
-    raw = inp.image or ""
-    if raw.startswith("data:") and "," in raw:
-        raw = raw.split(",", 1)[1]
-    try:
-        blob = base64.b64decode(raw)
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=400, detail=f"invalid base64: {exc}") from exc
-    if not blob:
-        raise HTTPException(status_code=400, detail="empty image")
-
-    import numpy as np
-    from PIL import Image
-
-    try:
-        img = Image.open(io.BytesIO(blob)).convert("RGB")
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=400, detail=f"invalid image: {exc}") from exc
-
-    arr = np.array(img)
+def _ocr_array(arr):
+    """Corre PaddleOCR sobre un ndarray (HxWx3 BGR/RGB) y normaliza a la salida del
+    contrato. ÚNICA fuente de verdad usada por /ocr y /ocr-enhanced para que el
+    shape {text,confidence,lines:[{text,score,box}]} sea idéntico."""
     results = _get_ocr().predict(arr)
 
     texts, scores, polys = [], [], []
@@ -219,3 +202,73 @@ def ocr(inp: OcrIn):
         box = _box(polys[i]) if i < len(polys) else []
         lines.append({"text": str(t), "score": s, "box": box})
     return {"text": "\n".join(str(t) for t in texts), "confidence": conf, "lines": lines}
+
+
+@app.post("/ocr")
+def ocr(inp: OcrIn):
+    raw = inp.image or ""
+    if raw.startswith("data:") and "," in raw:
+        raw = raw.split(",", 1)[1]
+    try:
+        blob = base64.b64decode(raw)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=f"invalid base64: {exc}") from exc
+    if not blob:
+        raise HTTPException(status_code=400, detail="empty image")
+
+    import numpy as np
+    from PIL import Image
+
+    try:
+        img = Image.open(io.BytesIO(blob)).convert("RGB")
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=f"invalid image: {exc}") from exc
+
+    arr = np.array(img)
+    return _ocr_array(arr)
+
+
+@app.post("/ocr-enhanced")
+def ocr_enhanced(inp: OcrIn):
+    """
+    OCR con PRE-PROCESO para texto sobre FONDO DE SEGURIDAD (watermark "REPÚBLICA
+    DEL PARAGUAY" + sello rojo + guilloché rosa del frente de la cédula PY, que
+    GARBLA la mitad superior en /ocr crudo). Receta validada sobre la imagen real:
+      canal VERDE (debilita el naranja/rosa/rojo de seguridad, conserva el texto
+      negro) -> GaussianBlur 3x3 -> adaptiveThreshold Gaussiano (blockSize=25, C=9).
+    PRESERVA la geometría W×H del frente (NO doc-crop): el anclaje etiqueta→valor de
+    document.ts usa píxeles ABSOLUTOS, así que la imagen binarizada debe mantener el
+    mismo tamaño que el crudo. Mismo contrato/shape que /ocr.
+
+    NOTA DE SEGURIDAD: este endpoint puede MEZCLAR texto del watermark en la caja del
+    valor (visto real: apellido "ORUE SOSA" + bleed "A DEL" => "ORUE SOSAA DEL" en una
+    SOLA caja). La defensa vive en document.ts (`looksLikeName` rechaza un nombre cuyo
+    último token es una partícula de fondo: DEL/DE/LA/...): este endpoint NO sanea, sólo
+    re-OCR-ea. El tier enhanced es fill-blanks-only y gated en campos requeridos faltantes.
+    """
+    raw = inp.image or ""
+    if raw.startswith("data:") and "," in raw:
+        raw = raw.split(",", 1)[1]
+    try:
+        blob = base64.b64decode(raw)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=f"invalid base64: {exc}") from exc
+    if not blob:
+        raise HTTPException(status_code=400, detail="empty image")
+
+    import cv2
+    import numpy as np
+
+    arr = np.frombuffer(blob, dtype=np.uint8)
+    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)  # BGR, geometría nativa
+    if img is None:
+        raise HTTPException(status_code=400, detail="invalid image")
+
+    b, g, r = cv2.split(img)  # canal VERDE = g
+    blurred = cv2.GaussianBlur(g, (3, 3), 0)
+    binar = cv2.adaptiveThreshold(
+        blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 25, 9
+    )
+    # PaddleOCR.predict espera 3 canales; apilamos sin recortar => W×H preservado.
+    bgr = cv2.cvtColor(binar, cv2.COLOR_GRAY2BGR)
+    return _ocr_array(bgr)

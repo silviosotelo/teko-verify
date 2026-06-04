@@ -68,6 +68,7 @@ const SOURCE_KEY: Record<string, string> = {
 const SOURCE_LABEL: Record<string, string> = {
     front: 'frente',
     upscale: 'ampliado',
+    enhanced: 'realzado',
     mrz: 'MRZ',
 }
 
@@ -374,13 +375,18 @@ const OcrDebugView = () => {
                             <Segment.Item value="deskew-upscale">
                                 Enderezado + ampliado
                             </Segment.Item>
+                            <Segment.Item value="enhanced">
+                                Realzado (fondo)
+                            </Segment.Item>
                         </Segment>
                         <p className="mt-2 max-w-xs text-xs text-gray-400">
                             {variant === 'production'
-                                ? 'Lo que extrae el pipeline REAL: OCR del crudo + fallback ampliado (si faltan campos) + cross-fill desde el MRZ del dorso. Normaliza cédulas rotadas 90°. Modo recomendado.'
+                                ? 'Lo que extrae el pipeline REAL: OCR del crudo + fallback ampliado + 3er tier realzado (si faltan campos) + cross-fill desde el MRZ del dorso. Normaliza cédulas rotadas 90°. Modo recomendado.'
                                 : variant === 'raw'
                                   ? 'Diagnóstico: la imagen tal cual fue subida, sin fallback ni cross-fill.'
-                                  : 'Diagnóstico: doc-crop (endereza) + upscale a 1600px. Puede leer MENOS campos: el anclaje está tuneado al frame nativo.'}
+                                  : variant === 'enhanced'
+                                    ? 'Diagnóstico: pre-proceso de FONDO DE SEGURIDAD (canal verde → blur → umbral adaptativo) para rescatar el texto sobre el watermark/guilloché. 3er tier del pipeline. Geometría preservada.'
+                                    : 'Diagnóstico: doc-crop (endereza) + upscale a 1600px. Puede leer MENOS campos: el anclaje está tuneado al frame nativo.'}
                         </p>
                     </div>
 

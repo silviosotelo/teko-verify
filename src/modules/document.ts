@@ -54,6 +54,13 @@ export interface OcrResult {
 /** Cliente OCR: dado un JPEG/PNG, devuelve texto + confianza + líneas (PaddleOCR sidecar). */
 export interface OcrClient {
   recognize(image: Buffer): Promise<OcrResult>;
+  /**
+   * OCR con PRE-PROCESO de fondo de seguridad (canal verde → blur → adaptiveThreshold)
+   * vía POST {OCR_SIDECAR_URL}/ocr-enhanced. Mismo shape que `recognize`, geometría W×H
+   * preservada. OPCIONAL: si el cliente no lo implementa, el tier enhanced se omite
+   * (fail-open). Usado SÓLO como 3er tier fill-blanks-only del frente.
+   */
+  recognizeEnhanced?(image: Buffer): Promise<OcrResult>;
 }
 
 /** Lector de MRZ: extrae las 3 líneas TD1 crudas del dorso (OCR-B). */
@@ -76,6 +83,27 @@ export class PaddleOcrClient implements OcrClient {
 
   async recognize(image: Buffer): Promise<OcrResult> {
     const res = await fetch(`${this.baseUrl}/ocr`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ image: image.toString("base64") }),
+    });
+    if (!res.ok) {
+      throw new Error(`OCR sidecar HTTP ${res.status}`);
+    }
+    const data = (await res.json()) as {
+      text?: string;
+      confidence?: number;
+      lines?: Array<{ text?: unknown; score?: unknown; box?: unknown }>;
+    };
+    return {
+      rawText: data.text ?? "",
+      confidence: typeof data.confidence === "number" ? data.confidence : 0,
+      lines: normalizeLines(data.lines),
+    };
+  }
+
+  async recognizeEnhanced(image: Buffer): Promise<OcrResult> {
+    const res = await fetch(`${this.baseUrl}/ocr-enhanced`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ image: image.toString("base64") }),
@@ -576,6 +604,15 @@ const NAME_STOPWORDS = new Set([
 ]);
 
 /**
+ * PARTÍCULAS de fondo: tokens que aparecen en nombres compuestos PY ("DE LA",
+ * "DEL") pero que NUNCA pueden ser el ÚLTIMO token de un apellido/nombre real. Un
+ * valor que termina en una de estas es BLEED del watermark "REPÚBLICA DEL PARAGUAY"
+ * mezclado en la misma caja OCR (caso real /ocr-enhanced: "ORUE SOSAA DEL"). Las usa
+ * `looksLikeName` para RECHAZAR (campo vacío → revisión manual), nunca para recortar.
+ */
+const NAME_PARTICLE_STOPWORDS = new Set(["DEL", "DE", "LA", "LAS", "LOS", "EL", "Y"]);
+
+/**
  * Predicado de PLAUSIBILIDAD de un valor de nombre (apellidos/nombres). El fondo
  * guilloche/watermark del frente salpica ruido entre la etiqueta y su valor real;
  * sin este filtro `valueBelow` devuelve el fragmento más cercano en Y (p.ej. "DEL"
@@ -585,7 +622,7 @@ const NAME_STOPWORDS = new Set([
  *   - no es una stopword de fondo;
  *   - longitud total razonable (≥4, ≤40).
  */
-function looksLikeName(s: string): boolean {
+export function looksLikeName(s: string): boolean {
   const c = canon(s);
   if (!c) return false;
   if (!/^[A-Z ]+$/.test(c)) return false; // sólo letras y espacios
@@ -598,6 +635,19 @@ function looksLikeName(s: string): boolean {
   if (/REPUBLIC|PUBLICA|PARAGUAY/.test(c.replace(/ /g, ""))) return false;
   const tokens = c.split(" ").filter(Boolean);
   if (tokens.length === 0) return false;
+  // RECHAZO por BLEED del watermark (caso real ORUE, /ocr-enhanced): el pre-proceso
+  // del canal verde recupera el apellido verdadero pero MEZCLA en la MISMA caja el
+  // texto del watermark "REPÚBLICA DEL PARAGUAY" que se solapa en Y. Visto real:
+  // apellido "ORUE SOSA" + bleed "A DEL" => UNA sola caja "ORUE SOSAA DEL". El
+  // anclaje no puede separar tokens dentro de una caja, y `cleanName` no recorta
+  // (todo son letras). Un apellido/nombre REAL NUNCA termina en una partícula suelta
+  // (DEL/DE/LA/...): si el último token es una de esas, es bleed => RECHAZAR (campo
+  // VACÍO → revisión manual). NO recortamos-y-conservamos: "ORUE SOSAA DEL" sin "DEL"
+  // sigue siendo "ORUE SOSAA" (A duplicada), basura PLAUSIBLE — peor que vacío. La
+  // regla es global (raw/upscale/enhanced): un nombre que termina en partícula nunca
+  // es válido; las cédulas conocidas no terminan en partícula, así que no regresiona.
+  const lastTok = tokens[tokens.length - 1];
+  if (NAME_PARTICLE_STOPWORDS.has(lastTok)) return false;
   // Al menos un token "fuerte" (≥4 chars y no-stopword); ninguna stopword sola.
   const strong = tokens.filter((t) => t.length >= 4 && !NAME_STOPWORDS.has(t));
   if (strong.length === 0) return false;
@@ -1870,8 +1920,11 @@ function frontFieldPresent(e: ExtractedDocument, field: string): boolean {
 
 export interface ProductionFrontResult {
   extracted: ExtractedDocument;
-  /** Origen por campo: "front" (OCR crudo), "upscale" (fallback), "mrz" (dorso). */
-  sources: Record<string, "front" | "upscale" | "mrz">;
+  /**
+   * Origen por campo: "front" (OCR crudo), "upscale" (fallback ampliado),
+   * "enhanced" (3er tier: pre-proceso de fondo de seguridad), "mrz" (dorso).
+   */
+  sources: Record<string, "front" | "upscale" | "enhanced" | "mrz">;
   /** ¿Se corrió el fallback ampliado (faltaban requeridos tras el crudo)? */
   usedUpscaleFallback: boolean;
   /** Líneas MRZ TD1 detectadas en el dorso (si se proveyó dorso), informativo. */
@@ -1890,7 +1943,7 @@ export async function runFrontProduction(
   back?: Buffer
 ): Promise<ProductionFrontResult> {
   const extracted = emptyExtracted();
-  const sources: Record<string, "front" | "upscale" | "mrz"> = {};
+  const sources: Record<string, "front" | "upscale" | "enhanced" | "mrz"> = {};
 
   // 1) OCR del FRENTE CRUDO (pasada de referencia, igual que producción).
   try {
@@ -1919,6 +1972,26 @@ export async function runFrontProduction(
     // Campos que aparecieron recién tras el fallback → origen "upscale".
     for (const f of PRODUCTION_SOURCE_FIELDS) {
       if (!sources[f] && frontFieldPresent(extracted, f)) sources[f] = "upscale";
+    }
+  }
+
+  // 2.5) 3er TIER ENHANCED (sólo-llena-blancos): si AÚN faltan requeridos tras el
+  //      upscale, re-OCR-eamos el frente con pre-proceso de FONDO DE SEGURIDAD
+  //      (canal verde → blur → adaptiveThreshold) que rescata el texto sobre el
+  //      watermark/guilloché. MONOTÓNICO: nunca pisa lo ya leído. Geometría W×H
+  //      preservada (anclaje px-absoluto intacto). FAIL-OPEN. La defensa anti-bleed
+  //      vive en `looksLikeName` (rechaza nombre terminado en partícula del watermark).
+  if (frontRequiredMissing(extracted) && ocr.recognizeEnhanced) {
+    try {
+      const enh = await ocr.recognizeEnhanced(front);
+      const enhExtracted = emptyExtracted();
+      extractFront(enh.lines, enhExtracted);
+      fillMissingFront(extracted, enhExtracted);
+    } catch {
+      /* fail-open */
+    }
+    for (const f of PRODUCTION_SOURCE_FIELDS) {
+      if (!sources[f] && frontFieldPresent(extracted, f)) sources[f] = "enhanced";
     }
   }
 
@@ -2038,6 +2111,33 @@ export class DocumentModule {
       } catch (e) {
         // eslint-disable-next-line no-console
         console.warn(`[document] fallback OCR ampliado falló: ${(e as Error).message}`);
+      }
+    }
+
+    // 3er TIER ENHANCED (sólo-llena-blancos): si AÚN falta algún campo REQUERIDO tras
+    // el upscale, re-OCR-eamos el frente con pre-proceso de FONDO DE SEGURIDAD (canal
+    // verde → blur → adaptiveThreshold) en el sidecar /ocr-enhanced. Recupera el texto
+    // garbleado sobre el watermark "REPÚBLICA DEL PARAGUAY" + sello/guilloché (caso real
+    // ORUE: apellidos/nombres/fechas ilegibles en crudo). MONOTÓNICO por diseño: la cruda
+    // y el upscale ya escribieron lo legible y NUNCA se pisa, así que sólo puede AGREGAR.
+    // Geometría W×H preservada (el endpoint NO recorta) ⇒ anclaje px-absoluto intacto. La
+    // defensa anti-bleed del watermark vive en `looksLikeName` (rechaza un nombre cuyo
+    // último token es una partícula de fondo: "ORUE SOSAA DEL" → vacío, no basura). Los
+    // valores del enhanced igual pasan las validaciones (looksLikeName/looksLikeDate/score
+    // mínimo) dentro de extractFront. FAIL-OPEN.
+    if (deps.ocr.recognizeEnhanced && frontRequiredMissing(extracted)) {
+      try {
+        const enh = await deps.ocr.recognizeEnhanced(front);
+        const enhExtracted = emptyExtracted();
+        extractFront(enh.lines, enhExtracted);
+        fillMissingFront(extracted, enhExtracted);
+        if (!frontRawText) {
+          frontRawText = enh.rawText;
+          frontConfidence = enh.confidence;
+        }
+      } catch (e) {
+        // eslint-disable-next-line no-console
+        console.warn(`[document] tier enhanced OCR falló: ${(e as Error).message}`);
       }
     }
 

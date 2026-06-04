@@ -15,7 +15,11 @@ import {
   crossFillFromMrz,
   detectTd1Lines,
   extractFrontDebug,
+  looksLikeName,
   parseMrz,
+  runFrontProduction,
+  type OcrClient,
+  type OcrResult,
 } from "./document";
 import type { BarcodeData, ExtractedDocument, MrzData, OcrLine } from "../types";
 
@@ -476,6 +480,136 @@ describe("document — cross-fill MRZ→frente (crossFillFromMrz)", () => {
     const front = cayoFrontMissingDates();
     const ex = crossFillFromMrz(front, emptyMrz());
     expect(ex.titular.fechaNacimiento).toBe("");
+  });
+});
+
+// ===========================================================================
+// GUARDA ANTI-BLEED del watermark (caso real ORUE, tier /ocr-enhanced). El
+// pre-proceso del canal verde rescata el apellido verdadero pero MEZCLA en la
+// MISMA caja OCR el texto del watermark "REPÚBLICA DEL PARAGUAY" solapado en Y:
+// "ORUE SOSA" + "A DEL" => UNA caja "ORUE SOSAA DEL". `cleanName` no recorta (todo
+// son letras) y el anclaje no separa tokens dentro de una caja. La ÚNICA defensa
+// es `looksLikeName`: un nombre/apellido REAL nunca termina en partícula suelta
+// (DEL/DE/LA/...). Este es el guard que hace SEGURO embarcar el tier enhanced —
+// sin él, "ORUE SOSAA DEL" se escribiría como apellido CONFIANZADO-pero-FALSO.
+// ===========================================================================
+describe("document — looksLikeName: guarda anti-bleed del watermark (ORUE)", () => {
+  it("RECHAZA el bleed real del enhanced: nombre que termina en partícula", () => {
+    expect(looksLikeName("ORUE SOSAA DEL")).toBe(false); // caso real /ocr-enhanced
+    expect(looksLikeName("ORUE SOSA DEL")).toBe(false);
+    expect(looksLikeName("GARCIA DE")).toBe(false);
+    expect(looksLikeName("PEREZ LA")).toBe(false);
+  });
+
+  it("ACEPTA apellidos/nombres LIMPIOS (no regresiona los conocidos)", () => {
+    // El nombre verdadero de ORUE y los de las 3 cédulas conocidas siguen válidos.
+    expect(looksLikeName("ORUE SOSA")).toBe(true);
+    expect(looksLikeName("NORA JAQUELINE")).toBe(true);
+    expect(looksLikeName("FRANCO MOREL")).toBe(true);
+    expect(looksLikeName("SOTELO")).toBe(true);
+    expect(looksLikeName("CAYO")).toBe(true);
+    expect(looksLikeName("MACHUCA")).toBe(true);
+    // Partícula INTERNA (no final) es válida: nombre compuesto PY real.
+    expect(looksLikeName("DE LA CRUZ")).toBe(true);
+    expect(looksLikeName("GARCIA DEL CARMEN")).toBe(true);
+  });
+});
+
+// ===========================================================================
+// WIRING del 3er TIER ENHANCED en runFrontProduction. Mock de OcrClient con
+// recognize (crudo) + recognizeEnhanced (realzado). Verifica: (1) el tier llena
+// SÓLO blancos requeridos faltantes tras el crudo; (2) es MONOTÓNICO (no pisa lo
+// ya leído por el crudo); (3) el `source` del campo recién aparecido = "enhanced";
+// (4) el bleed "ORUE SOSAA DEL" del enhanced NO se escribe (guard looksLikeName)
+// → apellidos queda VACÍO (fail-closed). Sin sidecar.
+// ===========================================================================
+describe("document — tier enhanced (runFrontProduction): fill-blanks + guard", () => {
+  function ocrResult(lines: OcrLine[]): OcrResult {
+    return { rawText: lines.map((l) => l.text).join("\n"), confidence: 0.9, lines };
+  }
+
+  // Frente CRUDO: lee NOMBRES + fechas + sexo + Nº, pero NO apellidos (garbleado).
+  const RAW_FRONT: OcrLine[] = [
+    line("REPUBLICA DEL PARAGUAY", 0.99, 888, 121, 820, 60),
+    line("APELLIDOS", 0.99, 623, 286, 200, 30),
+    line("FECHA DE VENCIMIENTO", 0.99, 1280, 283, 320, 30),
+    line("DEI", 0.4, 760, 325, 80, 30), // apellido garbleado (no pasa looksLikeName)
+    line("24-06-2035", 1.0, 1263, 335, 200, 30),
+    line("NOMBRES", 0.99, 613, 423, 180, 30),
+    line("NORA JAQUELINE", 0.96, 739, 469, 260, 30),
+    line("FECHA DE NACIMIENTO", 0.99, 600, 760, 360, 30),
+    line("SEXO", 0.99, 1000, 760, 90, 30),
+    line("05-02-1999", 0.95, 320, 810, 200, 30),
+    line("FEMENINO", 1.0, 760, 813, 180, 30),
+    line("Nº4401067", 0.95, 760, 851, 220, 30),
+    line("LUGAR DE NACIMIENTO", 0.99, 600, 902, 360, 30),
+    line("ENCARNACION", 0.99, 760, 940, 220, 30),
+  ];
+
+  // Frente ENHANCED: recupera apellido pero con BLEED del watermark en la caja.
+  const ENH_FRONT: OcrLine[] = [
+    line("REPUBLICA DEL PARAGUAY", 0.99, 888, 121, 820, 60),
+    line("APELLIDOS", 0.99, 623, 286, 200, 30),
+    line("FECHA DE VENCIMIENTO", 0.99, 1280, 283, 320, 30),
+    line("ORUE SOSAA DEL", 0.89, 760, 325, 220, 30), // bleed real: una sola caja
+    line("24-06-2035", 1.0, 1263, 335, 200, 30),
+    line("NOMBRES", 0.99, 613, 423, 180, 30),
+    line("NORA JAQUELINE", 0.96, 739, 469, 260, 30),
+  ];
+
+  // Mock que NO devuelve apellido limpio en el enhanced (bleed) → apellidos VACÍO.
+  const mockBleed: OcrClient = {
+    async recognize() {
+      return ocrResult(RAW_FRONT);
+    },
+    async recognizeEnhanced() {
+      return ocrResult(ENH_FRONT);
+    },
+  };
+
+  it("guard: el bleed 'ORUE SOSAA DEL' del enhanced NO se escribe (apellidos vacío)", async () => {
+    const { extracted, sources } = await runFrontProduction(
+      Buffer.from("x"),
+      mockBleed
+    );
+    expect(extracted.titular.apellidos).toBe(""); // fail-closed, NO basura plausible
+    expect(extracted.titular.nombres).toBe("NORA JAQUELINE"); // del crudo
+    expect(sources.nombres).toBe("front");
+  });
+
+  it("monotónico: el tier enhanced NO pisa campos ya leídos por el crudo", async () => {
+    // Enhanced que devolvería un apellido LIMPIO si el crudo lo hubiera dejado vacío,
+    // y un nombre DISTINTO que NUNCA debe pisar el del crudo.
+    const ENH_CLEAN: OcrLine[] = [
+      line("APELLIDOS", 0.99, 623, 286, 200, 30),
+      line("ORUE SOSA", 0.9, 760, 325, 180, 30), // apellido LIMPIO
+      line("NOMBRES", 0.99, 613, 423, 180, 30),
+      line("OTRO NOMBRE", 0.9, 739, 469, 260, 30), // NO debe pisar a NORA JAQUELINE
+    ];
+    const mockClean: OcrClient = {
+      async recognize() {
+        return ocrResult(RAW_FRONT);
+      },
+      async recognizeEnhanced() {
+        return ocrResult(ENH_CLEAN);
+      },
+    };
+    const { extracted, sources } = await runFrontProduction(Buffer.from("x"), mockClean);
+    expect(extracted.titular.apellidos).toBe("ORUE SOSA"); // llenó el blanco
+    expect(sources.apellidos).toBe("enhanced"); // origen marcado
+    expect(extracted.titular.nombres).toBe("NORA JAQUELINE"); // NO pisado
+    expect(sources.nombres).toBe("front");
+  });
+
+  it("sin recognizeEnhanced (cliente legacy): el tier se omite, fail-open", async () => {
+    const mockNoEnh: OcrClient = {
+      async recognize() {
+        return ocrResult(RAW_FRONT);
+      },
+    };
+    const { extracted } = await runFrontProduction(Buffer.from("x"), mockNoEnh);
+    expect(extracted.titular.apellidos).toBe(""); // crudo no lo leyó, sin tier
+    expect(extracted.titular.nombres).toBe("NORA JAQUELINE");
   });
 });
 

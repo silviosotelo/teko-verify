@@ -177,11 +177,15 @@ export interface TestSessionResponse {
 }
 
 // ---- Playground OCR (Inspector OCR) ----
-export type OcrDebugVariant = 'production' | 'raw' | 'deskew-upscale'
+export type OcrDebugVariant =
+    | 'production'
+    | 'raw'
+    | 'deskew-upscale'
+    | 'enhanced'
 
 // Origen por campo en el camino de PRODUCCIÓN: OCR del frente crudo, fallback
-// ampliado, o cross-fill desde el MRZ del dorso.
-export type OcrFieldSource = 'front' | 'upscale' | 'mrz'
+// ampliado, 3er tier de fondo de seguridad (enhanced), o cross-fill desde el MRZ.
+export type OcrFieldSource = 'front' | 'upscale' | 'enhanced' | 'mrz'
 
 // Caja de 4 esquinas [[x,y],...] en píxeles de `imageUsed`.
 export type OcrBox = [
