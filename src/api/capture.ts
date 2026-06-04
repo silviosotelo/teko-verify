@@ -425,7 +425,12 @@ captureRouter.post("/:token/preview", async (req: Request, res: Response) => {
 
     // decisionPreview: corre la MISMA decision() que usará /confirm sobre los checks
     // ya computados (sin persistir nada). Garantiza paridad con el veredicto final.
-    const verdict = decideVerdict(out.checks, tenant.policies);
+    // Honra el LoA POR SESIÓN (igual que el pipeline): el nivel de la sesión manda.
+    const previewPolicy = {
+      ...tenant.policies,
+      assuranceRequired: session.assuranceRequired ?? tenant.policies.assuranceRequired,
+    };
+    const verdict = decideVerdict(out.checks, previewPolicy);
     const decisionPreview = { loa: verdict.loa, wouldPass: verdict.verdict === "verified" };
     void quality; // quality ya está en checks; lo dejamos explícito para legibilidad.
 

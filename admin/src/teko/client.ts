@@ -8,11 +8,14 @@ import type {
     AuditEntry,
     CreateApiKeyResponse,
     ListSessionsResponse,
+    LoA,
     MetricsResponse,
     SessionDetail,
     SessionState,
     Tenant,
     TenantPolicy,
+    TestSessionResponse,
+    TestVerifyResponse,
 } from './types'
 
 // baseURL origin-root: NO relativo a /admin-ui/.
@@ -185,6 +188,28 @@ export const tekoApi = {
     evidenceBlob(tenantId: string, sessionId: string, type: string) {
         return requestBlob(
             `/tenants/${tenantId}/sessions/${sessionId}/evidence/${type}`,
+        )
+    },
+
+    // ---- "Probar verificación" (test del operador) ----
+    // Sube 3 imágenes (base64), corre el pipeline al nivel elegido y devuelve el
+    // resultado completo (checks + extracted + match + decision + fotos inline).
+    testVerify(body: {
+        tenantId: string
+        assurance: LoA
+        selfie: string
+        front: string
+        back: string
+    }) {
+        return request<TestVerifyResponse>('POST', '/test-verify', body)
+    },
+    // Crea una sesión de test al nivel elegido y devuelve verifyUrl para la captura
+    // en vivo (cámara) — reusa el flujo del usuario.
+    testSession(tenantId: string, assurance: LoA) {
+        return request<TestSessionResponse>(
+            'POST',
+            `/tenants/${tenantId}/test-session`,
+            { assurance },
         )
     },
 }

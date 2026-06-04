@@ -28,6 +28,13 @@ const tekoRoute: Routes = [
         meta: { pageContainerType: 'contained' },
     },
     {
+        key: 'teko.testVerify',
+        path: '/test-verify',
+        component: lazy(() => import('@/views/teko/TestVerify')),
+        authority: [],
+        meta: { pageContainerType: 'contained' },
+    },
+    {
         key: 'teko.tenants',
         path: '/tenants',
         component: lazy(() => import('@/views/teko/Tenants')),

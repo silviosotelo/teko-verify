@@ -7,6 +7,7 @@ export type SessionState =
     | 'created'
     | 'capturing'
     | 'processing'
+    | 'review'
     | 'verified'
     | 'rejected'
     | 'needs_recapture'
@@ -146,6 +147,33 @@ export interface AuditEntry {
     detail: Record<string, unknown>
     ip: string | null
     createdAt: string
+}
+
+// ---- "Probar verificación" (test del operador) ----
+export interface TestVerifyCheck {
+    type: CheckType
+    passed: boolean
+    score: number | null
+}
+
+export interface TestVerifyResponse {
+    sessionId: string
+    assurance: LoA
+    checks: TestVerifyCheck[]
+    extracted: ExtractedDocument | null
+    match: { cosine: number; passed: boolean } | null
+    decision: { state: string; loa: LoA; reasons: string[] }
+    photos: {
+        // base64 JPEG (sin prefijo data:) o null si no se pudo recortar.
+        selfieCrop: string | null
+        docFaceCrop: string | null
+    }
+}
+
+export interface TestSessionResponse {
+    sessionId: string
+    assurance: LoA
+    verifyUrl: string
 }
 
 // Identidad rica extraída del documento (checks[document].detail.extracted).

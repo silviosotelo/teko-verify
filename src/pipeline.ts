@@ -233,6 +233,26 @@ function nowIso(): string {
   return new Date().toISOString();
 }
 
+/**
+ * Resuelve la policy EFECTIVA de una sesión: honra el LoA elegido POR SESIÓN
+ * (`session.assuranceRequired`, snapshot tomado al crearla — p.ej. el nivel que
+ * eligió el operador en "Probar verificación" o el `assurance_required` del request
+ * del tenant) por encima del `assuranceRequired` de la policy del tenant.
+ *
+ * Antes el LoA lo fijaba SIEMPRE la policy del tenant, ignorando el nivel pedido por
+ * la sesión (bug): el nivel elegido en el request no se aplicaba de verdad. Ahora
+ * `needsMatch`/`needsLiveness` (qué módulos corren) y `decision()` (qué LoA se exige)
+ * leen todos este `assuranceRequired` efectivo. El `?? policy` es defensivo: la
+ * columna es NOT NULL y siempre se snapshotea, así que en la práctica el de la sesión
+ * manda. El flujo por defecto no cambia: ahí sesión == policy.
+ */
+function effectivePolicy(
+  session: VerificationSession,
+  policy: TenantPolicy
+): TenantPolicy {
+  return { ...policy, assuranceRequired: session.assuranceRequired ?? policy.assuranceRequired };
+}
+
 // ---------------------------------------------------------------------------
 // Pipeline.
 // ---------------------------------------------------------------------------
@@ -247,11 +267,13 @@ function nowIso(): string {
  */
 export async function processSession(
   session: VerificationSession,
-  policy: TenantPolicy,
+  tenantPolicy: TenantPolicy,
   images: CapturedImages,
   deps: PipelineDeps
 ): Promise<PipelineOutput> {
   const { tenantId, id: sessionId } = session;
+  // LoA por sesión: el nivel pedido por la sesión manda sobre el de la policy.
+  const policy = effectivePolicy(session, tenantPolicy);
 
   try {
     // === 1) QUALITY (recuperable → needs_recapture) ======================= //
@@ -555,11 +577,13 @@ async function persistCrops(
  */
 export async function computeChecks(
   session: VerificationSession,
-  policy: TenantPolicy,
+  tenantPolicy: TenantPolicy,
   images: CapturedImages,
   deps: PipelineDeps
 ): Promise<ComputeOutput> {
   const { tenantId, id: sessionId } = session;
+  // LoA por sesión: el nivel pedido por la sesión manda sobre el de la policy.
+  const policy = effectivePolicy(session, tenantPolicy);
   try {
     // === 1) QUALITY (recuperable → needs_recapture) ======================= //
     const quality = await deps.modules.quality(
@@ -695,11 +719,13 @@ export async function computeChecks(
  */
 export async function finalizeFromChecks(
   session: VerificationSession,
-  policy: TenantPolicy,
+  tenantPolicy: TenantPolicy,
   selfie: Buffer,
   deps: PipelineDeps
 ): Promise<PipelineOutput> {
   const { tenantId, id: sessionId } = session;
+  // LoA por sesión: el nivel pedido por la sesión manda sobre el de la policy.
+  const policy = effectivePolicy(session, tenantPolicy);
   try {
     // Reconstruye PipelineChecks desde la persistencia (computados por /preview).
     const rows = await deps.repos.checks.listBySession(tenantId, sessionId);

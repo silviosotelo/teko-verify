@@ -6,6 +6,7 @@ const STATE_LABEL: Record<SessionState, string> = {
     created: 'Creada',
     capturing: 'Capturando',
     processing: 'Procesando',
+    review: 'Revisión',
     verified: 'Verificada',
     rejected: 'Rechazada',
     needs_recapture: 'Recaptura',
@@ -23,6 +24,7 @@ const STATE_CLASS: Record<SessionState, string> = {
     expired: 'bg-gray-100 text-gray-600 dark:bg-gray-600 dark:text-gray-100',
     processing:
         'bg-blue-100 text-blue-700 dark:bg-blue-500/20 dark:text-blue-100',
+    review: 'bg-violet-100 text-violet-700 dark:bg-violet-500/20 dark:text-violet-100',
     capturing:
         'bg-indigo-100 text-indigo-700 dark:bg-indigo-500/20 dark:text-indigo-100',
     created: 'bg-slate-100 text-slate-600 dark:bg-slate-600 dark:text-slate-100',

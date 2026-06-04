@@ -23,12 +23,17 @@ import { pool } from "../db/pool";
 import { evidenceStore } from "../lib/evidenceStore";
 import {
   generateApiKey,
+  generateLinkToken,
   generateSessionToken,
   hashPassword,
   verifyPassword,
 } from "../lib/crypto";
 import { adminLoginRateLimiter } from "../lib/rateLimit";
 import { mergePolicy } from "../lib/policy";
+import { decodeBase64Image } from "../lib/images";
+import { computeChecks } from "../pipeline";
+import { realPipelineDeps } from "../pipelineDeps";
+import { decision as decideVerdict } from "../modules/decision";
 import type {
   AdminLoginResponse,
   AdminRole,
@@ -36,9 +41,21 @@ import type {
   ApiKeyResponse,
   CreateApiKeyResponse,
   EvidenceType,
+  LoA,
+  MatchResult,
   SessionState,
   TenantResponse,
 } from "../types";
+
+/** Base pública para construir el verifyUrl de la sesión de test con cámara. */
+const PUBLIC_BASE_URL = (
+  process.env.PUBLIC_BASE_URL ||
+  process.env.TEKO_PUBLIC_URL ||
+  "https://self-accordance-possess-departments.trycloudflare.com"
+).replace(/\/+$/, "");
+
+/** Niveles válidos que el operador puede elegir en "Probar verificación". */
+const TEST_LEVELS = new Set<LoA>(["L1", "L2", "L3"]);
 
 // ============================ admin_operators (datos) ====================== //
 // Acceso self-contained al store de operadores (la tabla la crea migrations/0003).
@@ -438,3 +455,170 @@ adminRouter.get("/tenants/:id/audit", async (req: Request, res: Response) => {
   });
   res.json({ entries });
 });
+
+// ---- "Probar verificación" (test del operador) --------------------------- //
+// Dos modos para que un operador pruebe el proceso al nivel L1/L2/L3 elegido:
+//   POST /admin/test-verify            → sube 3 imágenes, corre el pipeline y devuelve
+//                                        el resultado completo (sin cámara).
+//   POST /admin/tenants/:id/test-session → crea una sesión al nivel elegido y devuelve
+//                                        verifyUrl para abrir el flujo en vivo (cámara).
+// Ambas son MUTACIONES (crean sesión / persisten checks) → canWrite (owner/operator).
+
+// POST /admin/test-verify  {tenantId, assurance, selfie, front, back}
+adminRouter.post("/test-verify", canWrite, async (req: Request, res: Response) => {
+  try {
+    const tenantId = typeof req.body?.tenantId === "string" ? req.body.tenantId : "";
+    const assurance = String(req.body?.assurance ?? "") as LoA;
+    if (!tenantId || !TEST_LEVELS.has(assurance)) {
+      res.status(400).json({ error: "tenantId_and_valid_assurance_required" });
+      return;
+    }
+    const tenant = await repos.tenants.getById(tenantId);
+    if (!tenant) {
+      res.status(404).json({ error: "tenant_not_found" });
+      return;
+    }
+
+    // Decodifica las 3 imágenes (base64 o data URL). Fail-closed: input inválido → 400.
+    let selfie: Buffer, front: Buffer, back: Buffer;
+    try {
+      selfie = decodeBase64Image(req.body?.selfie);
+      front = decodeBase64Image(req.body?.front);
+      back = decodeBase64Image(req.body?.back);
+    } catch (e) {
+      res.status(400).json({ error: "invalid_images", detail: (e as Error).message });
+      return;
+    }
+
+    // Sesión efímera REAL (con external_ref "admin-test:*" para distinguirla) al nivel
+    // elegido: computeChecks persiste checks+evidencia+recortes y la deja en 'review'.
+    const externalRef = `admin-test:${Date.now()}`;
+    const ttlSec = tenant.policies.linkTokenTtlSeconds || 900;
+    const created = await repos.sessions.create({
+      tenantId: tenant.id,
+      externalRef,
+      linkToken: generateLinkToken(),
+      callbackUrl: null,
+      assuranceRequired: assurance, // ← LoA por sesión: el pipeline lo honra
+      expiresAt: new Date(Date.now() + ttlSec * 1000).toISOString(),
+    });
+
+    await repos.auditLog.record({
+      tenantId: tenant.id,
+      sessionId: created.id,
+      actor: `admin:${req.adminOperator?.operatorId ?? "?"}`,
+      event: "admin.test_verify",
+      detail: { assurance, externalRef },
+      ip: req.ip ?? null,
+    });
+
+    const out = await computeChecks(
+      { ...created, state: "processing" },
+      tenant.policies, // computeChecks aplica effectivePolicy(session) → usa `assurance`
+      { selfie, docFront: front, docBack: back },
+      realPipelineDeps
+    );
+
+    // Mapea los checks (in-memory) a la forma {type,passed,score} para el dashboard.
+    type CheckRow = { type: string; passed: boolean; score: number | null };
+    const checksOut: CheckRow[] = [];
+    let extracted: import("../types").ExtractedDocument | null = null;
+    let match: MatchResult | undefined;
+
+    if (out.checks) {
+      const c = out.checks;
+      checksOut.push({ type: "quality", passed: c.quality.passed, score: c.quality.sharpness });
+      if (c.liveness) {
+        checksOut.push({ type: "liveness", passed: c.liveness.passed, score: c.liveness.score });
+      }
+      checksOut.push({ type: "document", passed: c.document.passed, score: c.document.ocr.confidence });
+      if (c.match) {
+        checksOut.push({ type: "match", passed: c.match.passed, score: c.match.cosine });
+      }
+      extracted = c.document.extracted;
+      match = c.match;
+    }
+
+    // Decisión: si llegó a 'review', corre la MISMA decision() al nivel elegido. Si
+    // computeChecks divergió (needs_recapture/rejected/error por quality), reportamos
+    // ese estado sin 500.
+    const previewPolicy = { ...tenant.policies, assuranceRequired: assurance };
+    let decisionState: string;
+    let loa: LoA;
+    let reasons: string[];
+    if (out.state === "review" && out.checks) {
+      const verdict = decideVerdict(out.checks, previewPolicy);
+      decisionState = verdict.verdict === "verified" ? "verified" : "rejected";
+      loa = verdict.loa;
+      reasons = verdict.reasons;
+    } else {
+      decisionState = out.state; // needs_recapture | rejected | error
+      loa = "L0";
+      reasons = out.reasons;
+    }
+
+    // Recortes de evidencia inline (base64): selfie (leída del store) + foto del doc.
+    const selfieCropBuf = await evidenceStore.readCrop(tenant.id, created.id, "selfie");
+    const photos = {
+      selfieCrop: selfieCropBuf ? selfieCropBuf.toString("base64") : null,
+      docFaceCrop: out.checks?.document.docFaceCrop?.base64Jpeg ?? null,
+    };
+
+    res.json({
+      sessionId: created.id,
+      assurance,
+      checks: checksOut,
+      extracted,
+      match: match ? { cosine: match.cosine, passed: match.passed } : null,
+      decision: { state: decisionState, loa, reasons },
+      photos,
+    });
+  } catch (e) {
+    res.status(500).json({ error: "test_verify_failed", detail: (e as Error).message });
+  }
+});
+
+// POST /admin/tenants/:id/test-session  {assurance}  → {verifyUrl}
+adminRouter.post(
+  "/tenants/:id/test-session",
+  canWrite,
+  async (req: Request, res: Response) => {
+    try {
+      const assurance = String(req.body?.assurance ?? "") as LoA;
+      if (!TEST_LEVELS.has(assurance)) {
+        res.status(400).json({ error: "valid_assurance_required" });
+        return;
+      }
+      const tenant = await repos.tenants.getById(req.params.id);
+      if (!tenant) {
+        res.status(404).json({ error: "tenant_not_found" });
+        return;
+      }
+      const linkToken = generateLinkToken();
+      const ttlSec = tenant.policies.linkTokenTtlSeconds || 900;
+      const created = await repos.sessions.create({
+        tenantId: tenant.id,
+        externalRef: `admin-test-live:${Date.now()}`,
+        linkToken,
+        callbackUrl: null,
+        assuranceRequired: assurance,
+        expiresAt: new Date(Date.now() + ttlSec * 1000).toISOString(),
+      });
+      await repos.auditLog.record({
+        tenantId: tenant.id,
+        sessionId: created.id,
+        actor: `admin:${req.adminOperator?.operatorId ?? "?"}`,
+        event: "admin.test_session",
+        detail: { assurance },
+        ip: req.ip ?? null,
+      });
+      res.status(201).json({
+        sessionId: created.id,
+        assurance,
+        verifyUrl: `${PUBLIC_BASE_URL}/verify/${linkToken}`,
+      });
+    } catch (e) {
+      res.status(500).json({ error: "test_session_failed", detail: (e as Error).message });
+    }
+  }
+);

@@ -201,6 +201,7 @@ const navigationIcon: NavigationIcons = {
     // Teko Verify
     tekoDashboard: <PiSpeedometerDuotone />,
     tekoSessions: <PiListChecksDuotone />,
+    tekoTestVerify: <PiShieldCheckDuotone />,
     tekoTenants: <PiUsersDuotone />,
     tekoApiKeys: <PiKeyDuotone />,
     tekoAudit: <PiFileMagnifyingGlassDuotone />,
