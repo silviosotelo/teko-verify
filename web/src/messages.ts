@@ -54,6 +54,9 @@ export const FACE_LIVE_MSG: Record<FrameVerdict, string> = {
   "too-far": "Acercate un poco",
   "too-close": "Alejate un poco",
   "off-center": "Centrate en el óvalo",
+  dark: "Necesitamos más luz",
+  bright: "Hay demasiada luz",
+  "off-pose": "Mirá de frente",
   "low-confidence": "Buscá un lugar con más luz",
   good: "Perfecto, no te muevas",
 }

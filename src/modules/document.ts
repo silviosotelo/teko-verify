@@ -343,25 +343,28 @@ function findLabel(lines: AnchorLine[], label: string): AnchorLine | undefined {
  * (cy mayor) y razonablemente alineada en X con la etiqueta, la más cercana
  * hacia abajo. Excluye otras etiquetas conocidas (no devolvemos un rótulo).
  */
-function valueBelow(
+interface ValueBelowOpts {
+  maxDx?: number;
+  maxDy?: number;
+  minScore?: number;
+  exclude?: AnchorLine[];
+  /**
+   * Predicado de FORMA esperada del valor. El frente de la cédula PY tiene un
+   * fondo de guilloche/watermark que el OCR fragmenta en ruido ("CAL", "WAL",
+   * "AYREPUBLIC"...) salpicado entre la etiqueta y su valor real. Sin filtro,
+   * `valueBelow` devuelve el fragmento de ruido más cercano en Y. Con `accept`,
+   * se devuelve el candidato MÁS CERCANO que pasa el predicado, saltando el ruido.
+   * Si no se provee, se acepta cualquier texto (comportamiento histórico).
+   */
+  accept?: (text: string) => boolean;
+}
+
+/** Devuelve la LÍNEA anclada debajo de la etiqueta (o undefined). Núcleo compartido. */
+function lineBelow(
   lines: AnchorLine[],
   label: AnchorLine,
-  opts: {
-    maxDx?: number;
-    maxDy?: number;
-    minScore?: number;
-    exclude?: AnchorLine[];
-    /**
-     * Predicado de FORMA esperada del valor. El frente de la cédula PY tiene un
-     * fondo de guilloche/watermark que el OCR fragmenta en ruido ("CAL", "WAL",
-     * "AYREPUBLIC"...) salpicado entre la etiqueta y su valor real. Sin filtro,
-     * `valueBelow` devuelve el fragmento de ruido más cercano en Y. Con `accept`,
-     * se devuelve el candidato MÁS CERCANO que pasa el predicado, saltando el ruido.
-     * Si no se provee, se acepta cualquier texto (comportamiento histórico).
-     */
-    accept?: (text: string) => boolean;
-  } = {}
-): string {
+  opts: ValueBelowOpts = {}
+): AnchorLine | undefined {
   const maxDx = opts.maxDx ?? 280;
   const maxDy = opts.maxDy ?? 220;
   const minScore = opts.minScore ?? 0.3;
@@ -375,7 +378,11 @@ function valueBelow(
     .filter((l) => Math.abs(l.cx - label.cx) <= maxDx)
     .filter((l) => (accept ? accept(l.text) : true))
     .sort((a, b) => a.cy - b.cy); // la más cercana hacia abajo primero
-  return candidates[0]?.text.trim() ?? "";
+  return candidates[0];
+}
+
+function valueBelow(lines: AnchorLine[], label: AnchorLine, opts: ValueBelowOpts = {}): string {
+  return lineBelow(lines, label, opts)?.text.trim() ?? "";
 }
 
 /** Atajo: localiza la etiqueta y devuelve su valor-debajo (o "" si no hay). */
@@ -388,6 +395,22 @@ function fieldBelow(
   const lbl = findLabel(lines, label);
   if (!lbl) return "";
   return valueBelow(lines, lbl, { ...opts, exclude: labels });
+}
+
+/**
+ * Como `fieldBelow` pero devuelve la LÍNEA elegida (no sólo su texto), para poder
+ * EXCLUIRLA por identidad al anclar otro campo. Necesario para garantizar que
+ * APELLIDOS no agarre exactamente la misma línea que NOMBRES.
+ */
+function findValueLineBelow(
+  lines: AnchorLine[],
+  label: string,
+  labels: AnchorLine[],
+  opts?: { maxDx?: number; maxDy?: number; minScore?: number; accept?: (text: string) => boolean }
+): AnchorLine | undefined {
+  const lbl = findLabel(lines, label);
+  if (!lbl) return undefined;
+  return lineBelow(lines, lbl, { ...opts, exclude: labels });
 }
 
 /** Valor a la DERECHA en la misma fila (para "Nº": dígitos a la derecha del rótulo). */
@@ -481,6 +504,25 @@ function looksLikeName(s: string): boolean {
   return true;
 }
 
+/**
+ * Predicado de PLAUSIBILIDAD de una CIUDAD (lugar de nacimiento). Debe ser
+ * ALFABÉTICA. EXCLUYE explícitamente:
+ *   - cualquier texto que contenga un dígito (descarta el número de cédula
+ *     "4895448" y el rótulo "N° 4895448" que en la captura real cae en la misma
+ *     fila que la etiqueta "LUGAR DE NACIMIENTO");
+ *   - prefijos de número "Nº"/"N°"/"No"/"N".
+ * Tras canon (sin acentos), la ciudad queda sólo en letras+espacios, ≥3 chars.
+ * El valor de lugar de nacimiento NUNCA puede ser numérico.
+ */
+function looksLikeCity(s: string): boolean {
+  if (/\d/.test(s)) return false; // ningún dígito: descarta el Nº de cédula
+  if (/^N[º°o]?\b/i.test(s.trim())) return false; // rótulo "Nº ..." / "No ..."
+  const c = canon(s);
+  if (!c) return false;
+  if (!/^[A-Z ]+$/.test(c)) return false; // sólo letras y espacios
+  return c.length >= 3 && c.length <= 40;
+}
+
 /** Etiquetas conocidas del frente y dorso (para excluirlas como valores). */
 const KNOWN_LABELS = [
   "APELLIDOS",
@@ -548,19 +590,43 @@ function extractFront(frontLines: OcrLine[], extracted: ExtractedDocument): void
   // Specimen: muestras llevan la palabra "SPECIMEN"/"MUESTRA".
   extracted.documento.specimen = /\bSPECIMEN\b|\bMUESTRA\b/.test(allText);
 
-  // Apellidos / Nombres (valor debajo de la etiqueta). `accept: looksLikeName`
+  // Nombres / Apellidos (valor debajo de la etiqueta). `accept: looksLikeName`
   // salta el ruido del watermark/guilloche ("DEL","PARA","ICA"...) que en capturas
   // movidas/comprimidas cae más cerca en Y que el valor real. Sin este filtro el
   // anclaje agarraba "DEL" (de "REPÚBLICA DEL PARAGUAY") como apellido. maxDx
   // ampliado: en la captura real el valor puede quedar levemente desalineado en X.
-  const apellidos = cleanName(
-    fieldBelow(lines, "APELLIDOS", labels, { accept: looksLikeName, maxDx: 360 })
-  );
-  if (apellidos) extracted.titular.apellidos = apellidos;
-  const nombres = cleanName(
-    fieldBelow(lines, "NOMBRES", labels, { accept: looksLikeName, maxDx: 360 })
-  );
+  //
+  // ORDEN: resolvemos NOMBRES PRIMERO para poder EXCLUIR su línea exacta al anclar
+  // APELLIDOS. En la captura real comprimida del cel, la fila de APELLIDOS quedó
+  // VACÍA (el OCR no leyó "SOTELO MACHUCA"); el valor de NOMBRES ("SILVIO ANDRES",
+  // cy≈772) cae a sólo ~17px de la etiqueta NOMBRES pero ~77px de APELLIDOS, y sin
+  // guardas el anclaje de APELLIDOS lo agarraba → apellidos===nombres (BUG).
+  //
+  // GUARDAS para APELLIDOS:
+  //   1) `maxDy` ESTRECHO (~48px): el gap real etiqueta→valor en este layout es ~18px
+  //      (vencimiento 695→715, nombres 755→772, nac 914→933, lugar 955→973). Una banda
+  //      angosta sólo admite la línea de la fila INMEDIATAMENTE bajo APELLIDOS; descarta
+  //      el valor de NOMBRES (cy lejano) y la basura "Adwato" (cy≈858, muy abajo).
+  //   2) excluimos la LÍNEA EXACTA elegida como nombres (`nombresLine`).
+  //   3) si pese a todo apellidos===nombres, es señal de error de anclaje → lo dejamos
+  //      VACÍO (fail-closed → revisión manual). NUNCA copiamos el valor de NOMBRES.
+  const nombresLine = findValueLineBelow(lines, "NOMBRES", labels, {
+    accept: looksLikeName,
+    maxDx: 360,
+  });
+  const nombres = cleanName(nombresLine?.text ?? "");
   if (nombres) extracted.titular.nombres = nombres;
+
+  const apellidosExclude = nombresLine ? [...labels, nombresLine] : labels;
+  const apellidos = cleanName(
+    fieldBelow(lines, "APELLIDOS", apellidosExclude, {
+      accept: looksLikeName,
+      maxDx: 360,
+      maxDy: 48,
+    })
+  );
+  // Anti-copia: apellidos jamás puede quedar igual a nombres (síntoma del bug).
+  if (apellidos && apellidos !== nombres) extracted.titular.apellidos = apellidos;
 
   // Fecha de vencimiento. `accept` salta fragmentos de guilloche: sólo acepta el
   // candidato con forma DD-MM-YYYY.
@@ -598,7 +664,13 @@ function extractFront(frontLines: OcrLine[], extracted: ExtractedDocument): void
   }
 
   // Lugar de nacimiento: "CIUDAD-DEPARTAMENTO" (splitea por "-" si está).
-  const lugar = fieldBelow(lines, "LUGAR DE NACIMIENTO", labels);
+  // `accept: looksLikeCity` EXCLUYE explícitamente el número de cédula. En la
+  // captura real el rótulo "N° 4895448" (cy≈956) cae en la MISMA fila que la
+  // etiqueta "LUGAR DE NACIMIENTO" (cy≈955) y a sólo 192px en X → sin filtro el
+  // anclaje lo tomaba como lugar de nacimiento (BUG: lugarNacimiento="4895448").
+  // La ciudad real "ASUNCION" (cy≈973) está un pelo más abajo; el filtro salta el
+  // número y la toma. Un lugar de nacimiento NUNCA puede ser numérico.
+  const lugar = fieldBelow(lines, "LUGAR DE NACIMIENTO", labels, { accept: looksLikeCity });
   if (lugar) {
     const parts = lugar.split(/\s*-\s*/);
     extracted.titular.lugarNacimiento.ciudad = (parts[0] ?? "").trim();

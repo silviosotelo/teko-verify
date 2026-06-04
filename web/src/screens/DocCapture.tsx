@@ -5,8 +5,8 @@ import { useCamera } from "../useCamera"
 import { useDocQuality } from "../useDocQuality"
 import { Button, Card, Notice } from "../ui"
 
-// El documento debe quedar nítido y estable ~0.9s antes de la cuenta regresiva.
-const STABLE_MS = 850
+// El documento debe quedar nítido y estable ~1.5s antes de la cuenta regresiva.
+const STABLE_MS = 1500
 const COUNTDOWN = [3, 2, 1]
 
 /**
@@ -37,6 +37,16 @@ export function DocCapture({ onDone }: { onDone: () => void }) {
   const capturingRef = useRef(false)
   const countingRef = useRef(false)
   const timersRef = useRef<ReturnType<typeof setTimeout>[]>([])
+  // Guard anti-loop: tras una captura rechazada NO re-armamos hasta que la
+  // nitidez se rompa y se rehaga (evita capturar→rechazar→capturar en bucle).
+  const blockedRef = useRef(false)
+
+  // Limpia todos los timers de cuenta pendientes (clearTimeout real, no solo []).
+  const clearTimers = () => {
+    timersRef.current.forEach(clearTimeout)
+    timersRef.current = []
+    countingRef.current = false
+  }
 
   // Ref espejo del veredicto vivo (leído por el loop sin reejecutar su efecto).
   const isGoodRef = useRef(isGood)
@@ -47,6 +57,8 @@ export function DocCapture({ onDone }: { onDone: () => void }) {
   const doCapture = useCallback(async () => {
     if (capturingRef.current) return
     capturingRef.current = true
+    // Matamos timers de cuenta pendientes (evita disparo zombi tras tap manual).
+    clearTimers()
     setBusy(true)
     setNotice(null)
     setFatal(null)
@@ -69,8 +81,9 @@ export function DocCapture({ onDone }: { onDone: () => void }) {
       setBusy(false)
       stableSinceRef.current = null
       capturingRef.current = false
-      countingRef.current = false
-      timersRef.current = []
+      clearTimers()
+      // Rechazo: bloqueamos re-arme hasta que el usuario reacomode la cédula.
+      blockedRef.current = true
       void cam.start()
       return
     }
@@ -80,8 +93,9 @@ export function DocCapture({ onDone }: { onDone: () => void }) {
       setBusy(false)
       stableSinceRef.current = null
       capturingRef.current = false
-      countingRef.current = false
-      timersRef.current = []
+      clearTimers()
+      // Cambio de lado: re-armar limpio para el dorso (no es un rechazo).
+      blockedRef.current = false
       setSide("back")
       void cam.start()
       return
@@ -95,9 +109,9 @@ export function DocCapture({ onDone }: { onDone: () => void }) {
     } catch (e) {
       setBusy(false)
       capturingRef.current = false
-      countingRef.current = false
-      timersRef.current = []
+      clearTimers()
       stableSinceRef.current = null
+      blockedRef.current = true
       setFatal(
         "No pudimos subir la foto: " +
           (e instanceof Error ? e.message : String(e)),
@@ -111,9 +125,7 @@ export function DocCapture({ onDone }: { onDone: () => void }) {
   doCaptureRef.current = doCapture
 
   const cancelCountdown = useCallback(() => {
-    countingRef.current = false
-    timersRef.current.forEach(clearTimeout)
-    timersRef.current = []
+    clearTimers()
     setCount(null)
   }, [])
 
@@ -129,7 +141,7 @@ export function DocCapture({ onDone }: { onDone: () => void }) {
     let raf = 0
     const loop = () => {
       if (!capturingRef.current) {
-        if (isGoodRef.current) {
+        if (isGoodRef.current && !blockedRef.current) {
           if (stableSinceRef.current == null)
             stableSinceRef.current = Date.now()
           const held = Date.now() - stableSinceRef.current
@@ -143,7 +155,10 @@ export function DocCapture({ onDone }: { onDone: () => void }) {
             )
           }
         } else {
+          // No nítido (o aún no): reseteamos estabilidad, cancelamos cuenta y
+          // levantamos el bloqueo de re-arme (el usuario ya reacomodó).
           stableSinceRef.current = null
+          blockedRef.current = false
           if (countingRef.current) cancelCountdown()
         }
       }

@@ -16,10 +16,13 @@ const SAMPLE_W = 160
 const SAMPLE_H = 100
 
 // Umbrales calibrados sobre el canvas 160×100 (grises 0..255).
-const BLUR_VAR = 55 // varianza Laplaciano por debajo → borrosa
-const DARK_MEAN = 60 // brillo medio por debajo → oscura
+// NOTA: calibrables en el dispositivo. Subimos BLUR_VAR para exigir nitidez
+// REAL (la cédula bien enfocada y cerca supera holgado este umbral; una pared
+// borrosa o el documento lejos no), evitando capturas prematuras.
+const BLUR_VAR = 90 // varianza Laplaciano por debajo → borrosa
+const DARK_MEAN = 65 // brillo medio por debajo → oscura
 const GLARE_MEAN = 205 // brillo medio por encima → sobre-expuesta/reflejo
-const GLARE_HOT = 0.16 // fracción de píxeles "quemados" (>245) → reflejo puntual
+const GLARE_HOT = 0.14 // fracción de píxeles "quemados" (>245) → reflejo puntual
 
 function analyze(
   data: Uint8ClampedArray,

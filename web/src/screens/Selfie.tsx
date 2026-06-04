@@ -7,8 +7,8 @@ import { Button, Card, Notice } from "../ui"
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
-// Tiempo que el rostro debe quedarse "good" antes de arrancar la cuenta. ~1s.
-const STABLE_MS = 900
+// Tiempo que el encuadre debe MANTENERSE "good" antes de arrancar la cuenta.
+const STABLE_MS = 1500
 // Pasos de la cuenta regresiva de auto-captura.
 const COUNTDOWN = [3, 2, 1]
 
@@ -38,6 +38,10 @@ export function Selfie({ onDone }: { onDone: () => void }) {
   const capturingRef = useRef(false)
   const countingRef = useRef(false)
   const timersRef = useRef<ReturnType<typeof setTimeout>[]>([])
+  // Guard anti-loop: tras una captura rechazada, NO re-armamos la cuenta hasta
+  // que el encuadre vuelva a romperse (verdict != good) y se rehaga. Sin esto,
+  // la escena sigue "good" → recaptura → rechazo → recaptura (loop).
+  const blockedRef = useRef(false)
   const manualMode = detect.status === "unavailable"
   const isGood = detect.verdict === "good"
 
@@ -50,6 +54,11 @@ export function Selfie({ onDone }: { onDone: () => void }) {
   const doCapture = useCallback(async () => {
     if (capturingRef.current) return
     capturingRef.current = true
+    // Matamos cualquier timer de cuenta pendiente (evita disparos zombis si el
+    // usuario tocó el botón manual durante la cuenta).
+    countingRef.current = false
+    timersRef.current.forEach(clearTimeout)
+    timersRef.current = []
     setBusy(true)
     setNotice(null)
     setFatal(null)
@@ -75,11 +84,13 @@ export function Selfie({ onDone }: { onDone: () => void }) {
         return
       }
       // Recapturar: reabrimos cámara, mostramos tip y reanudamos detección.
+      // Bloqueamos el re-arme automático hasta que el usuario re-encuadre.
       setNotice(verdict.msg ?? null)
       setBusy(false)
       stableSinceRef.current = null
       capturingRef.current = false
       countingRef.current = false
+      blockedRef.current = true
       void cam.start()
     } catch (e) {
       setBusy(false)
@@ -120,7 +131,7 @@ export function Selfie({ onDone }: { onDone: () => void }) {
     let raf = 0
     const loop = () => {
       if (!capturingRef.current) {
-        if (isGoodRef.current) {
+        if (isGoodRef.current && !blockedRef.current) {
           if (stableSinceRef.current == null)
             stableSinceRef.current = Date.now()
           const held = Date.now() - stableSinceRef.current
@@ -137,8 +148,10 @@ export function Selfie({ onDone }: { onDone: () => void }) {
             )
           }
         } else {
-          // Encuadre roto: reseteamos estabilidad y abortamos cualquier cuenta.
+          // Encuadre roto (o aún no): reseteamos estabilidad, abortamos cuenta y
+          // levantamos el bloqueo de re-arme (el usuario ya se re-encuadró).
           stableSinceRef.current = null
+          blockedRef.current = false
           if (countingRef.current) cancelCountdown()
         }
       }

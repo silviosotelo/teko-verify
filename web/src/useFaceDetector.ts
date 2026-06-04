@@ -34,6 +34,9 @@ export type FrameVerdict =
   | "too-far" // rostro muy chico
   | "too-close" // rostro demasiado grande
   | "off-center" // rostro descentrado
+  | "dark" // poca luz (luma media baja)
+  | "bright" // demasiada luz / quemado
+  | "off-pose" // rostro de costado (no de frente)
   | "low-confidence" // detección pobre (pídele mejor luz)
   | "good" // encuadrado: listo para auto-captura
 
@@ -46,13 +49,62 @@ interface Box {
   h: number
 }
 
-/** Evalúa una detección contra el encuadre objetivo (centro, tamaño). */
+// ---- Umbrales de gating (calibrables en el dispositivo) -------------------
+// Tamaño del rostro (ancho bbox / ancho frame). Pedido: ~35%–70%.
+const FACE_W_MIN = 0.35
+const FACE_W_MAX = 0.7
+// Centrado: tolerancia del centro del bbox respecto del centro del frame.
+const CENTER_TOL_X = 0.13
+const CENTER_TOL_Y = 0.14
+// Brillo (luma media 0..255 de un canvas chico del video).
+const LUMA_DARK = 70 // por debajo → "Necesitamos más luz"
+const LUMA_BRIGHT = 200 // por encima → "Hay demasiada luz"
+// Frontalidad (sobre keypoints normalizados de BlazeFace):
+//   idx 0 = ojo derecho, 1 = ojo izquierdo, 2 = nariz.
+// Ojos a la misma altura: |Δy ojos| / ancho-entre-ojos por debajo del umbral.
+const EYES_LEVEL_MAX = 0.45
+// Nariz centrada entre los ojos: |nariz - punto medio ojos| / ancho-ojos.
+const NOSE_CENTER_MAX = 0.34
+
+interface NKP {
+  x: number
+  y: number
+}
+
+/** Chequea frontalidad con los keypoints de BlazeFace (ojos + nariz). */
+function isFrontal(keypoints: NKP[] | undefined): boolean | null {
+  if (!keypoints || keypoints.length < 3) return null // sin keypoints: no bloquea
+  const rEye = keypoints[0]
+  const lEye = keypoints[1]
+  const nose = keypoints[2]
+  if (!rEye || !lEye || !nose) return null
+  const eyeDx = Math.abs(lEye.x - rEye.x)
+  if (eyeDx < 1e-4) return false
+  const eyeDy = Math.abs(lEye.y - rEye.y)
+  // Ojos nivelados (cabeza no inclinada de costado/rotada).
+  if (eyeDy / eyeDx > EYES_LEVEL_MAX) return false
+  // Nariz centrada horizontalmente entre los ojos (no de perfil).
+  const midX = (lEye.x + rEye.x) / 2
+  if (Math.abs(nose.x - midX) / eyeDx > NOSE_CENTER_MAX) return false
+  return true
+}
+
+/**
+ * Evalúa una detección contra el encuadre objetivo: tamaño, centrado,
+ * brillo (luma) y frontalidad (keypoints). `luma` es la luma media del frame.
+ */
 function evaluate(
   dets: Detection[],
   videoW: number,
   videoH: number,
+  luma: number,
 ): { verdict: FrameVerdict; box: Box | null } {
   if (!videoW || !videoH) return { verdict: "no-camera", box: null }
+  // Brillo primero: si está muy oscuro/quemado, ningún encuadre sirve.
+  if (luma > 0) {
+    if (luma < LUMA_DARK) return { verdict: "dark", box: null }
+    if (luma > LUMA_BRIGHT) return { verdict: "bright", box: null }
+  }
   if (dets.length === 0) return { verdict: "no-face", box: null }
   if (dets.length > 1) return { verdict: "multiple", box: null }
 
@@ -75,16 +127,19 @@ function evaluate(
 
   if (score < 0.5) return { verdict: "low-confidence", box }
 
-  // El óvalo guía ocupa ~62% ancho × 78% alto. Buscamos que la cara llene
-  // una fracción razonable de ese óvalo: ancho de cara objetivo ~ 0.34–0.55.
+  // Tamaño correcto (ni muy lejos ni muy cerca).
   const faceW = w
-  if (faceW < 0.26) return { verdict: "too-far", box }
-  if (faceW > 0.62) return { verdict: "too-close", box }
+  if (faceW < FACE_W_MIN) return { verdict: "too-far", box }
+  if (faceW > FACE_W_MAX) return { verdict: "too-close", box }
 
-  // Centrado: tolerancia ~13% del frame respecto del centro.
+  // Centrado en el óvalo (centro del bbox cerca del centro del frame).
   const dx = Math.abs(cx - 0.5)
   const dy = Math.abs(cy - 0.46) // un pelín arriba (la frente suele entrar más)
-  if (dx > 0.15 || dy > 0.16) return { verdict: "off-center", box }
+  if (dx > CENTER_TOL_X || dy > CENTER_TOL_Y) return { verdict: "off-center", box }
+
+  // De frente (ojos nivelados + nariz centrada). Si no hay keypoints, no bloquea.
+  const frontal = isFrontal(d.keypoints as NKP[] | undefined)
+  if (frontal === false) return { verdict: "off-pose", box }
 
   return { verdict: "good", box }
 }
@@ -101,6 +156,8 @@ export function useFaceDetector(
   const rafRef = useRef<number | null>(null)
   const lastTsRef = useRef(-1)
   const aliveRef = useRef(true)
+  // Canvas chico para medir luma media del frame (brillo).
+  const lumaCanvasRef = useRef<HTMLCanvasElement | null>(null)
 
   // Carga perezosa del modelo (una vez).
   useEffect(() => {
@@ -142,6 +199,31 @@ export function useFaceDetector(
     }
   }, [])
 
+  // Mide la luma media del frame en un canvas chico (32×24). Barato.
+  const sampleLuma = useCallback((v: HTMLVideoElement): number => {
+    let c = lumaCanvasRef.current
+    if (!c) {
+      c = document.createElement("canvas")
+      c.width = 32
+      c.height = 24
+      lumaCanvasRef.current = c
+    }
+    const ctx = c.getContext("2d", { willReadFrequently: true })
+    if (!ctx) return 0
+    try {
+      ctx.drawImage(v, 0, 0, c.width, c.height)
+      const { data } = ctx.getImageData(0, 0, c.width, c.height)
+      let sum = 0
+      const n = data.length / 4
+      for (let i = 0; i < data.length; i += 4) {
+        sum += 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]
+      }
+      return sum / n
+    } catch {
+      return 0 // getImageData puede fallar puntualmente: 0 = no bloquea por luz
+    }
+  }, [])
+
   // Loop de detección sobre el <video>.
   const tick = useCallback(() => {
     if (!aliveRef.current) return
@@ -154,10 +236,12 @@ export function useFaceDetector(
         lastTsRef.current = ts
         try {
           const res = det.detectForVideo(v, ts)
+          const luma = sampleLuma(v)
           const { verdict: vd, box: bx } = evaluate(
             res.detections ?? [],
             v.videoWidth,
             v.videoHeight,
+            luma,
           )
           setVerdict(vd)
           setBox(bx)
@@ -169,7 +253,7 @@ export function useFaceDetector(
       setVerdict("no-camera")
     }
     rafRef.current = requestAnimationFrame(tick)
-  }, [videoRef])
+  }, [videoRef, sampleLuma])
 
   useEffect(() => {
     if (!enabled || status !== "ready") return
