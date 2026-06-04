@@ -22,6 +22,9 @@ import { decodeBase64Image, assertFrameCount } from "../lib/images";
 import { processSession, computeChecks, finalizeFromChecks } from "../pipeline";
 import { realPipelineDeps } from "../pipelineDeps";
 import { decision as decideVerdict } from "../modules/decision";
+// Guardas PURAS de la máquina de estados (single source of truth, testeables sin
+// levantar la capa de datos). Ver captureGuards.ts para el racional de cada una.
+import { isCapturable, consentShouldTransition } from "./captureGuards";
 // Singletons ya inicializados (engine.init() + qualityModule.init() en server.ts).
 // Los reusamos para el pre-check de calidad de la selfie (§6.a).
 import { engine } from "../engine";
@@ -79,13 +82,6 @@ const TERMINAL_STATES = new Set<SessionState>([
   "expired",
 ]);
 
-/** Estados en los que la captura (selfie/document/submit) es legítima. */
-const CAPTURABLE_STATES = new Set<SessionState>([
-  "created",
-  "capturing",
-  "needs_recapture",
-]);
-
 /**
  * Carga la sesión por token y aplica las guardas de seguridad del flujo de captura.
  * Fail-closed: token inexistente → 404; token consumido (un solo uso) → 410;
@@ -139,17 +135,39 @@ async function loadSession(
  * (incluido processing) → 409 sin re-ejecutar nada. Responde y devuelve false si bloquea.
  */
 function requireCapturable(session: VerificationSession, res: Response): boolean {
-  if (!CAPTURABLE_STATES.has(session.state)) {
+  if (!isCapturable(session.state)) {
     res.status(409).json({ error: "invalid_state_for_capture", state: session.state });
     return false;
   }
   return true;
 }
 
+/**
+ * Re-captura desde 'review' (#1): si el titular tocó "Volver a intentar", la
+ * sesión está en 'review'. Antes de aceptar la nueva selfie, la devolvemos a
+ * 'capturing' para reflejar que volvió a capturar. Los datos del preview previo
+ * (checks + crops) los pisa el próximo /preview, así que acá sólo flippeamos el
+ * estado. No-op si ya está en {created,capturing,needs_recapture}.
+ */
+async function resetForRecapture(session: VerificationSession): Promise<void> {
+  if (session.state === "review") {
+    await repos.sessions.update(session.tenantId, session.id, { state: "capturing" });
+    session.state = "capturing";
+  }
+}
+
 // POST /verify/:token/consent
 captureRouter.post("/:token/consent", async (req: Request, res: Response) => {
   const session = await loadSession(req, res);
   if (!session) return;
+  // Guard de re-consentimiento (#4): re-aceptar desde 'review' (u otro estado ya
+  // avanzado) NO debe re-crear el consent ni resetear review→capturing. No-op
+  // idempotente que devuelve el estado actual sin tocar nada.
+  if (!consentShouldTransition(session.state)) {
+    const resp: ConsentResponse = { ok: true, state: session.state };
+    res.json(resp);
+    return;
+  }
   try {
     const tenant = await repos.tenants.getById(session.tenantId);
     const policy = tenant!.policies;
@@ -181,6 +199,8 @@ captureRouter.post("/:token/selfie", async (req: Request, res: Response) => {
   const session = await loadSession(req, res);
   if (!session) return;
   if (!requireCapturable(session, res)) return;
+  // Loop "Volver a intentar" (#1): si veníamos de 'review', volvemos a 'capturing'.
+  await resetForRecapture(session);
   try {
     const selfie = decodeBase64Image(req.body?.image);
     await evidenceStore.save(session.tenantId, session.id, "selfie", selfie);
@@ -480,7 +500,13 @@ captureRouter.post("/:token/confirm", async (req: Request, res: Response) => {
       return;
     }
     const out = await finalizeFromChecks(session, tenant.policies, selfie, realPipelineDeps);
-    const resp: ConfirmResponse = { state: out.state, result: out.result, reasons: out.reasons };
+    const resp: ConfirmResponse = {
+      state: out.state,
+      result: out.result,
+      reasons: out.reasons,
+      // Para que el front pueda redirigir directo (#8) sin esperar /status.
+      redirectUrl: session.redirectUrl,
+    };
     res.json(resp);
   } catch (e) {
     await repos.sessions
@@ -513,10 +539,26 @@ captureRouter.get("/:token/evidence/:type", async (req: Request, res: Response) 
 });
 
 // GET /verify/:token/status  (polling; SSE más abajo)
+// Lectura de estado. Aplica las MISMAS guardas fail-closed que loadSession para
+// que la rehidratación del front (#3/#6) sea correcta: token inexistente → 404;
+// token consumido → 410+token_consumed; TTL vencido (no terminal) → 410+expired
+// (flippeando a 'expired'). Sin esto, un token expirado-pero-no-flippeado
+// devolvía 200 con un estado no-terminal y el front lo metía al flujo en vez de
+// a la pantalla de error.
 captureRouter.get("/:token/status", async (req: Request, res: Response) => {
   const session = await repos.sessions.findByLinkToken(req.params.token);
   if (!session) {
     res.status(404).json({ error: "invalid_token" });
+    return;
+  }
+  if (session.usedAt && !TERMINAL_STATES.has(session.state)) {
+    // Token de un solo uso ya consumido pero aún sin resultado terminal visible.
+    res.status(410).json({ error: "token_consumed", state: session.state });
+    return;
+  }
+  if (new Date(session.expiresAt) < new Date() && !TERMINAL_STATES.has(session.state)) {
+    await repos.sessions.update(session.tenantId, session.id, { state: "expired" });
+    res.status(410).json({ error: "expired", state: "expired" });
     return;
   }
   const tenant = await repos.tenants.getById(session.tenantId);

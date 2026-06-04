@@ -701,6 +701,9 @@ export interface ConfirmResponse {
   state: SessionState;
   result: SessionResult | null;
   reasons: string[];
+  /** URL de retorno al app del tenant (si la sesión la define) — el front la usa
+   *  para auto-redirigir tras un resultado terminal sin esperar polling (#8). */
+  redirectUrl?: string | null;
 }
 
 /** Tipo de evidencia RECORTADA servible en revisión (GET /verify/:token/evidence/:type). */

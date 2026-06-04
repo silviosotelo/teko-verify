@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { apiPost, type DocCheckResult } from "../api"
-import { docMsg, DOC_LIVE_MSG } from "../messages"
+import { docMsg, DOC_LIVE_MSG, errorMessage } from "../messages"
 import { useCamera } from "../useCamera"
 import { useDocQuality } from "../useDocQuality"
 import { Button, Card, Notice } from "../ui"
@@ -113,10 +113,7 @@ export function DocCapture({ onDone }: { onDone: () => void }) {
       clearTimers()
       stableSinceRef.current = null
       blockedRef.current = true
-      setFatal(
-        "No pudimos subir la foto: " +
-          (e instanceof Error ? e.message : String(e)),
-      )
+      setFatal(errorMessage(e))
       void cam.start()
     }
   }, [cam, isFront, side, onDone])

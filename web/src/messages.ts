@@ -97,3 +97,71 @@ export function docMsg(reasons?: string[]): string {
   }
   return "Probá la foto de la cédula de nuevo, enfocada y sin reflejos."
 }
+
+/**
+ * Mapa de CÓDIGOS de error del backend (j.error) → mensajes humanos en español.
+ * Antes, el usuario veía el code crudo ("invalid_token", "preview_not_review",
+ * etc.). Estos textos cubren todos los `error` que devuelve src/api/capture.ts.
+ */
+export const ERROR_MSG: Record<string, string> = {
+  invalid_token: "Este enlace no es válido. Pedí uno nuevo a quien te lo envió.",
+  token_consumed: "Este enlace ya se usó. Pedí uno nuevo para volver a intentar.",
+  expired: "El enlace expiró. Pedí uno nuevo para verificar tu identidad.",
+  session_terminal: "Esta verificación ya finalizó. Pedí un enlace nuevo si necesitás repetirla.",
+  invalid_state_for_capture: "No pudimos continuar desde acá. Reiniciá la verificación.",
+  invalid_state_for_submit: "No pudimos enviar tus fotos. Volvé a intentar.",
+  invalid_state_for_preview: "No pudimos preparar tus datos. Volvé a intentar.",
+  invalid_state_for_confirm: "No pudimos confirmar en este momento. Volvé a intentar.",
+  preview_not_review: "Necesitamos que repitas algunas fotos para poder mostrarte tus datos.",
+  incomplete_uploads: "Faltan algunas fotos. Volvé a sacar la selfie y la cédula.",
+  consent_failed: "No pudimos registrar tu consentimiento. Probá de nuevo.",
+  selfie_upload_failed: "No pudimos subir tu selfie. Revisá tu conexión y probá otra vez.",
+  document_upload_failed: "No pudimos subir las fotos de tu cédula. Probá de nuevo.",
+  submit_failed: "Algo falló al procesar tus fotos. Probá de nuevo en unos minutos.",
+  preview_failed: "Algo falló al preparar tus datos. Probá de nuevo en unos minutos.",
+  confirm_failed: "Algo falló al confirmar tu identidad. Probá de nuevo en unos minutos.",
+  tenant_not_found: "No pudimos identificar la verificación. Pedí un enlace nuevo.",
+  evidence_not_found: "No encontramos tus fotos. Volvé a sacarlas.",
+}
+
+/** Fallback genérico cuando el code no está mapeado (nunca mostramos el code crudo). */
+const ERROR_FALLBACK = "Algo no salió bien. Probá de nuevo en unos instantes."
+
+/**
+ * Traduce un error del API (ApiError con .code/.reasons, o cualquier Error/valor)
+ * a un mensaje humano. Si el error trae `reasons` accionables de calidad/cédula
+ * (p.ej. preview/doc-check con needs_recapture), los prioriza para decirle al
+ * usuario QUÉ corregir — antes esos reasons se descartaban (#2).
+ */
+export function errorMessage(e: unknown): string {
+  const err = e as {
+    code?: string
+    reasons?: string[]
+    message?: string
+  } | null
+  // 1) Reasons accionables tienen prioridad: dicen exactamente qué corregir.
+  const reasons = Array.isArray(err?.reasons) ? err!.reasons! : []
+  const reasonMsg = recaptureReasonsMsg(reasons)
+  if (reasonMsg) return reasonMsg
+  // 2) Mapa por code.
+  if (err?.code && ERROR_MSG[err.code]) return ERROR_MSG[err.code]
+  // 3) Si el message ES un code conocido (Error plano), también lo mapeamos.
+  if (err?.message && ERROR_MSG[err.message]) return ERROR_MSG[err.message]
+  return ERROR_FALLBACK
+}
+
+/**
+ * Convierte una lista de `reasons` (de quality o doc-check) a UN tip humano,
+ * priorizando los accionables. Devuelve null si no hay nada accionable que decir.
+ * Usado para mostrar el motivo real cuando /preview o /doc-check piden recaptura.
+ */
+export function recaptureReasonsMsg(reasons?: string[]): string | null {
+  const r = (Array.isArray(reasons) ? reasons : []).filter(
+    (x) => !QUALITY_NON_ACTIONABLE.includes(x),
+  )
+  for (const k of r) {
+    if (QUALITY_MSG[k]) return QUALITY_MSG[k]
+    if (DOC_MSG[k]) return DOC_MSG[k]
+  }
+  return null
+}

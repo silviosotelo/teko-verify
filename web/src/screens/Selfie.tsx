@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react"
 import { apiPost, type QualityResult } from "../api"
-import { evalQuality, FACE_LIVE_MSG } from "../messages"
+import { evalQuality, FACE_LIVE_MSG, errorMessage } from "../messages"
 import { useCamera } from "../useCamera"
 import { useFaceDetector } from "../useFaceDetector"
 import { Button, Card, Notice } from "../ui"
@@ -97,10 +97,7 @@ export function Selfie({ onDone }: { onDone: () => void }) {
       capturingRef.current = false
       countingRef.current = false
       stableSinceRef.current = null
-      setFatal(
-        "No pudimos procesar la selfie: " +
-          (e instanceof Error ? e.message : String(e)),
-      )
+      setFatal(errorMessage(e))
       void cam.start()
     }
   }, [cam, onDone])
@@ -166,8 +163,13 @@ export function Selfie({ onDone }: { onDone: () => void }) {
     }
   }, [manualMode, busy, cancelCountdown])
 
-  const liveMsg =
-    detect.status === "loading"
+  // Si la cámara falló/denegó el permiso, NO mostramos "Preparando la cámara…"
+  // (mentira que dejaba al usuario esperando). El pill pasa a un estado de error
+  // y aparece un botón de reintento (#5).
+  const camDenied = !!cam.error
+  const liveMsg = camDenied
+    ? "No pudimos usar la cámara"
+    : detect.status === "loading"
       ? "Preparando detección…"
       : (FACE_LIVE_MSG[detect.verdict] ?? "Ubicá tu rostro en el óvalo")
 
@@ -232,46 +234,72 @@ export function Selfie({ onDone }: { onDone: () => void }) {
           <div className="pointer-events-none absolute inset-x-0 top-3 flex justify-center">
             <span
               className={`flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-semibold backdrop-blur-sm transition-colors ${
-                isGood
-                  ? "bg-primary/90 text-white"
-                  : "bg-black/45 text-white"
+                camDenied
+                  ? "bg-error/90 text-white"
+                  : isGood
+                    ? "bg-primary/90 text-white"
+                    : "bg-black/45 text-white"
               }`}
             >
               <span
                 className={`size-2 rounded-full ${
-                  isGood ? "bg-white" : "bg-mint"
+                  camDenied ? "bg-white" : isGood ? "bg-white" : "bg-mint"
                 }`}
               />
-              {manualMode ? "Encuadrá tu rostro" : liveMsg}
+              {camDenied
+                ? liveMsg
+                : manualMode
+                  ? "Encuadrá tu rostro"
+                  : liveMsg}
             </span>
           </div>
         )}
       </div>
 
-      {cam.error && (
-        <Notice>
-          No se pudo abrir la cámara: {cam.error}. Revisá los permisos del
-          navegador.
-        </Notice>
+      {/* Cámara denegada/fallida (#5): mensaje claro + botón para reintentar el
+          permiso. start() vuelve a llamar getUserMedia → re-dispara el prompt; si
+          el usuario lo bloqueó a nivel navegador, ofrecemos recargar la página. */}
+      {camDenied && (
+        <>
+          <Notice>
+            No pudimos usar la cámara: {cam.error}. Revisá que le diste permiso al
+            navegador y volvé a intentar.
+          </Notice>
+          <Button onClick={() => void cam.start()}>
+            Volver a pedir permiso
+          </Button>
+          <button
+            type="button"
+            onClick={() => location.reload()}
+            className="mt-2 w-full text-center text-xs font-medium text-gray-400 underline"
+          >
+            Sigue sin funcionar — recargar la página
+          </button>
+        </>
       )}
 
       {/* Botón manual: SIEMPRE disponible como recovery; obligatorio si
-          MediaPipe no cargó (manualMode). */}
-      <Button
-        disabled={busy || !cam.ready}
-        onClick={() => void doCapture()}
-        variant={manualMode ? "primary" : "ghost"}
-      >
-        {busy
-          ? "Revisando tu foto…"
-          : manualMode
-            ? "Sacar selfie"
-            : "Sacar foto ahora"}
-      </Button>
-      {!manualMode && (
-        <p className="mt-2 text-center text-xs text-gray-400">
-          La captura es automática · o tocá el botón cuando quieras
-        </p>
+          MediaPipe no cargó (manualMode). Oculto si la cámara está denegada
+          (ahí mandan los botones de reintento de arriba). */}
+      {!camDenied && (
+        <>
+          <Button
+            disabled={busy || !cam.ready}
+            onClick={() => void doCapture()}
+            variant={manualMode ? "primary" : "ghost"}
+          >
+            {busy
+              ? "Revisando tu foto…"
+              : manualMode
+                ? "Sacar selfie"
+                : "Sacar foto ahora"}
+          </Button>
+          {!manualMode && (
+            <p className="mt-2 text-center text-xs text-gray-400">
+              La captura es automática · o tocá el botón cuando quieras
+            </p>
+          )}
+        </>
       )}
     </Card>
   )

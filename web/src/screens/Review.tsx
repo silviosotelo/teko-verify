@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react"
-import { apiPost, type PreviewResult } from "../api"
+import { apiPost, type PreviewResult, type StatusResult } from "../api"
+import { errorMessage } from "../messages"
 import { Button, Card } from "../ui"
 import { IconCheck, IconShield } from "../Icons"
 
@@ -35,11 +36,23 @@ function Row({ label, value }: { label: string; value: string }) {
   )
 }
 
+/** Respuesta de POST /verify/:token/confirm (terminal: verified|rejected|…). */
+interface ConfirmResponse {
+  state?: string
+  reasons?: string[]
+  redirectUrl?: string | null
+}
+
 export function Review({
   onConfirmed,
   onRetry,
 }: {
-  onConfirmed: () => void
+  /**
+   * onConfirmed(terminal?) — si /confirm YA devolvió un estado terminal
+   * (verified/rejected/error), lo pasamos para saltar el primer poll de
+   * Processing (#8). Si no, se llama sin argumento → pasa por Processing.
+   */
+  onConfirmed: (terminal?: StatusResult) => void
   onRetry: () => void
 }) {
   const [data, setData] = useState<PreviewResult | null>(null)
@@ -56,11 +69,9 @@ export function Review({
         const r = await apiPost<PreviewResult>("/preview", {})
         if (alive) setData(r)
       } catch (e) {
-        if (alive)
-          setErr(
-            "No pudimos preparar tus datos: " +
-              (e instanceof Error ? e.message : String(e)),
-          )
+        // errorMessage prioriza los `reasons` accionables (p.ej. preview_not_review
+        // con needs_recapture trae los motivos reales de quality/doc) → #2.
+        if (alive) setErr(errorMessage(e))
       } finally {
         if (alive) setLoading(false)
       }
@@ -75,14 +86,28 @@ export function Review({
     setConfirming(true)
     setErr(null)
     try {
-      await apiPost("/confirm", {})
-      onConfirmed()
+      const r = await apiPost<ConfirmResponse>("/confirm", {})
+      // #8: /confirm finaliza la sesión y devuelve el estado terminal. Si ya es
+      // terminal, saltamos directo al resultado (sin esperar el 1er poll ~2s).
+      const TERMINAL = [
+        "verified",
+        "rejected",
+        "needs_recapture",
+        "error",
+        "expired",
+      ]
+      if (r?.state && TERMINAL.includes(r.state)) {
+        onConfirmed({
+          state: r.state,
+          reasons: r.reasons,
+          redirectUrl: r.redirectUrl ?? undefined,
+        })
+      } else {
+        onConfirmed()
+      }
     } catch (e) {
       setConfirming(false)
-      setErr(
-        "No pudimos confirmar: " +
-          (e instanceof Error ? e.message : String(e)),
-      )
+      setErr(errorMessage(e))
     }
   }
 

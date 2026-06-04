@@ -1,5 +1,6 @@
 import { useState } from "react"
 import { apiPost, CONSENT_VERSION } from "../api"
+import { errorMessage } from "../messages"
 import { Button, Card, TrustPoint } from "../ui"
 import { VerifyHero, IconClock, IconLock, IconEye } from "../Icons"
 
@@ -24,10 +25,7 @@ export function Consent({ onDone }: { onDone: () => void }) {
       onDone()
     } catch (e) {
       setBusy(false)
-      setErr(
-        "No se pudo registrar el consentimiento: " +
-          (e instanceof Error ? e.message : String(e)),
-      )
+      setErr(errorMessage(e))
     }
   }
 

@@ -34,6 +34,34 @@ export interface StatusResult {
 }
 
 /**
+ * Error tipado del API de captura: además del mensaje humano (que ya viene
+ * traducido vía mapApiError en messages.ts), expone el `code` crudo del backend,
+ * el `status` HTTP y los `reasons` accionables si los hubo (p.ej. de /preview o
+ * /doc-check que devuelven needs_recapture con motivos). Las pantallas pueden
+ * leer estos campos para reaccionar (mostrar tips, ir a error, etc.).
+ */
+export class ApiError extends Error {
+  code: string
+  status: number
+  reasons?: string[]
+  state?: string
+  constructor(args: {
+    message: string
+    code: string
+    status: number
+    reasons?: string[]
+    state?: string
+  }) {
+    super(args.message)
+    this.name = "ApiError"
+    this.code = args.code
+    this.status = args.status
+    this.reasons = args.reasons
+    this.state = args.state
+  }
+}
+
+/**
  * Datos extraídos del documento que muestra la pantalla de Revisión.
  * Espejo de `ExtractedDocument` del backend (src/types.ts) pero con TODOS los
  * campos OPCIONALES: el backend se construye en paralelo y la selfie/cédula
@@ -105,17 +133,49 @@ export async function apiPost<T = unknown>(
     /* respuesta sin body JSON */
   }
   if (!r.ok) {
-    const msg =
-      typeof j.error === "string" ? j.error : `HTTP ${r.status}`
-    throw new Error(msg)
+    // El backend manda { error: "<code>", state?, reasons? }. Lanzamos un ApiError
+    // que conserva el code crudo (para mapear a un mensaje humano en la pantalla)
+    // + status + reasons accionables. El `message` queda como el code crudo: las
+    // pantallas lo traducen con errorMessage() de messages.ts.
+    const code = typeof j.error === "string" ? j.error : `HTTP ${r.status}`
+    const reasons = Array.isArray(j.reasons)
+      ? (j.reasons as unknown[]).filter((x): x is string => typeof x === "string")
+      : undefined
+    throw new ApiError({
+      message: code,
+      code,
+      status: r.status,
+      reasons,
+      state: typeof j.state === "string" ? j.state : undefined,
+    })
   }
   return j as T
 }
 
-/** GET /verify/:token/status — polling de estado del pipeline. */
+/**
+ * GET /verify/:token/status — polling/rehidratación de estado.
+ * Status-aware: si el backend responde !ok (404 token inválido, 410 expirado/
+ * consumido), lanza ApiError para que el caller (App.tsx al montar) muestre la
+ * pantalla de error directamente en vez de parsear ciegamente un JSON de error.
+ */
 export async function getStatus(): Promise<StatusResult> {
   const r = await fetch(`/verify/${TOKEN}/status`)
-  return (await r.json()) as StatusResult
+  let j: Record<string, unknown> = {}
+  try {
+    j = (await r.json()) as Record<string, unknown>
+  } catch {
+    /* sin body JSON */
+  }
+  if (!r.ok) {
+    const code = typeof j.error === "string" ? j.error : `HTTP ${r.status}`
+    throw new ApiError({
+      message: code,
+      code,
+      status: r.status,
+      state: typeof j.state === "string" ? j.state : undefined,
+    })
+  }
+  return j as unknown as StatusResult
 }
 
 export const CONSENT_VERSION = "1.0"
