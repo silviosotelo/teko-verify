@@ -80,8 +80,11 @@ export function useCamera(facing: Facing) {
     }
   }, [facing, stop])
 
-  // Captura un frame del video actual como dataURL JPEG.
-  const grab = useCallback((): string => {
+  // Captura un frame del video actual como dataURL JPEG. Captura a la RESOLUCIÓN
+  // COMPLETA del video (videoWidth/videoHeight). `quality` parametrizable: la
+  // captura de la CÉDULA sube a 0.95 para que el OCR lea campos chicos en
+  // capturas comprimidas; el resto (selfie/liveness) sigue en 0.9 por defecto.
+  const grab = useCallback((quality = 0.9): string => {
     const v = videoRef.current
     if (!v) return ""
     const c = document.createElement("canvas")
@@ -89,7 +92,7 @@ export function useCamera(facing: Facing) {
     c.height = v.videoHeight || 960
     const ctx = c.getContext("2d")
     if (ctx) ctx.drawImage(v, 0, 0, c.width, c.height)
-    return c.toDataURL("image/jpeg", 0.9)
+    return c.toDataURL("image/jpeg", quality)
   }, [])
 
   // Abrir la cámara al montar / cambiar de facing; cerrar en cleanup.

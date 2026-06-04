@@ -66,7 +66,8 @@ export function DocCapture({ onDone }: { onDone: () => void }) {
     setFlash(true)
     setTimeout(() => setFlash(false), 450)
 
-    const img = cam.grab()
+    // Cédula a calidad ALTA (0.95): preserva los campos chicos para el OCR.
+    const img = cam.grab(0.95)
 
     // Pre-check informativo: si el endpoint falla, avanzamos (pipeline manda).
     let check: DocCheckResult = { passed: true, reasons: [] }

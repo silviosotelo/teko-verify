@@ -10,7 +10,7 @@ import { repos } from "./db/repos";
 import { withTransaction } from "./db/pool";
 import { qualityModule } from "./modules/quality";
 import { livenessModule } from "./modules/liveness";
-import { documentModule, defaultDocumentDeps } from "./modules/document";
+import { documentModule, defaultDocumentDeps, upscaleForOcr } from "./modules/document";
 import { evidenceStore } from "./lib/evidenceStore";
 import { webhookSender } from "./lib/webhook";
 import { OCR_SIDECAR_URL } from "./config";
@@ -21,30 +21,54 @@ import type { DocCropper, PipelineDeps, PipelineModules } from "./pipeline";
  * OpenCV (POST {OCR_SIDECAR_URL}/doc-crop). FAIL-OPEN: ante cualquier error (sidecar
  * caído, HTTP no-2xx, respuesta inválida) devuelve la imagen original sin lanzar.
  */
+async function docCrop(image: Buffer): Promise<Buffer> {
+  try {
+    const res = await fetch(`${OCR_SIDECAR_URL}/doc-crop`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ image: image.toString("base64") }),
+    });
+    if (!res.ok) return image;
+    const data = (await res.json()) as { image?: unknown };
+    if (typeof data.image !== "string" || !data.image) return image;
+    const buf = Buffer.from(data.image, "base64");
+    return buf.length > 0 ? buf : image;
+  } catch {
+    return image;
+  }
+}
+
 const realDocCropper: DocCropper = {
-  async crop(image: Buffer): Promise<Buffer> {
-    try {
-      const res = await fetch(`${OCR_SIDECAR_URL}/doc-crop`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ image: image.toString("base64") }),
-      });
-      if (!res.ok) return image;
-      const data = (await res.json()) as { image?: unknown };
-      if (typeof data.image !== "string" || !data.image) return image;
-      const buf = Buffer.from(data.image, "base64");
-      return buf.length > 0 ? buf : image;
-    } catch {
-      return image;
-    }
-  },
+  crop: docCrop,
 };
+
+/**
+ * Preprocesa el FRENTE para la lectura OCR de campos: lo AMPLÍA a ≥1600px de
+ * ancho (resize-up Lanczos3) si es más chico. El texto ampliado es más legible
+ * para PaddleOCR en capturas de celular comprimidas/chicas (caso real: apellido
+ * no leído). FAIL-OPEN: ante cualquier error devuelve el frente original.
+ *
+ * DELIBERADAMENTE NO usa el doc-crop (deskew/perspectiva) acá: el anclaje
+ * etiqueta→valor del frente usa umbrales en PÍXELES ABSOLUTOS tuneados al frame
+ * vertical nativo del celular (~900×1600). El warpPerspective del doc-crop puede
+ * rotar el portrait a landscape (~1600×992), cambiando aspecto/orientación y
+ * ROMPIENDO el anclaje (validado contra la imagen real: doc-crop vaciaba
+ * apellidos + fechaNacimiento; sólo-upscale preserva TODOS los campos idénticos
+ * al baseline). El upscale conserva el aspecto, así que el anclaje sobrevive.
+ */
+async function preprocessFrontForOcr(front: Buffer): Promise<Buffer> {
+  return upscaleForOcr(front, 1600);
+}
 
 /** Adaptador de los módulos reales a la interfaz `PipelineModules` del pipeline. */
 const modules: PipelineModules = {
   quality: (image, eng, glassesMax) => qualityModule.run(image, eng, glassesMax),
   liveness: (selfie, eng, opts) => livenessModule.run(selfie, eng, opts),
-  document: (front, back) => documentModule.run(front, back, defaultDocumentDeps(engine)),
+  document: (front, back) =>
+    documentModule.run(front, back, {
+      ...defaultDocumentDeps(engine),
+      preprocessFront: preprocessFrontForOcr,
+    }),
   embed: async (image) => {
     const r = await engine.embedBestFace(image);
     return r ? r.embedding : null;

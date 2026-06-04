@@ -572,6 +572,44 @@ function emptyExtracted(): ExtractedDocument {
 }
 
 /**
+ * ¿Falta algún campo REQUERIDO del FRENTE tras el OCR crudo? Decide si vale la
+ * pena la pasada de fallback ampliada. Mismos campos que gatean `passed`.
+ */
+function frontRequiredMissing(e: ExtractedDocument): boolean {
+  return (
+    !e.titular.apellidos ||
+    !e.titular.nombres ||
+    !e.documento.numeroCedula ||
+    !e.titular.fechaNacimiento ||
+    !e.documentoFisico.fechaVencimiento
+  );
+}
+
+/**
+ * Rellena en `dst` SÓLO los campos del frente que están vacíos, tomándolos de
+ * `src` (la pasada ampliada). MONOTÓNICO: nunca pisa un valor ya presente en
+ * `dst`. Cubre exactamente los campos del frente que `extractFront` puede leer.
+ */
+function fillMissingFront(dst: ExtractedDocument, src: ExtractedDocument): void {
+  if (!dst.titular.apellidos && src.titular.apellidos)
+    dst.titular.apellidos = src.titular.apellidos;
+  if (!dst.titular.nombres && src.titular.nombres) dst.titular.nombres = src.titular.nombres;
+  if (!dst.documento.numeroCedula && src.documento.numeroCedula)
+    dst.documento.numeroCedula = src.documento.numeroCedula;
+  if (!dst.titular.fechaNacimiento && src.titular.fechaNacimiento)
+    dst.titular.fechaNacimiento = src.titular.fechaNacimiento;
+  if (!dst.documentoFisico.fechaVencimiento && src.documentoFisico.fechaVencimiento)
+    dst.documentoFisico.fechaVencimiento = src.documentoFisico.fechaVencimiento;
+  if (!dst.titular.sexo && src.titular.sexo) dst.titular.sexo = src.titular.sexo;
+  if (!dst.titular.lugarNacimiento.ciudad && src.titular.lugarNacimiento.ciudad) {
+    dst.titular.lugarNacimiento.ciudad = src.titular.lugarNacimiento.ciudad;
+    dst.titular.lugarNacimiento.departamento = src.titular.lugarNacimiento.departamento;
+  }
+  if (!dst.documento.pais && src.documento.pais) dst.documento.pais = src.documento.pais;
+  if (!dst.documento.tipo && src.documento.tipo) dst.documento.tipo = src.documento.tipo;
+}
+
+/**
  * Extrae los campos del FRENTE por anclaje posición→etiqueta (FUENTE AUTORITATIVA).
  * Best-effort: cada campo se setea sólo si su ancla existe; lo demás queda en blanco.
  */
@@ -987,6 +1025,37 @@ export interface DocumentDeps {
   mrzReader: MrzReader;
   barcodeReader: BarcodeReader;
   engine: Engine;
+  /**
+   * Preprocesa el FRENTE SÓLO para la LECTURA OCR de campos: endereza (doc-crop,
+   * deskew/perspectiva del sidecar) + amplía (resize-up). El texto enderezado y
+   * ampliado es mucho más legible para PaddleOCR en capturas de celular
+   * comprimidas/chicas (caso real: apellido no leído). OPCIONAL — si no se
+   * inyecta, el OCR corre sobre el frente crudo (comportamiento histórico).
+   * FAIL-OPEN: ante cualquier error debe devolver el buffer original.
+   *
+   * IMPORTANTE: NO toca el recorte de la foto del titular (`cropDocFace`), que
+   * sigue corriendo sobre el frente CRUDO para no degradar el match facial.
+   */
+  preprocessFront?: (front: Buffer) => Promise<Buffer>;
+}
+
+/**
+ * Amplía un JPEG hasta `minWidth` de ancho si es más chico (Lanczos3, sin
+ * recortar). PaddleOCR lee mejor el texto ampliado; ampliar uno ya grande no
+ * ayuda y sólo gasta CPU, así que sólo escalamos hacia arriba. FAIL-OPEN.
+ */
+export async function upscaleForOcr(image: Buffer, minWidth = 1600): Promise<Buffer> {
+  try {
+    const meta = await sharp(image).metadata();
+    const w = meta.width ?? 0;
+    if (w >= minWidth || w === 0) return image;
+    return await sharp(image)
+      .resize({ width: minWidth, kernel: sharp.kernel.lanczos3, withoutEnlargement: false })
+      .jpeg({ quality: 95 })
+      .toBuffer();
+  } catch {
+    return image;
+  }
 }
 
 export class DocumentModule {
@@ -1002,7 +1071,9 @@ export class DocumentModule {
     let frontConfidence = 0;
     let frontRawText = "";
 
-    // OCR del FRENTE (datos autoritativos + recorte de foto).
+    // OCR del FRENTE (datos autoritativos) sobre el frente CRUDO. Esta pasada SIEMPRE
+    // gana: el anclaje etiqueta→valor usa umbrales en PÍXELES ABSOLUTOS tuneados al
+    // frame nativo del celular, así que el resultado crudo es el de referencia.
     let frontOcr: OcrResult | null = null;
     try {
       frontOcr = await deps.ocr.recognize(front);
@@ -1012,6 +1083,33 @@ export class DocumentModule {
     } catch (e) {
       // eslint-disable-next-line no-console
       console.warn(`[document] OCR frente falló: ${(e as Error).message}`);
+    }
+
+    // FALLBACK MONOTÓNICO (sólo-amplía-no-pisa): si tras el OCR crudo falta algún
+    // campo REQUERIDO y hay un preprocesador inyectado, re-OCR-eamos una variante
+    // AMPLIADA del frente y rellenamos ÚNICAMENTE los campos que quedaron vacíos.
+    // Razón: en capturas chicas/comprimidas el texto crudo es ilegible para
+    // PaddleOCR; ampliarlo lo recupera. Es MONOTÓNICO por diseño — la pasada cruda
+    // ya escribió todo lo que pudo leer y NUNCA se sobreescribe, así que el fallback
+    // sólo puede AGREGAR, jamás regresionar un campo que ya leía (el upscale
+    // reescala los gaps etiqueta→valor y podría romper el anclaje fino de APELLIDOS
+    // si pisara; por eso sólo llena blancos). FAIL-OPEN.
+    if (deps.preprocessFront && frontRequiredMissing(extracted)) {
+      try {
+        const upscaled = await deps.preprocessFront(front);
+        const fb = await deps.ocr.recognize(upscaled);
+        const fbExtracted = emptyExtracted();
+        extractFront(fb.lines, fbExtracted);
+        fillMissingFront(extracted, fbExtracted);
+        // Si la pasada cruda no leyó NADA de texto, adoptamos su confianza/raw.
+        if (!frontRawText) {
+          frontRawText = fb.rawText;
+          frontConfidence = fb.confidence;
+        }
+      } catch (e) {
+        // eslint-disable-next-line no-console
+        console.warn(`[document] fallback OCR ampliado falló: ${(e as Error).message}`);
+      }
     }
 
     // OCR del DORSO (campos del dorso + reuso para MRZ — un solo OCR).
