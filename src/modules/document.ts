@@ -291,11 +291,18 @@ interface AnchorLine {
   /** Ancho/alto aproximados de la caja (para tolerancias). */
   w: number;
   h: number;
+  /**
+   * Índice de la línea en el arreglo `OcrLine[]` NORMALIZADO de origen (el mismo
+   * que devuelve el sidecar tras `normalizeLines`). Permite recuperar la caja
+   * original (`box`) y reportar `lineIndex` en el debug del playground OCR, sin
+   * que el anclaje de producción dependa de él (es metadata additiva).
+   */
+  idx: number;
 }
 
 /** Centro y dimensiones de una caja de 4 esquinas. */
 function toAnchorLines(lines: OcrLine[]): AnchorLine[] {
-  return lines.map((l) => {
+  return lines.map((l, idx) => {
     const xs = l.box.map((p) => p[0]);
     const ys = l.box.map((p) => p[1]);
     const minX = Math.min(...xs);
@@ -309,6 +316,7 @@ function toAnchorLines(lines: OcrLine[]): AnchorLine[] {
       cy: (minY + maxY) / 2,
       w: maxX - minX,
       h: maxY - minY,
+      idx,
     };
   });
 }
@@ -778,6 +786,197 @@ function extractFront(frontLines: OcrLine[], extracted: ExtractedDocument): void
       .find((d) => d.length >= 6 && d.length <= 8);
     if (cand) extracted.documento.numeroCedula = cand;
   }
+}
+
+// ---------------------------------------------------------------------------
+// DEBUG (playground OCR del admin) — instrumentación ADITIVA del anclaje del
+// FRENTE. NO la consume el pipeline de producción: `extractFront`/`run` quedan
+// intactos. Reproduce EXACTAMENTE las mismas decisiones de anclaje que
+// `extractFront`, pero captura, por cada campo, la LÍNEA OCR elegida (su índice
+// + caja) y la caja de su ETIQUETA — para que el front dibuje qué ancló a qué.
+// ---------------------------------------------------------------------------
+
+/** bbox [x1,y1,x2,y2] de una línea OCR normalizada (por su índice). */
+function boxOf(lines: OcrLine[], idx: number): [number, number, number, number] {
+  const xs = lines[idx].box.map((p) => p[0]);
+  const ys = lines[idx].box.map((p) => p[1]);
+  return [Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)];
+}
+
+/** Ancla de un campo: índice/caja de la línea-valor + caja de la etiqueta. */
+export interface FieldAnchor {
+  /** Índice (en el `OcrLine[]` normalizado) de la línea cuyo texto fue el valor. */
+  lineIndex: number;
+  /** bbox [x1,y1,x2,y2] de esa línea-valor. */
+  box: [number, number, number, number];
+  /** bbox [x1,y1,x2,y2] de la etiqueta que ancló el valor (si la hubo). */
+  labelBox: [number, number, number, number] | null;
+  /** Texto crudo de la línea elegida (para inspección). */
+  text: string;
+}
+
+/** Resultado del debug del frente: campos extraídos + anclas por campo. */
+export interface FrontDebug {
+  extracted: ExtractedDocument;
+  anchors: Record<string, FieldAnchor>;
+}
+
+/**
+ * Variante de `extractFront` INSTRUMENTADA para el playground OCR. Devuelve los
+ * MISMOS campos que `extractFront` (reusa los mismos predicados/umbrales) y,
+ * además, por cada campo anclado por posición, la línea OCR elegida (lineIndex +
+ * box) y la caja de su etiqueta. Los campos que se derivan por presencia textual
+ * (pais/tipo/specimen) o por regex global (fallback de Nº) no tienen ancla
+ * posicional y NO aparecen en `anchors` (su valor sí en `extracted`).
+ *
+ * Se mantiene SEPARADA de `extractFront` a propósito: producción no paga el costo
+ * de la metadata y el contrato de `document()` no cambia.
+ */
+export function extractFrontDebug(frontLines: OcrLine[]): FrontDebug {
+  const extracted = emptyExtracted();
+  const lines = toAnchorLines(frontLines);
+  const labels = collectKnownLabels(lines);
+  const anchors: Record<string, FieldAnchor> = {};
+
+  /** Registra el ancla de un campo a partir de la línea-valor y su etiqueta. */
+  const record = (
+    field: string,
+    valueLine: AnchorLine | undefined,
+    label: string
+  ): void => {
+    if (!valueLine) return;
+    const lbl = findLabel(lines, label);
+    anchors[field] = {
+      lineIndex: valueLine.idx,
+      box: boxOf(frontLines, valueLine.idx),
+      labelBox: lbl ? boxOf(frontLines, lbl.idx) : null,
+      text: valueLine.text.trim(),
+    };
+  };
+
+  // País / tipo / specimen: presencia textual (sin ancla posicional).
+  const allText = lines.map((l) => canon(l.text)).join(" ");
+  if (/REPUBLICA DEL PARAGUAY/.test(allText)) {
+    extracted.documento.pais = "REPUBLICA DEL PARAGUAY";
+  }
+  if (/IDENTIDAD CIVIL/.test(allText)) {
+    extracted.documento.tipo = "Cedula de Identidad Civil";
+  }
+  extracted.documento.specimen = /\bSPECIMEN\b|\bMUESTRA\b/.test(allText);
+
+  // NOMBRES (resuelto primero, igual que en extractFront).
+  const nombresLine = findValueLineBelow(lines, "NOMBRES", labels, {
+    accept: looksLikeName,
+    maxDx: 360,
+  });
+  const nombres = cleanName(nombresLine?.text ?? "");
+  if (nombres) {
+    extracted.titular.nombres = nombres;
+    record("nombres", nombresLine, "NOMBRES");
+  }
+
+  // APELLIDOS (mismas guardas que extractFront).
+  const apellidosExclude = nombresLine ? [...labels, nombresLine] : labels;
+  const apellidosLine = findValueLineBelow(lines, "APELLIDOS", apellidosExclude, {
+    accept: looksLikeName,
+    maxDx: 360,
+    maxDy: 56,
+    dyHeightFactor: 1.8,
+    minScore: 0.6,
+  });
+  const apellidos = cleanName(apellidosLine?.text ?? "");
+  if (apellidos && apellidos !== nombres) {
+    extracted.titular.apellidos = apellidos;
+    record("apellidos", apellidosLine, "APELLIDOS");
+  }
+
+  // Fecha de vencimiento.
+  const vencLine = findValueLineBelow(lines, "FECHA DE VENCIMIENTO", labels, {
+    accept: looksLikeDate,
+  });
+  const venc = printedDateToIso(vencLine?.text ?? "");
+  if (venc) {
+    extracted.documentoFisico.fechaVencimiento = venc;
+    record("fechaVencimiento", vencLine, "FECHA DE VENCIMIENTO");
+  }
+
+  // Fecha de nacimiento.
+  const nacLine = findValueLineBelow(lines, "FECHA DE NACIMIENTO", labels, {
+    accept: looksLikeDate,
+  });
+  const nac = printedDateToIso(nacLine?.text ?? "");
+  if (nac) {
+    extracted.titular.fechaNacimiento = nac;
+    record("fechaNacimiento", nacLine, "FECHA DE NACIMIENTO");
+  }
+
+  // Sexo.
+  const sexoLine = findValueLineBelow(lines, "SEXO", labels, {
+    accept: (t) => /MASCULINO|FEMENINO/.test(canon(t)),
+  });
+  const sexoRaw = canon(sexoLine?.text ?? "");
+  if (/MASCULINO|FEMENINO/.test(sexoRaw)) {
+    extracted.titular.sexo = sexoRaw.includes("FEM") ? "FEMENINO" : "MASCULINO";
+    record("sexo", sexoLine, "SEXO");
+  }
+
+  // Donante.
+  const donanteLine = findValueLineBelow(lines, "DONANTE", labels, {
+    accept: (t) => /^(SI|NO)$/.test(canon(t)),
+    maxDy: 260,
+  });
+  const donanteRaw = canon(donanteLine?.text ?? "");
+  if (donanteRaw === "SI" || donanteRaw === "NO") {
+    extracted.titular.donante = donanteRaw === "SI";
+    record("donante", donanteLine, "DONANTE");
+  }
+
+  // Lugar de nacimiento.
+  const lugarLine = findValueLineBelow(lines, "LUGAR DE NACIMIENTO", labels, {
+    accept: looksLikeCity,
+  });
+  const lugar = lugarLine?.text.trim() ?? "";
+  if (lugar) {
+    const parts = lugar.split(/\s*-\s*/);
+    extracted.titular.lugarNacimiento.ciudad = (parts[0] ?? "").trim();
+    extracted.titular.lugarNacimiento.departamento = (parts[1] ?? "").trim();
+    record("lugarNacimiento", lugarLine, "LUGAR DE NACIMIENTO");
+  }
+
+  // Nº de cédula: rótulo "Nº" con dígitos a la DERECHA (anclaje horizontal).
+  const noLabel = lines
+    .filter((l) => /^N[º°O]?\.?$/i.test(l.text.trim()) || canon(l.text) === "NO")
+    .sort((a, b) => b.score - a.score)[0];
+  if (noLabel) {
+    const numLine = lines
+      .filter((l) => l !== noLabel && l.score >= 0.3)
+      .filter((l) => Math.abs(l.cy - noLabel.cy) <= 60)
+      .filter((l) => l.cx > noLabel.cx)
+      .filter((l) => /\d{5,8}/.test(l.text.replace(/\D/g, "")))
+      .sort((a, b) => a.cx - b.cx)[0];
+    if (numLine) {
+      const digits = numLine.text.replace(/\D/g, "");
+      if (digits.length >= 5) {
+        extracted.documento.numeroCedula = digits;
+        anchors["ci"] = {
+          lineIndex: numLine.idx,
+          box: boxOf(frontLines, numLine.idx),
+          labelBox: boxOf(frontLines, noLabel.idx),
+          text: numLine.text.trim(),
+        };
+      }
+    }
+  }
+  // Fallback global (sin ancla posicional): una línea de 6-8 dígitos no-fecha.
+  if (!extracted.documento.numeroCedula) {
+    const cand = lines
+      .filter((l) => !/\d{2}[\/.\-]\d{2}[\/.\-]\d{4}/.test(l.text))
+      .map((l) => l.text.replace(/\D/g, ""))
+      .find((d) => d.length >= 6 && d.length <= 8);
+    if (cand) extracted.documento.numeroCedula = cand;
+  }
+
+  return { extracted, anchors };
 }
 
 /**

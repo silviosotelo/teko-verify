@@ -45,6 +45,16 @@ const tekoNavigationConfig: NavigationTree[] = [
                 subMenu: [],
             },
             {
+                key: 'teko.ocrDebug',
+                path: '/ocr-debug',
+                title: 'Inspector OCR',
+                translateKey: '',
+                icon: 'tekoOcrDebug',
+                type: NAV_ITEM_TYPE_ITEM,
+                authority: [],
+                subMenu: [],
+            },
+            {
                 key: 'teko.tenants',
                 path: '/tenants',
                 title: 'Tenants',

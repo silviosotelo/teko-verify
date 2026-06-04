@@ -35,6 +35,13 @@ const tekoRoute: Routes = [
         meta: { pageContainerType: 'contained' },
     },
     {
+        key: 'teko.ocrDebug',
+        path: '/ocr-debug',
+        component: lazy(() => import('@/views/teko/OcrDebug')),
+        authority: [],
+        meta: { pageContainerType: 'contained' },
+    },
+    {
         key: 'teko.tenants',
         path: '/tenants',
         component: lazy(() => import('@/views/teko/Tenants')),

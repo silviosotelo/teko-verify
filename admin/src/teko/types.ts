@@ -176,6 +176,45 @@ export interface TestSessionResponse {
     verifyUrl: string
 }
 
+// ---- Playground OCR (Inspector OCR) ----
+export type OcrDebugVariant = 'raw' | 'deskew-upscale'
+
+// Caja de 4 esquinas [[x,y],...] en píxeles de `imageUsed`.
+export type OcrBox = [
+    [number, number],
+    [number, number],
+    [number, number],
+    [number, number],
+]
+
+export interface OcrDebugLine {
+    text: string
+    score: number
+    box: OcrBox
+}
+
+// Ancla de un campo: línea-valor (índice + caja) + caja de su etiqueta.
+export interface OcrFieldAnchor {
+    lineIndex: number
+    // bbox [x1,y1,x2,y2] de la línea-valor.
+    box: [number, number, number, number]
+    // bbox [x1,y1,x2,y2] de la etiqueta (o null si no hubo).
+    labelBox: [number, number, number, number] | null
+    text: string
+}
+
+export interface OcrDebugResponse {
+    variant: OcrDebugVariant
+    width: number
+    height: number
+    // base64 JPEG/PNG (sin prefijo data:) de la imagen efectivamente OCR-eada.
+    imageUsed: string
+    confidence: number
+    lines: OcrDebugLine[]
+    extracted: ExtractedDocument | null
+    anchors: Record<string, OcrFieldAnchor>
+}
+
 // Identidad rica extraída del documento (checks[document].detail.extracted).
 export interface ExtractedDocument {
     documento?: {

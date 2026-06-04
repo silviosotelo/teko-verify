@@ -10,6 +10,8 @@ import type {
     ListSessionsResponse,
     LoA,
     MetricsResponse,
+    OcrDebugResponse,
+    OcrDebugVariant,
     SessionDetail,
     SessionState,
     Tenant,
@@ -211,6 +213,13 @@ export const tekoApi = {
             `/tenants/${tenantId}/test-session`,
             { assurance },
         )
+    },
+
+    // ---- Playground OCR (Inspector OCR) ----
+    // Sube una imagen de cédula (frente, base64), corre PaddleOCR + el extractor
+    // real y devuelve cajas/scores + campos + anclas (qué línea ancló cada campo).
+    ocrDebug(body: { image: string; variant?: OcrDebugVariant }) {
+        return request<OcrDebugResponse>('POST', '/ocr-debug', body)
     },
 }
 

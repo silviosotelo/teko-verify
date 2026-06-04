@@ -34,6 +34,13 @@ import { decodeBase64Image } from "../lib/images";
 import { computeChecks } from "../pipeline";
 import { realPipelineDeps } from "../pipelineDeps";
 import { decision as decideVerdict } from "../modules/decision";
+import sharp from "sharp";
+import {
+  PaddleOcrClient,
+  extractFrontDebug,
+  upscaleForOcr,
+} from "../modules/document";
+import type { OcrLine } from "../types";
 import type {
   AdminLoginResponse,
   AdminRole,
@@ -622,3 +629,81 @@ adminRouter.post(
     }
   }
 );
+
+// ---- Playground OCR (Inspector OCR) -------------------------------------- //
+// POST /admin/ocr-debug  { image:"<base64>", variant?: "raw" | "deskew-upscale" }
+// Herramienta de debug para el operador: sube una imagen de cédula (FRENTE) y ve
+// EXACTAMENTE qué detecta PaddleOCR (cajas + scores) y qué línea ancló a cada
+// campo el extractor real. Distingue LEGIBILIDAD (no hay caja con ese texto) de
+// ANCLAJE (hay caja pero el extractor no la tomó).
+//
+// 1) variant="deskew-upscale": pasa la imagen por el sidecar /doc-crop (vía el
+//    docCropper REAL del pipeline, fail-open) y luego upscale (upscaleForOcr). Esto
+//    REPRODUCE la transformación de pipelineDeps; deliberadamente puede extraer
+//    MENOS campos que "raw" (doc-crop rota portrait→landscape y rompe el anclaje
+//    px-absoluto) — y eso es justo lo que la herramienta existe para revelar.
+//    variant="raw" (default): la imagen tal cual.
+// 2) OCR del sidecar sobre la imagen efectiva (PaddleOcrClient.recognize → lines+conf).
+// 3) Extracción REAL del frente (extractFrontDebug) sobre la MISMA imagen → campos
+//    + anchors{campo:{lineIndex,box,labelBox}}.
+// 4) Devuelve todo en el espacio de coordenadas de `imageUsed` (la imagen
+//    efectivamente OCR-eada), incluidos width/height (de sharp metadata).
+// MUTACIÓN cero, pero requiere canWrite (corre el pipeline OCR del operador).
+const OCR_DEBUG_VARIANTS = new Set(["raw", "deskew-upscale"]);
+
+adminRouter.post("/ocr-debug", canWrite, async (req: Request, res: Response) => {
+  try {
+    const variant =
+      typeof req.body?.variant === "string" ? req.body.variant : "raw";
+    if (!OCR_DEBUG_VARIANTS.has(variant)) {
+      res.status(400).json({ error: "invalid_variant", allowed: ["raw", "deskew-upscale"] });
+      return;
+    }
+
+    // Decodifica la imagen (fail-closed: JPEG/PNG por magic bytes, cap de tamaño).
+    let raw: Buffer;
+    try {
+      raw = decodeBase64Image(req.body?.image);
+    } catch (e) {
+      res.status(400).json({ error: "invalid_image", detail: (e as Error).message });
+      return;
+    }
+
+    // Imagen EFECTIVA según variante. Todo (lines/anchors/width/height) se reporta
+    // en SU espacio de coordenadas.
+    let imageUsed = raw;
+    if (variant === "deskew-upscale") {
+      // docCropper REAL del pipeline (= POST /doc-crop, fail-open) + upscale a 1600.
+      const cropped = realPipelineDeps.docCropper
+        ? await realPipelineDeps.docCropper.crop(raw)
+        : raw;
+      imageUsed = await upscaleForOcr(cropped, 1600);
+    }
+
+    // Dimensiones de la imagen efectiva (para escalar el overlay en el front).
+    const meta = await sharp(imageUsed).metadata();
+    const width = meta.width ?? 0;
+    const height = meta.height ?? 0;
+
+    // OCR del sidecar sobre la imagen efectiva → líneas NORMALIZADAS + confianza.
+    const ocrClient = new PaddleOcrClient();
+    const ocr = await ocrClient.recognize(imageUsed);
+    const lines: OcrLine[] = ocr.lines;
+
+    // Extracción REAL del frente, instrumentada, sobre las MISMAS líneas.
+    const { extracted, anchors } = extractFrontDebug(lines);
+
+    res.json({
+      variant,
+      width,
+      height,
+      imageUsed: imageUsed.toString("base64"),
+      confidence: ocr.confidence,
+      lines: lines.map((l) => ({ text: l.text, score: l.score, box: l.box })),
+      extracted,
+      anchors,
+    });
+  } catch (e) {
+    res.status(500).json({ error: "ocr_debug_failed", detail: (e as Error).message });
+  }
+});
