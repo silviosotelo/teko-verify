@@ -67,6 +67,7 @@ export const FACE_LIVE_MSG: Record<FrameVerdict, string> = {
 export type DocLiveVerdict =
   | "loading"
   | "no-camera"
+  | "no-doc"
   | "blurry"
   | "glare"
   | "dark"
@@ -75,6 +76,7 @@ export type DocLiveVerdict =
 export const DOC_LIVE_MSG: Record<DocLiveVerdict, string> = {
   loading: "Preparando la cámara…",
   "no-camera": "Iniciando cámara…",
+  "no-doc": "Encuadrá la cédula dentro del recuadro",
   blurry: "Acercá la cédula y mantené firme",
   glare: "Hay reflejo, movela un poco",
   dark: "Necesitamos un poco más de luz",

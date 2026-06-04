@@ -164,24 +164,46 @@ export function useFaceDetector(
     aliveRef.current = true
     let cancelled = false
     async function load() {
-      try {
-        const fileset = await FilesetResolver.forVisionTasks(WASM_CDN)
-        const det = await FaceDetector.createFromOptions(fileset, {
-          baseOptions: { modelAssetPath: MODEL_CDN, delegate: "GPU" },
+      const fileset = await FilesetResolver.forVisionTasks(WASM_CDN).catch(
+        (e) => {
+          console.warn("[teko] FilesetResolver falló:", e)
+          return null
+        },
+      )
+      if (!fileset) {
+        if (!cancelled) setStatus("unavailable")
+        return
+      }
+      // Intentamos GPU (rápido) y si el delegate no inicializa (WebGL ausente en
+      // headless / algunos teléfonos), reintentamos con CPU antes de degradar a
+      // modo manual. Así el gating facial sigue activo aunque no haya GPU.
+      const make = (delegate: "GPU" | "CPU") =>
+        FaceDetector.createFromOptions(fileset, {
+          baseOptions: { modelAssetPath: MODEL_CDN, delegate },
           runningMode: "VIDEO",
           minDetectionConfidence: 0.45,
         })
-        if (cancelled) {
-          det.close()
-          return
-        }
-        detectorRef.current = det
-        setStatus("ready")
+      let det: FaceDetector | null = null
+      try {
+        det = await make("GPU")
       } catch (e) {
-        // CDN caído / WebGL no disponible / wasm bloqueado → degradamos.
-        console.warn("[teko] FaceDetector no disponible:", e)
-        if (!cancelled) setStatus("unavailable")
+        console.warn("[teko] FaceDetector GPU falló, reintento CPU:", e)
+        try {
+          det = await make("CPU")
+        } catch (e2) {
+          console.warn("[teko] FaceDetector no disponible (CPU también):", e2)
+        }
       }
+      if (!det) {
+        if (!cancelled) setStatus("unavailable")
+        return
+      }
+      if (cancelled) {
+        det.close()
+        return
+      }
+      detectorRef.current = det
+      setStatus("ready")
     }
     void load()
     return () => {

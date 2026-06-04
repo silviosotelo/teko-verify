@@ -11,6 +11,14 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 const STABLE_MS = 1500
 // Pasos de la cuenta regresiva de auto-captura.
 const COUNTDOWN = [3, 2, 1]
+// Enfriamiento tras una captura RECHAZADA: nunca re-disparamos antes de esto.
+const COOLDOWN_MS = 1200
+// Re-adquisición: tras un rechazo exigimos que el rostro SALGA del óvalo
+// (no-face real, MediaPipe corriendo) por estos frames consecutivos antes de
+// re-habilitar el auto-disparo. Los frames "loading"/"no-camera" del reinicio
+// de cámara NO cuentan (ese era el bug del loop: el warm-up "rompía" el encuadre
+// y re-armaba la captura solo, sin que el usuario re-encuadre).
+const REACQUIRE_ABSENT_FRAMES = 4
 
 /**
  * Selfie con AUTO-CAPTURA real (estilo Behance):
@@ -38,17 +46,35 @@ export function Selfie({ onDone }: { onDone: () => void }) {
   const capturingRef = useRef(false)
   const countingRef = useRef(false)
   const timersRef = useRef<ReturnType<typeof setTimeout>[]>([])
-  // Guard anti-loop: tras una captura rechazada, NO re-armamos la cuenta hasta
-  // que el encuadre vuelva a romperse (verdict != good) y se rehaga. Sin esto,
-  // la escena sigue "good" → recaptura → rechazo → recaptura (loop).
-  const blockedRef = useRef(false)
+  // --- Guard anti-loop robusto (sobrevive al warm-up de cámara) -------------
+  // Tras un rechazo: enfriamiento por tiempo (cooldownUntilRef) + exigir que el
+  // rostro SALGA del óvalo de verdad (absentFramesRef llega al umbral) antes de
+  // re-disparar. El viejo blockedRef se levantaba con CUALQUIER frame no-good —
+  // y el reinicio de cámara produce frames "loading"/"no-camera", así que el
+  // bloqueo caía solo y re-disparaba en loop. Ahora el warm-up NO satisface la
+  // re-adquisición.
+  const cooldownUntilRef = useRef(0)
+  const needReacquireRef = useRef(false)
+  const absentFramesRef = useRef(0)
   const manualMode = detect.status === "unavailable"
   const isGood = detect.verdict === "good"
+  // "Ausencia real" del rostro: MediaPipe corriendo y NO ve cara (no es el
+  // transitorio de warm-up). Solo esto cuenta como re-adquisición tras rechazo.
+  const isAbsent = detect.verdict === "no-face"
 
   // Refs espejo de valores vivos: el loop de auto-captura los lee SIN que su
   // efecto se reejecute (clave para que la cuenta 3·2·1 no se autocancele).
   const isGoodRef = useRef(isGood)
   isGoodRef.current = isGood
+  const isAbsentRef = useRef(isAbsent)
+  isAbsentRef.current = isAbsent
+
+  // Arma el enfriamiento + re-adquisición tras un rechazo de captura.
+  const armCooldown = () => {
+    cooldownUntilRef.current = Date.now() + COOLDOWN_MS
+    needReacquireRef.current = true
+    absentFramesRef.current = 0
+  }
 
   // --- Captura + subida (compartida entre auto y manual) -------------------
   const doCapture = useCallback(async () => {
@@ -90,13 +116,14 @@ export function Selfie({ onDone }: { onDone: () => void }) {
       stableSinceRef.current = null
       capturingRef.current = false
       countingRef.current = false
-      blockedRef.current = true
+      armCooldown()
       void cam.start()
     } catch (e) {
       setBusy(false)
       capturingRef.current = false
       countingRef.current = false
       stableSinceRef.current = null
+      armCooldown()
       setFatal(errorMessage(e))
       void cam.start()
     }
@@ -128,7 +155,21 @@ export function Selfie({ onDone }: { onDone: () => void }) {
     let raf = 0
     const loop = () => {
       if (!capturingRef.current) {
-        if (isGoodRef.current && !blockedRef.current) {
+        // Re-adquisición tras rechazo: contamos AUSENCIA REAL (no-face con
+        // MediaPipe corriendo). El warm-up de cámara (loading/no-camera) NO
+        // cuenta — por eso el loop ya no se re-arma solo.
+        if (needReacquireRef.current) {
+          if (isAbsentRef.current) {
+            absentFramesRef.current++
+            if (absentFramesRef.current >= REACQUIRE_ABSENT_FRAMES)
+              needReacquireRef.current = false
+          }
+          stableSinceRef.current = null
+          if (countingRef.current) cancelCountdown()
+        } else if (
+          isGoodRef.current &&
+          Date.now() >= cooldownUntilRef.current
+        ) {
           if (stableSinceRef.current == null)
             stableSinceRef.current = Date.now()
           const held = Date.now() - stableSinceRef.current
@@ -145,10 +186,10 @@ export function Selfie({ onDone }: { onDone: () => void }) {
             )
           }
         } else {
-          // Encuadre roto (o aún no): reseteamos estabilidad, abortamos cuenta y
-          // levantamos el bloqueo de re-arme (el usuario ya se re-encuadró).
+          // Encuadre roto / en cooldown / aún no good: reseteamos estabilidad y
+          // abortamos cuenta. NO tocamos los guards de re-adquisición acá (ese
+          // era el bug: se levantaban con el warm-up de cámara).
           stableSinceRef.current = null
-          blockedRef.current = false
           if (countingRef.current) cancelCountdown()
         }
       }

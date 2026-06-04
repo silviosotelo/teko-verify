@@ -8,6 +8,14 @@ import { Button, Card, Notice } from "../ui"
 // El documento debe quedar nítido y estable ~1.5s antes de la cuenta regresiva.
 const STABLE_MS = 1500
 const COUNTDOWN = [3, 2, 1]
+// Enfriamiento tras una captura RECHAZADA: nunca re-disparamos antes de esto.
+const COOLDOWN_MS = 1200
+// Re-adquisición: tras un rechazo exigimos que el documento DESAPAREZCA de la
+// guía (no-doc real, detector corriendo) por estos frames consecutivos antes de
+// volver a habilitar el auto-disparo. Los frames "loading"/"no-camera" del
+// reinicio de cámara NO cuentan como ausencia (ese era el bug del loop: el
+// warm-up "rompía" el encuadre y re-armaba solo, sin que el usuario reacomode).
+const REACQUIRE_ABSENT_FRAMES = 4
 
 /**
  * Cédula (frente/dorso) con AUTO-CAPTURA por heurística en vivo:
@@ -32,14 +40,25 @@ export function DocCapture({ onDone }: { onDone: () => void }) {
 
   const quality = useDocQuality(cam.videoRef, cam.ready && !busy)
   const isGood = quality.verdict === "good"
+  // "Ausencia real": documento NO encuadrado, con el detector efectivamente
+  // corriendo (no es el transitorio de warm-up de cámara). Solo esto cuenta
+  // como re-adquisición tras un rechazo.
+  const isAbsent = quality.verdict === "no-doc"
 
   const stableSinceRef = useRef<number | null>(null)
   const capturingRef = useRef(false)
   const countingRef = useRef(false)
   const timersRef = useRef<ReturnType<typeof setTimeout>[]>([])
-  // Guard anti-loop: tras una captura rechazada NO re-armamos hasta que la
-  // nitidez se rompa y se rehaga (evita capturar→rechazar→capturar en bucle).
-  const blockedRef = useRef(false)
+  // --- Guard anti-loop robusto (sobrevive al warm-up de cámara) -------------
+  // Tras un rechazo: enfriamiento por tiempo (cooldownUntilRef) + exigir que el
+  // documento SALGA de la guía de verdad (absentFramesRef llega al umbral) antes
+  // de volver a auto-disparar. El viejo blockedRef se levantaba con CUALQUIER
+  // frame no-good — y el reinicio de cámara produce frames "loading"/"no-camera",
+  // así que el bloqueo caía solo y re-disparaba en loop. Ahora el warm-up NO
+  // satisface la re-adquisición.
+  const cooldownUntilRef = useRef(0)
+  const needReacquireRef = useRef(false)
+  const absentFramesRef = useRef(0)
 
   // Limpia todos los timers de cuenta pendientes (clearTimeout real, no solo []).
   const clearTimers = () => {
@@ -48,9 +67,19 @@ export function DocCapture({ onDone }: { onDone: () => void }) {
     countingRef.current = false
   }
 
-  // Ref espejo del veredicto vivo (leído por el loop sin reejecutar su efecto).
+  // Arma el enfriamiento + re-adquisición tras un rechazo de captura.
+  const armCooldown = () => {
+    cooldownUntilRef.current = Date.now() + COOLDOWN_MS
+    needReacquireRef.current = true
+    absentFramesRef.current = 0
+  }
+
+  // Refs espejo de los veredictos vivos (leídos por el loop sin reejecutar su
+  // efecto, para que la cuenta 3·2·1 no se autocancele).
   const isGoodRef = useRef(isGood)
   isGoodRef.current = isGood
+  const isAbsentRef = useRef(isAbsent)
+  isAbsentRef.current = isAbsent
 
   const isFront = side === "front"
 
@@ -83,8 +112,9 @@ export function DocCapture({ onDone }: { onDone: () => void }) {
       stableSinceRef.current = null
       capturingRef.current = false
       clearTimers()
-      // Rechazo: bloqueamos re-arme hasta que el usuario reacomode la cédula.
-      blockedRef.current = true
+      // Rechazo: enfriamiento + exigir que el usuario reacomode la cédula
+      // (sacarla y volver a encuadrarla) antes de re-disparar.
+      armCooldown()
       void cam.start()
       return
     }
@@ -95,8 +125,10 @@ export function DocCapture({ onDone }: { onDone: () => void }) {
       stableSinceRef.current = null
       capturingRef.current = false
       clearTimers()
-      // Cambio de lado: re-armar limpio para el dorso (no es un rechazo).
-      blockedRef.current = false
+      // Cambio de lado: re-armar limpio para el dorso (no es un rechazo). Pero
+      // pedimos re-adquisición igual para que no dispare con el dorso a medio
+      // poner (el frente seguía nítido y disparaba al instante).
+      armCooldown()
       setSide("back")
       void cam.start()
       return
@@ -112,7 +144,7 @@ export function DocCapture({ onDone }: { onDone: () => void }) {
       capturingRef.current = false
       clearTimers()
       stableSinceRef.current = null
-      blockedRef.current = true
+      armCooldown()
       setFatal(errorMessage(e))
       void cam.start()
     }
@@ -139,7 +171,24 @@ export function DocCapture({ onDone }: { onDone: () => void }) {
     let raf = 0
     const loop = () => {
       if (!capturingRef.current) {
-        if (isGoodRef.current && !blockedRef.current) {
+        // Re-adquisición tras rechazo: contamos AUSENCIA REAL (no-doc con el
+        // detector corriendo). El warm-up de cámara (loading/no-camera) NO
+        // cuenta — por eso el loop ya no se re-arma solo.
+        if (needReacquireRef.current) {
+          if (isAbsentRef.current) {
+            absentFramesRef.current++
+            if (absentFramesRef.current >= REACQUIRE_ABSENT_FRAMES)
+              needReacquireRef.current = false
+          }
+          // Mientras re-adquirimos, jamás contamos estabilidad ni disparamos.
+          stableSinceRef.current = null
+          if (countingRef.current) cancelCountdown()
+        } else if (
+          isGoodRef.current &&
+          Date.now() >= cooldownUntilRef.current
+        ) {
+          // Documento presente + encuadrado + nítido (good), cooldown cumplido y
+          // ya re-adquirido. Acumulamos estabilidad y disparamos la cuenta.
           if (stableSinceRef.current == null)
             stableSinceRef.current = Date.now()
           const held = Date.now() - stableSinceRef.current
@@ -153,10 +202,10 @@ export function DocCapture({ onDone }: { onDone: () => void }) {
             )
           }
         } else {
-          // No nítido (o aún no): reseteamos estabilidad, cancelamos cuenta y
-          // levantamos el bloqueo de re-arme (el usuario ya reacomodó).
+          // No encuadrado/nítido aún (o en cooldown): reseteamos estabilidad y
+          // cancelamos cualquier cuenta en curso. NO tocamos los guards de
+          // re-adquisición acá (ese era el bug: se levantaban con el warm-up).
           stableSinceRef.current = null
-          blockedRef.current = false
           if (countingRef.current) cancelCountdown()
         }
       }
