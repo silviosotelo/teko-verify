@@ -40,6 +40,44 @@ export function evalQuality(quality?: QualityResult): QualityVerdict {
   return { advance: false, msg }
 }
 
+/**
+ * Copy en vivo del encuadre facial (auto-captura selfie). Mapea cada veredicto
+ * del FaceDetector a un mensaje ACCIONABLE y corto. Mostrado dentro del óvalo.
+ */
+import type { FrameVerdict } from "./useFaceDetector"
+
+export const FACE_LIVE_MSG: Record<FrameVerdict, string> = {
+  loading: "Preparando la cámara…",
+  "no-camera": "Iniciando cámara…",
+  "no-face": "Ubicá tu rostro en el óvalo",
+  multiple: "Que aparezca un solo rostro",
+  "too-far": "Acercate un poco",
+  "too-close": "Alejate un poco",
+  "off-center": "Centrate en el óvalo",
+  "low-confidence": "Buscá un lugar con más luz",
+  good: "Perfecto, no te muevas",
+}
+
+/**
+ * Copy en vivo del encuadre de la cédula (auto-captura por nitidez + brillo).
+ */
+export type DocLiveVerdict =
+  | "loading"
+  | "no-camera"
+  | "blurry"
+  | "glare"
+  | "dark"
+  | "good"
+
+export const DOC_LIVE_MSG: Record<DocLiveVerdict, string> = {
+  loading: "Preparando la cámara…",
+  "no-camera": "Iniciando cámara…",
+  blurry: "Acercá la cédula y mantené firme",
+  glare: "Hay reflejo, movela un poco",
+  dark: "Necesitamos un poco más de luz",
+  good: "Perfecto, no te muevas",
+}
+
 export const DOC_MSG: Record<string, string> = {
   blurry:
     "La cédula salió borrosa. Acercala un poco y mantené firme el teléfono.",

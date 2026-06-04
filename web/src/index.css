@@ -106,3 +106,60 @@ body {
 .teko-pop {
   animation: teko-pop 0.45s cubic-bezier(0.16, 1, 0.3, 1) both;
 }
+
+/* Número de la cuenta regresiva de auto-captura (3·2·1): aparece grande y
+   se desvanece achicándose, una pulsación por segundo. */
+@keyframes teko-count {
+  0% {
+    transform: scale(1.4);
+    opacity: 0;
+  }
+  25% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(0.75);
+    opacity: 0;
+  }
+}
+.teko-count {
+  animation: teko-count 1s ease-out both;
+}
+
+/* Destello de captura: flash blanco breve al disparar la foto. */
+@keyframes teko-flash {
+  0% {
+    opacity: 0.85;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+.teko-flash {
+  animation: teko-flash 0.45s ease-out forwards;
+}
+
+/* Transición suave de entrada de cada paso del wizard. */
+@keyframes teko-slide-in {
+  0% {
+    transform: translateY(10px);
+    opacity: 0;
+  }
+  100% {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+.teko-slide-in {
+  animation: teko-slide-in 0.35s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .teko-pop,
+  .teko-count,
+  .teko-flash,
+  .teko-slide-in {
+    animation-duration: 0.01ms !important;
+  }
+}

@@ -77,6 +77,23 @@ export async function listBySession(
   return res.rows.map(mapCheck);
 }
 
+/**
+ * Borra todos los checks de una sesión (idempotencia de /preview: un segundo
+ * preview no debe duplicar filas que /confirm luego reconstruiría como dobles).
+ * Scopeado por tenant. Devuelve la cantidad borrada.
+ */
+export async function deleteBySession(
+  tenantId: string,
+  sessionId: string,
+  exec: Executor = pool
+): Promise<number> {
+  const res = await exec.query(
+    "DELETE FROM verification_checks WHERE tenant_id = $1 AND session_id = $2",
+    [tenantId, sessionId]
+  );
+  return res.rowCount ?? 0;
+}
+
 export async function getById(
   tenantId: string,
   id: string,

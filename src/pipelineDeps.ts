@@ -13,7 +13,32 @@ import { livenessModule } from "./modules/liveness";
 import { documentModule, defaultDocumentDeps } from "./modules/document";
 import { evidenceStore } from "./lib/evidenceStore";
 import { webhookSender } from "./lib/webhook";
-import type { PipelineDeps, PipelineModules } from "./pipeline";
+import { OCR_SIDECAR_URL } from "./config";
+import type { DocCropper, PipelineDeps, PipelineModules } from "./pipeline";
+
+/**
+ * DocCropper real: recorta/endereza el frente del documento a su borde vía el sidecar
+ * OpenCV (POST {OCR_SIDECAR_URL}/doc-crop). FAIL-OPEN: ante cualquier error (sidecar
+ * caído, HTTP no-2xx, respuesta inválida) devuelve la imagen original sin lanzar.
+ */
+const realDocCropper: DocCropper = {
+  async crop(image: Buffer): Promise<Buffer> {
+    try {
+      const res = await fetch(`${OCR_SIDECAR_URL}/doc-crop`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ image: image.toString("base64") }),
+      });
+      if (!res.ok) return image;
+      const data = (await res.json()) as { image?: unknown };
+      if (typeof data.image !== "string" || !data.image) return image;
+      const buf = Buffer.from(data.image, "base64");
+      return buf.length > 0 ? buf : image;
+    } catch {
+      return image;
+    }
+  },
+};
 
 /** Adaptador de los módulos reales a la interfaz `PipelineModules` del pipeline. */
 const modules: PipelineModules = {
@@ -31,7 +56,11 @@ export const realPipelineDeps: PipelineDeps = {
   modules,
   repos: {
     sessions: { update: repos.sessions.update },
-    checks: { create: repos.checks.create },
+    checks: {
+      create: repos.checks.create,
+      listBySession: repos.checks.listBySession,
+      deleteBySession: repos.checks.deleteBySession,
+    },
     identities: { create: repos.identities.create },
     evidence: { create: repos.evidence.create },
     auditLog: { record: repos.auditLog.record },
@@ -40,4 +69,5 @@ export const realPipelineDeps: PipelineDeps = {
   evidenceStore,
   webhook: webhookSender,
   withTransaction,
+  docCropper: realDocCropper,
 };

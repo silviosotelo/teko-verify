@@ -1,13 +1,14 @@
 import { useEffect, useRef } from "react"
-import { apiPost, getStatus, type StatusResult } from "../api"
+import { getStatus, type StatusResult } from "../api"
 import { Card } from "../ui"
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 const TERMINAL = ["verified", "rejected", "needs_recapture", "error", "expired"]
 
 /**
- * Pantalla "Verificando tu identidad…". Lógica PORTADA:
- *  - POST /submit (puede ya estar processing → ignoramos el error).
+ * Pantalla "Verificando tu identidad…".
+ *  - La FINALIZACIÓN ya la disparó la pantalla de Revisión con POST /confirm.
+ *    Acá solo hacemos polling del estado (no llamamos /submit).
  *  - Polling GET /status cada 2s, hasta 60 intentos (fallback robusto al SSE).
  *  - Al llegar a un estado terminal → onResult(status).
  */
@@ -21,11 +22,6 @@ export function Processing({
   useEffect(() => {
     done.current = false
     async function run() {
-      try {
-        await apiPost("/submit", {})
-      } catch {
-        /* puede ya estar processing */
-      }
       for (let i = 0; i < 60; i++) {
         await sleep(2000)
         if (done.current) return

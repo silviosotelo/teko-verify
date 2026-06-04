@@ -42,6 +42,7 @@ export type SessionState =
   | "created"
   | "capturing"
   | "processing"
+  | "review"
   | "verified"
   | "rejected"
   | "needs_recapture"
@@ -635,6 +636,67 @@ export interface SubmitResponse {
   ok: boolean;
   state: SessionState;
 }
+
+/**
+ * Datos extraídos del documento que se muestran en la pantalla de REVISIÓN del
+ * titular (POST /preview). Subconjunto seguro del `ExtractedDocument`.
+ */
+export interface PreviewExtracted {
+  titular: ExtractedDocument["titular"];
+  documento: ExtractedDocument["documento"];
+  documentoFisico: ExtractedDocument["documentoFisico"];
+  registroInterno: ExtractedDocument["registroInterno"];
+  autoridadEmisora: ExtractedDocument["autoridadEmisora"];
+  mrz: ExtractedDocument["mrz"];
+}
+
+/** Resumen del match 1:1 para la pantalla de revisión. */
+export interface PreviewMatch {
+  cosine: number;
+  passed: boolean;
+}
+
+/** Pre-veredicto INFORMATIVO mostrado en revisión (la decisión real la fija /confirm). */
+export interface PreviewDecision {
+  loa: LoA;
+  wouldPass: boolean;
+}
+
+/**
+ * URLs (token-auth) o dataURLs de las fotos recortadas que se muestran en revisión.
+ * Se sirven vía GET /verify/:token/evidence/:type (type ∈ selfie|doc_face|doc_front).
+ */
+export interface PreviewPhotos {
+  selfieCrop: string;
+  docFaceCrop: string;
+  docFrontCrop: string;
+}
+
+/**
+ * POST /verify/:token/preview — corre el pipeline (quality+liveness+document+match),
+ * persiste los verification_checks y deja la sesión en 'review' (NO finaliza).
+ */
+export interface PreviewResponse {
+  state: "review";
+  extracted: PreviewExtracted;
+  match: PreviewMatch;
+  decisionPreview: PreviewDecision;
+  photos: PreviewPhotos;
+}
+
+/**
+ * POST /verify/:token/confirm — finaliza DESDE 'review' con los checks ya computados:
+ * decide (verified|rejected según LoA), crea verified_identity si verified, dispara
+ * webhook, estado terminal. Fail-closed.
+ */
+export interface ConfirmResponse {
+  state: SessionState;
+  result: SessionResult | null;
+  reasons: string[];
+}
+
+/** Tipo de evidencia RECORTADA servible en revisión (GET /verify/:token/evidence/:type). */
+export type EvidenceCropType = "selfie" | "doc_face" | "doc_front";
 
 /** GET /verify/:token/status — estado para la SPA (SSE + fallback polling, §8/§11). */
 export interface CaptureStatusResponse {

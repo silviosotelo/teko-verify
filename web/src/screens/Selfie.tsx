@@ -1,32 +1,68 @@
-import { useState } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { apiPost, type QualityResult } from "../api"
-import { evalQuality } from "../messages"
+import { evalQuality, FACE_LIVE_MSG } from "../messages"
 import { useCamera } from "../useCamera"
+import { useFaceDetector } from "../useFaceDetector"
 import { Button, Card, Notice } from "../ui"
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
+// Tiempo que el rostro debe quedarse "good" antes de arrancar la cuenta. ~1s.
+const STABLE_MS = 900
+// Pasos de la cuenta regresiva de auto-captura.
+const COUNTDOWN = [3, 2, 1]
+
 /**
- * Pantalla selfie con indicador de confianza/calidad (estilo Behance).
- * Lógica PORTADA: capturar selfie + 2 frames (con micro-pausa de 350ms para
- * liveness) → POST /selfie {image, frames}. Si quality.passed===false por algo
- * accionable, mostrar tip amable y dejar recapturar SIN avanzar.
+ * Selfie con AUTO-CAPTURA real (estilo Behance):
+ *  - Detección facial EN VIVO con MediaPipe (useFaceDetector) sobre el <video>.
+ *  - Feedback accionable dentro del óvalo; el óvalo va de gris → verde.
+ *  - Cuando el rostro queda bien encuadrado ~1s, arranca cuenta 3·2·1 y dispara.
+ *  - Preview ESPEJADO (scaleX(-1), como un espejo); la captura al canvas va
+ *    SIN espejar (useCamera.grab dibuja el frame crudo) → la foto sale correcta.
+ *  - Fallback: si MediaPipe no carga, mostramos botón manual "Sacar selfie".
+ *
+ * Pipeline (contrato intacto): POST /selfie {image, frames}.
  */
 export function Selfie({ onDone }: { onDone: () => void }) {
   const cam = useCamera("user")
+  // La detección corre solo cuando la cámara está lista y no estamos procesando.
   const [busy, setBusy] = useState(false)
+  const detect = useFaceDetector(cam.videoRef, cam.ready && !busy)
+
   const [notice, setNotice] = useState<string | null>(null)
   const [fatal, setFatal] = useState<string | null>(null)
+  const [count, setCount] = useState<number | null>(null)
+  const [flash, setFlash] = useState(false)
 
-  async function capture() {
+  const stableSinceRef = useRef<number | null>(null)
+  const capturingRef = useRef(false)
+  const countingRef = useRef(false)
+  const timersRef = useRef<ReturnType<typeof setTimeout>[]>([])
+  const manualMode = detect.status === "unavailable"
+  const isGood = detect.verdict === "good"
+
+  // Refs espejo de valores vivos: el loop de auto-captura los lee SIN que su
+  // efecto se reejecute (clave para que la cuenta 3·2·1 no se autocancele).
+  const isGoodRef = useRef(isGood)
+  isGoodRef.current = isGood
+
+  // --- Captura + subida (compartida entre auto y manual) -------------------
+  const doCapture = useCallback(async () => {
+    if (capturingRef.current) return
+    capturingRef.current = true
     setBusy(true)
     setNotice(null)
     setFatal(null)
+    setCount(null)
+    setFlash(true)
+    setTimeout(() => setFlash(false), 450)
     try {
+      // grab() dibuja el frame CRUDO (sin espejar) → la imagen sale correcta
+      // aunque el preview se vea como espejo.
       const selfie = cam.grab()
-      await sleep(350)
+      await sleep(320)
       const f1 = cam.grab()
-      await sleep(350)
+      await sleep(320)
       const f2 = cam.grab()
       cam.stop()
       const resp = await apiPost<{ quality?: QualityResult }>("/selfie", {
@@ -36,28 +72,102 @@ export function Selfie({ onDone }: { onDone: () => void }) {
       const verdict = evalQuality(resp.quality)
       if (verdict.advance) {
         onDone()
-      } else {
-        // Recapturar: reabrimos cámara y mostramos el tip.
-        setNotice(verdict.msg ?? null)
-        setBusy(false)
-        void cam.start()
+        return
       }
+      // Recapturar: reabrimos cámara, mostramos tip y reanudamos detección.
+      setNotice(verdict.msg ?? null)
+      setBusy(false)
+      stableSinceRef.current = null
+      capturingRef.current = false
+      countingRef.current = false
+      void cam.start()
     } catch (e) {
       setBusy(false)
+      capturingRef.current = false
+      countingRef.current = false
+      stableSinceRef.current = null
       setFatal(
         "No pudimos procesar la selfie: " +
           (e instanceof Error ? e.message : String(e)),
       )
       void cam.start()
     }
-  }
+  }, [cam, onDone])
+
+  // Ref siempre apuntando a la última doCapture, para que el timer la invoque
+  // sin meter doCapture (inestable) en las deps del efecto de countdown.
+  const doCaptureRef = useRef(doCapture)
+  doCaptureRef.current = doCapture
+
+  // Cancela la cuenta regresiva en curso (timers + estado visible).
+  const cancelCountdown = useCallback(() => {
+    countingRef.current = false
+    timersRef.current.forEach(clearTimeout)
+    timersRef.current = []
+    setCount(null)
+  }, [])
+
+  // --- Estabilidad + cuenta regresiva de auto-captura ----------------------
+  // El loop lee SOLO refs (isGoodRef/capturingRef/countingRef) y programa los
+  // timers UNA vez en timersRef. NO se cancelan en cada render: solo si el
+  // encuadre se rompe o al desmontar. Así "setCount(3)" no se autocancela.
+  useEffect(() => {
+    if (manualMode || busy) {
+      cancelCountdown()
+      stableSinceRef.current = null
+      return
+    }
+    let raf = 0
+    const loop = () => {
+      if (!capturingRef.current) {
+        if (isGoodRef.current) {
+          if (stableSinceRef.current == null)
+            stableSinceRef.current = Date.now()
+          const held = Date.now() - stableSinceRef.current
+          if (held >= STABLE_MS && !countingRef.current) {
+            // Arrancamos la secuencia 3·2·1 y disparamos al final (una sola vez).
+            countingRef.current = true
+            COUNTDOWN.forEach((n, i) => {
+              timersRef.current.push(setTimeout(() => setCount(n), i * 1000))
+            })
+            timersRef.current.push(
+              setTimeout(() => {
+                void doCaptureRef.current()
+              }, COUNTDOWN.length * 1000),
+            )
+          }
+        } else {
+          // Encuadre roto: reseteamos estabilidad y abortamos cualquier cuenta.
+          stableSinceRef.current = null
+          if (countingRef.current) cancelCountdown()
+        }
+      }
+      raf = requestAnimationFrame(loop)
+    }
+    raf = requestAnimationFrame(loop)
+    return () => {
+      cancelAnimationFrame(raf)
+      timersRef.current.forEach(clearTimeout)
+      timersRef.current = []
+      countingRef.current = false
+    }
+  }, [manualMode, busy, cancelCountdown])
+
+  const liveMsg =
+    detect.status === "loading"
+      ? "Preparando detección…"
+      : (FACE_LIVE_MSG[detect.verdict] ?? "Ubicá tu rostro en el óvalo")
+
+  // Color del óvalo: verde cuando está bien, gris cuando no.
+  const ovalColor = isGood ? "border-primary" : "border-white/70"
+  const ovalGlow = isGood ? "shadow-[0_0_0_4px_rgba(22,163,74,0.25)]" : ""
 
   return (
     <Card>
       <h1 className="text-xl font-bold text-gray-900">Sacate una selfie</h1>
       <p className="mt-1 text-sm leading-relaxed text-gray-500">
-        Ubicá tu rostro dentro del óvalo, con buena luz, de frente y sin
-        anteojos.
+        Ubicá tu rostro dentro del óvalo, con buena luz y de frente. Cuando
+        estés bien encuadrado, la foto se saca sola.
       </p>
 
       {notice && <Notice>{notice}</Notice>}
@@ -73,25 +183,56 @@ export function Selfie({ onDone }: { onDone: () => void }) {
           autoPlay
           playsInline
           muted
+          // ESPEJADO solo en el preview (como un espejo, fácil de encuadrar).
           className="size-full object-cover"
+          style={{ transform: "scaleX(-1)" }}
         />
-        {/* óvalo guía */}
+
+        {/* óvalo guía: gris → verde según el encuadre en vivo */}
         <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-          <div className="h-[78%] w-[62%] rounded-[50%] border-[3px] border-dashed border-white/60" />
+          <div
+            className={`h-[78%] w-[62%] rounded-[50%] border-[3px] ${
+              isGood ? "border-solid" : "border-dashed"
+            } ${ovalColor} ${ovalGlow} transition-all duration-300`}
+          />
         </div>
-        {/* indicador de confianza en tiempo real */}
-        <div className="pointer-events-none absolute inset-x-0 top-3 flex justify-center">
-          <span
-            className="flex items-center gap-2 rounded-full bg-black/45 px-3 py-1.5 text-xs font-medium text-white backdrop-blur-sm"
-            style={{ animation: "teko-pulse 1.6s ease-in-out infinite" }}
-          >
-            <span className="size-2 rounded-full bg-mint" />
-            {cam.ready ? "Analizando rostro…" : "Iniciando cámara…"}
-          </span>
-        </div>
-        <div className="pointer-events-none absolute inset-x-0 bottom-3 text-center text-[13px] text-white drop-shadow">
-          Mirá a la cámara
-        </div>
+
+        {/* destello de captura */}
+        {flash && (
+          <div className="teko-flash pointer-events-none absolute inset-0 bg-white" />
+        )}
+
+        {/* cuenta regresiva 3·2·1 */}
+        {count != null && (
+          <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+            <span
+              key={count}
+              className="teko-count text-7xl font-black text-white drop-shadow-lg"
+            >
+              {count}
+            </span>
+          </div>
+        )}
+
+        {/* feedback en vivo (accionable) */}
+        {count == null && (
+          <div className="pointer-events-none absolute inset-x-0 top-3 flex justify-center">
+            <span
+              className={`flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-semibold backdrop-blur-sm transition-colors ${
+                isGood
+                  ? "bg-primary/90 text-white"
+                  : "bg-black/45 text-white"
+              }`}
+            >
+              <span
+                className={`size-2 rounded-full ${
+                  isGood ? "bg-white" : "bg-mint"
+                }`}
+              />
+              {manualMode ? "Encuadrá tu rostro" : liveMsg}
+            </span>
+          </div>
+        )}
       </div>
 
       {cam.error && (
@@ -101,14 +242,24 @@ export function Selfie({ onDone }: { onDone: () => void }) {
         </Notice>
       )}
 
-      <Button disabled={busy || !cam.ready} onClick={capture}>
-        {busy ? "Revisando tu foto…" : "Sacar selfie"}
+      {/* Botón manual: SIEMPRE disponible como recovery; obligatorio si
+          MediaPipe no cargó (manualMode). */}
+      <Button
+        disabled={busy || !cam.ready}
+        onClick={() => void doCapture()}
+        variant={manualMode ? "primary" : "ghost"}
+      >
+        {busy
+          ? "Revisando tu foto…"
+          : manualMode
+            ? "Sacar selfie"
+            : "Sacar foto ahora"}
       </Button>
-      <div className="mt-2.5">
-        <Button variant="ghost" onClick={() => void cam.start()}>
-          Reintentar cámara
-        </Button>
-      </div>
+      {!manualMode && (
+        <p className="mt-2 text-center text-xs text-gray-400">
+          La captura es automática · o tocá el botón cuando quieras
+        </p>
+      )}
     </Card>
   )
 }

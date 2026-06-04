@@ -28,8 +28,10 @@
 import type { PoolClient } from "pg";
 import type { Engine } from "./engine";
 import type { Executor } from "./db/executor";
+import sharp from "sharp";
 import type {
   DocumentResult,
+  EvidenceCropType,
   EvidenceType,
   LivenessChallenge,
   LivenessResult,
@@ -102,6 +104,20 @@ export interface PipelineRepos {
       },
       exec: Executor
     ): Promise<unknown>;
+    /** Lista los checks de una sesión (reconstrucción de la decisión en /confirm). */
+    listBySession(
+      tenantId: string,
+      sessionId: string,
+      exec?: Executor
+    ): Promise<
+      Array<{
+        type: "quality" | "liveness" | "document" | "match";
+        passed: boolean;
+        detail: QualityResult | LivenessResult | DocumentResult | MatchResult;
+      }>
+    >;
+    /** Borra los checks de una sesión (idempotencia de /preview). */
+    deleteBySession(tenantId: string, sessionId: string, exec?: Executor): Promise<number>;
   };
   identities: {
     create(
@@ -154,6 +170,21 @@ export interface EvidenceStore {
     type: EvidenceType,
     image: Buffer
   ): Promise<{ storagePath: string; sha256: string }>;
+  /** Guarda una evidencia RECORTADA (rostro selfie / foto doc / frente enderezado). */
+  saveCrop(
+    tenantId: string,
+    sessionId: string,
+    type: EvidenceCropType,
+    image: Buffer
+  ): Promise<{ storagePath: string; sha256: string }>;
+}
+
+/**
+ * Recorta/endereza el documento a su BORDE (sidecar OpenCV `/doc-crop`).
+ * FAIL-OPEN: ante cualquier fallo devuelve la imagen original (nunca lanza).
+ */
+export interface DocCropper {
+  crop(image: Buffer): Promise<Buffer>;
 }
 
 /** Dispara el webhook firmado al tenant (reintentos/dead-letter los maneja la impl). */
@@ -175,6 +206,8 @@ export interface PipelineDeps {
   evidenceStore: EvidenceStore;
   webhook: WebhookSender;
   withTransaction: RunInTransaction;
+  /** Recorte/enderezado del documento al borde (sidecar). Opcional para tests. */
+  docCropper?: DocCropper;
 }
 
 export interface PipelineOutput {
@@ -417,6 +450,347 @@ export async function processSession(
       });
     } catch {
       /* si ni el registro del error funciona, igual no devolvemos verified */
+    }
+    return { state: "error", result: null, reasons: ["system_error", message] };
+  }
+}
+
+// ===========================================================================
+// SPLIT compute / finalize — para el flujo /preview → review → /confirm.
+//
+// `computeChecks` corre quality→liveness→document→match, PERSISTE los checks +
+// evidencia + recortes y deja la sesión en 'review'. NO decide, NO crea identidad,
+// NO dispara webhook. Los rechazos duros (liveness/document/match) NO cortocircuitan
+// a 'rejected': se acumulan y se muestran en revisión (wouldPass=false). Sólo el gate
+// recuperable de quality (→ needs_recapture) sigue siendo divergente.
+//
+// `finalizeFromChecks` toma los checks YA computados, aplica decision(), crea la
+// identidad si verified, dispara webhook y marca terminal (verified|rejected).
+// ===========================================================================
+
+/** Resultado de computeChecks: estado alcanzado + los checks para la pantalla de revisión. */
+export interface ComputeOutput {
+  state: SessionState; // "review" | "needs_recapture" | "rejected" (recaptura agotada) | "error"
+  checks: PipelineChecks | null;
+  reasons: string[];
+}
+
+/**
+ * Recorta el ROSTRO de una imagen (engine SCRFD bbox + margen). Devuelve null si no
+ * hay rostro. `margin` es la fracción del lado del bbox a expandir (0.4 = 40%).
+ */
+async function cropFace(
+  engine: Engine,
+  image: Buffer,
+  margin: number
+): Promise<Buffer | null> {
+  const faces = await engine.detect(image);
+  const face = engine.bestFace(faces);
+  if (!face) return null;
+  const [bx1, by1, bx2, by2] = face.bbox.map((v) => Math.round(v));
+  const meta = await sharp(image).metadata();
+  const W = meta.width ?? 0;
+  const H = meta.height ?? 0;
+  if (!W || !H) return null;
+  const mw = Math.round((bx2 - bx1) * margin);
+  const mh = Math.round((by2 - by1) * margin);
+  const left = Math.max(0, bx1 - mw);
+  const top = Math.max(0, by1 - mh);
+  const width = Math.min(W - left, bx2 - bx1 + 2 * mw);
+  const height = Math.min(H - top, by2 - by1 + 2 * mh);
+  if (width <= 0 || height <= 0) return null;
+  return sharp(image).extract({ left, top, width, height }).jpeg({ quality: 90 }).toBuffer();
+}
+
+/**
+ * Guarda los 3 recortes de evidencia para la pantalla de revisión (no-throw):
+ *   - selfie  → rostro de la selfie (SCRFD bbox + 40% margen).
+ *   - doc_face→ foto del titular recortada del frente (la trae el módulo document).
+ *   - doc_front→ frente del documento recortado/enderezado a su borde (sidecar).
+ * Cada recorte es best-effort: un fallo individual NO rompe el preview (la foto
+ * simplemente no se muestra). Los crops viven en keys SEPARADAS de los originales.
+ */
+async function persistCrops(
+  deps: PipelineDeps,
+  tenantId: string,
+  sessionId: string,
+  images: CapturedImages,
+  document: DocumentResult
+): Promise<void> {
+  // 1) Selfie → rostro (40% margen).
+  try {
+    const faceCrop = await cropFace(deps.engine, images.selfie, 0.4);
+    if (faceCrop) await deps.evidenceStore.saveCrop(tenantId, sessionId, "selfie", faceCrop);
+  } catch (e) {
+    console.warn(`[pipeline] crop selfie falló: ${(e as Error).message}`);
+  }
+  // 2) Doc-face (foto del titular del documento) — ya recortada por el módulo document.
+  try {
+    if (document.docFaceCrop) {
+      await deps.evidenceStore.saveCrop(
+        tenantId,
+        sessionId,
+        "doc_face",
+        Buffer.from(document.docFaceCrop.base64Jpeg, "base64")
+      );
+    }
+  } catch (e) {
+    console.warn(`[pipeline] crop doc_face falló: ${(e as Error).message}`);
+  }
+  // 3) Frente del documento → recortado/enderezado al borde (sidecar; fail-open).
+  try {
+    const front = deps.docCropper ? await deps.docCropper.crop(images.docFront) : images.docFront;
+    await deps.evidenceStore.saveCrop(tenantId, sessionId, "doc_front", front);
+  } catch (e) {
+    console.warn(`[pipeline] crop doc_front falló: ${(e as Error).message}`);
+  }
+}
+
+/**
+ * COMPUTA el pipeline sin decidir. Corre quality→liveness→document→match, persiste
+ * todos los checks que corrieron + evidencia + recortes, y deja la sesión en 'review'.
+ * Fail-closed: cualquier excepción → 'error'. El gate de quality recuperable sigue
+ * yendo a needs_recapture (o rejected si se agotaron los reintentos), igual que en
+ * processSession (ese flujo NO produce 'review').
+ */
+export async function computeChecks(
+  session: VerificationSession,
+  policy: TenantPolicy,
+  images: CapturedImages,
+  deps: PipelineDeps
+): Promise<ComputeOutput> {
+  const { tenantId, id: sessionId } = session;
+  try {
+    // === 1) QUALITY (recuperable → needs_recapture) ======================= //
+    const quality = await deps.modules.quality(
+      images.selfie,
+      deps.engine,
+      policy.thresholds?.qualityGlassesPct
+    );
+    if (!quality.passed) {
+      const out = await deps.withTransaction(async (tx) => {
+        await deps.repos.checks.deleteBySession(tenantId, sessionId, tx);
+        await deps.repos.checks.create(
+          { tenantId, sessionId, type: "quality", score: quality.sharpness, passed: false, detail: quality },
+          tx
+        );
+        await persistEvidence(deps, tenantId, sessionId, images, tx);
+        const nextCount = session.recaptureCount + 1;
+        const exceeded = nextCount > policy.maxRecaptureAttempts;
+        if (exceeded) {
+          const result: SessionResult = {
+            decision: "rejected",
+            loa: "L0",
+            reasons: ["quality_failed", "max_recapture_attempts_exceeded", ...quality.reasons],
+          };
+          await deps.repos.sessions.update(
+            tenantId,
+            sessionId,
+            { state: "rejected", recaptureCount: nextCount, result, completedAt: nowIso(), usedAt: new Date() },
+            tx
+          );
+          await deps.repos.auditLog.record(
+            { tenantId, sessionId, actor: "system", event: "pipeline.rejected", detail: { stage: "quality", reasons: quality.reasons } },
+            tx
+          );
+          return { state: "rejected" as SessionState, reasons: result.reasons };
+        }
+        await deps.repos.sessions.update(
+          tenantId,
+          sessionId,
+          { state: "needs_recapture", recaptureCount: nextCount },
+          tx
+        );
+        await deps.repos.auditLog.record(
+          { tenantId, sessionId, actor: "system", event: "pipeline.needs_recapture", detail: { reasons: quality.reasons, attempt: nextCount } },
+          tx
+        );
+        return { state: "needs_recapture" as SessionState, reasons: quality.reasons };
+      });
+      // rejected por exceso de reintentos SÍ dispara webhook (terminal, igual que processSession).
+      if (out.state === "rejected") {
+        await safeWebhook(
+          deps,
+          { ...session, state: "rejected" },
+          "session.rejected",
+          { decision: "rejected", loa: "L0", reasons: out.reasons }
+        );
+      }
+      return { state: out.state, checks: null, reasons: out.reasons };
+    }
+
+    // === 2) LIVENESS (NO cortocircuita — se acumula para la revisión) ====== //
+    let liveness: LivenessResult | undefined;
+    if (needsLiveness(policy)) {
+      const challenge = policy.livenessChallenges[0];
+      liveness = await deps.modules.liveness(images.selfie, deps.engine, {
+        frames: images.frames,
+        challenge,
+        threshold: policy.thresholds?.livenessScore,
+      });
+    }
+
+    // === 3) DOCUMENT (NO cortocircuita) =================================== //
+    const document = await deps.modules.document(images.docFront, images.docBack);
+
+    // === 4) MATCH (NO cortocircuita) — sólo si el LoA lo exige ============= //
+    let matchRes: MatchResult | undefined;
+    if (needsMatch(policy)) {
+      const selfieEmb = await deps.modules.embed(images.selfie);
+      let docFaceEmb = document.docFaceCrop
+        ? await deps.modules.embed(Buffer.from(document.docFaceCrop.base64Jpeg, "base64"))
+        : null;
+      if (!docFaceEmb) docFaceEmb = await deps.modules.embed(images.docFront);
+      if (selfieEmb && docFaceEmb) {
+        matchRes = matchEmbeddings(selfieEmb, docFaceEmb, policy.thresholds?.matchCosine);
+      } else {
+        // Fail-closed: sin embeddings, match no superado (cosine 0). La decisión en
+        // /confirm lo tratará como rechazo duro, pero el operador igual lo ve en revisión.
+        matchRes = { cosine: 0, threshold: policy.thresholds?.matchCosine ?? 0, passed: false };
+      }
+    }
+
+    const checks: PipelineChecks = { quality, document, match: matchRes, liveness };
+
+    // Persistencia: checks (reemplazando previos) + evidencia + recortes → estado 'review'.
+    await deps.withTransaction(async (tx) => {
+      await deps.repos.checks.deleteBySession(tenantId, sessionId, tx);
+      await persistAllChecks(deps, tenantId, sessionId, checks, tx);
+      await persistEvidence(deps, tenantId, sessionId, images, tx);
+      await deps.repos.sessions.update(tenantId, sessionId, { state: "review" }, tx);
+      await deps.repos.auditLog.record(
+        { tenantId, sessionId, actor: "system", event: "pipeline.review", detail: { docPassed: document.passed, matchPassed: matchRes?.passed, livenessPassed: liveness?.passed } },
+        tx
+      );
+    });
+
+    // Recortes de evidencia FUERA del tx (I/O de disco/sidecar; no sostener tx abierto).
+    await persistCrops(deps, tenantId, sessionId, images, document);
+
+    return { state: "review", checks, reasons: [] };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    try {
+      await deps.withTransaction(async (tx) => {
+        await deps.repos.sessions.update(tenantId, sessionId, { state: "error" }, tx);
+        await deps.repos.auditLog.record(
+          { tenantId, sessionId, actor: "system", event: "pipeline.error", detail: { message, stage: "compute" } },
+          tx
+        );
+      });
+    } catch {
+      /* fail-closed: aunque no registremos, jamás verified */
+    }
+    return { state: "error", checks: null, reasons: ["system_error", message] };
+  }
+}
+
+/**
+ * FINALIZA desde 'review' con los checks YA computados. Reconstruye PipelineChecks
+ * desde verification_checks, aplica decision(), crea verified_identity si verified
+ * (re-infiriendo el embedding de la selfie original — el check de match sólo guardó
+ * el coseno), marca terminal (verified|rejected), dispara webhook. Fail-closed.
+ *
+ * `selfie` es el buffer de la selfie original (para el embedding de la identidad).
+ */
+export async function finalizeFromChecks(
+  session: VerificationSession,
+  policy: TenantPolicy,
+  selfie: Buffer,
+  deps: PipelineDeps
+): Promise<PipelineOutput> {
+  const { tenantId, id: sessionId } = session;
+  try {
+    // Reconstruye PipelineChecks desde la persistencia (computados por /preview).
+    const rows = await deps.repos.checks.listBySession(tenantId, sessionId);
+    const byType = new Map(rows.map((r) => [r.type, r]));
+    const quality = byType.get("quality")?.detail as QualityResult | undefined;
+    const document = byType.get("document")?.detail as DocumentResult | undefined;
+    const match = byType.get("match")?.detail as MatchResult | undefined;
+    const liveness = byType.get("liveness")?.detail as LivenessResult | undefined;
+    if (!quality || !document) {
+      // Sin checks base no se puede decidir → fail-closed (rechazo).
+      const result: SessionResult = { decision: "rejected", loa: "L0", reasons: ["missing_checks"] };
+      await deps.withTransaction(async (tx) => {
+        await deps.repos.sessions.update(
+          tenantId,
+          sessionId,
+          { state: "rejected", result, completedAt: nowIso(), usedAt: new Date() },
+          tx
+        );
+        await deps.repos.auditLog.record(
+          { tenantId, sessionId, actor: "system", event: "pipeline.rejected", detail: { stage: "confirm", reasons: result.reasons } },
+          tx
+        );
+      });
+      await safeWebhook(deps, { ...session, state: "rejected" }, "session.rejected", result);
+      return { state: "rejected", result, reasons: result.reasons };
+    }
+
+    const checks: PipelineChecks = { quality, document, match, liveness };
+    const verdict = decideVerdict(checks, policy);
+    const result: SessionResult = {
+      decision: verdict.verdict,
+      loa: verdict.loa,
+      reasons: verdict.reasons,
+      extracted: extractedFrom(document),
+      scores: { quality: quality.sharpness, liveness: liveness?.score, match: match?.cosine },
+    };
+    const finalState: SessionState = verdict.verdict === "verified" ? "verified" : "rejected";
+
+    // Embedding de la identidad: el check de match no lo persiste (sólo el coseno),
+    // así que se re-infiere de la selfie original cuando el veredicto es verified.
+    const identityEmbedding =
+      verdict.verdict === "verified" ? await deps.modules.embed(selfie) : null;
+
+    await deps.withTransaction(async (tx) => {
+      if (verdict.verdict === "verified" && identityEmbedding && result.extracted) {
+        await deps.repos.identities.create(
+          {
+            tenantId,
+            sessionId,
+            ci: result.extracted.ci,
+            nombre: result.extracted.nombre,
+            fechaNac: result.extracted.fechaNac,
+            nacionalidad: result.extracted.nacionalidad,
+            tipoDoc: "ci_py",
+            assuranceLevel: verdict.loa,
+            faceEmbedding: identityEmbedding,
+          },
+          tx
+        );
+      }
+      await deps.repos.sessions.update(
+        tenantId,
+        sessionId,
+        { state: finalState, result, completedAt: nowIso(), usedAt: new Date() },
+        tx
+      );
+      await deps.repos.auditLog.record(
+        { tenantId, sessionId, actor: "system", event: `pipeline.${finalState}`, detail: { loa: verdict.loa, reasons: verdict.reasons, stage: "confirm" } },
+        tx
+      );
+    });
+
+    await safeWebhook(
+      deps,
+      { ...session, state: finalState },
+      verdict.verdict === "verified" ? "session.verified" : "session.rejected",
+      result
+    );
+    return { state: finalState, result, reasons: verdict.reasons };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    try {
+      await deps.withTransaction(async (tx) => {
+        await deps.repos.sessions.update(tenantId, sessionId, { state: "error", usedAt: new Date() }, tx);
+        await deps.repos.auditLog.record(
+          { tenantId, sessionId, actor: "system", event: "pipeline.error", detail: { message, stage: "finalize" } },
+          tx
+        );
+      });
+    } catch {
+      /* fail-closed */
     }
     return { state: "error", result: null, reasons: ["system_error", message] };
   }

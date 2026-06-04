@@ -4,24 +4,33 @@ import { Brand, Card, Stepper } from "./ui"
 import { Consent } from "./screens/Consent"
 import { Selfie } from "./screens/Selfie"
 import { DocCapture } from "./screens/DocCapture"
+import { Review } from "./screens/Review"
 import { Processing } from "./screens/Processing"
 import { Result } from "./screens/Result"
 
 /**
  * Wizard de captura Teko Verify. Máquina de estados que reproduce el flujo del
  * HTML vanilla original:
- *   consent → selfie → doc (frente/dorso) → processing → result
+ *   consent → selfie → doc (frente/dorso) → review → processing → result
  * El token sale de location.pathname (último segmento de /verify/:token).
  */
-type Step = "consent" | "selfie" | "doc" | "processing" | "result"
+type Step =
+  | "consent"
+  | "selfie"
+  | "doc"
+  | "review"
+  | "processing"
+  | "result"
 
-// Índice de paso para el Stepper (doc=frente y dorso comparten el mismo paso).
+// Índice de paso para el Stepper. Labels: Consentimiento·Selfie·Cédula·Revisión·Listo.
+// review = paso 3 (Revisión); processing/result = paso 4 (Listo).
 const STEP_INDEX: Record<Step, number> = {
   consent: 0,
   selfie: 1,
   doc: 2,
-  processing: 3,
-  result: 3,
+  review: 3,
+  processing: 4,
+  result: 4,
 }
 
 function Shell({
@@ -70,7 +79,13 @@ export function App() {
     <Shell step={step}>
       {step === "consent" && <Consent onDone={() => setStep("selfie")} />}
       {step === "selfie" && <Selfie onDone={() => setStep("doc")} />}
-      {step === "doc" && <DocCapture onDone={() => setStep("processing")} />}
+      {step === "doc" && <DocCapture onDone={() => setStep("review")} />}
+      {step === "review" && (
+        <Review
+          onConfirmed={() => setStep("processing")}
+          onRetry={() => setStep("selfie")}
+        />
+      )}
       {step === "processing" && (
         <Processing
           onResult={(s) => {

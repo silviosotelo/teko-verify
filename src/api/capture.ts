@@ -19,8 +19,9 @@ import type { Request, Response } from "express";
 import { repos } from "../db/repos";
 import { evidenceStore } from "../lib/evidenceStore";
 import { decodeBase64Image, assertFrameCount } from "../lib/images";
-import { processSession } from "../pipeline";
+import { processSession, computeChecks, finalizeFromChecks } from "../pipeline";
 import { realPipelineDeps } from "../pipelineDeps";
+import { decision as decideVerdict } from "../modules/decision";
 // Singletons ya inicializados (engine.init() + qualityModule.init() en server.ts).
 // Los reusamos para el pre-check de calidad de la selfie (§6.a).
 import { engine } from "../engine";
@@ -28,13 +29,27 @@ import { qualityModule } from "../modules/quality";
 import { PaddleOcrClient } from "../modules/document";
 import type {
   CaptureStatusResponse,
+  ConfirmResponse,
   ConsentResponse,
   DocCheckResponse,
+  DocumentResult,
+  EvidenceCropType,
+  MatchResult,
+  PreviewExtracted,
+  PreviewResponse,
+  QualityResult,
   SessionState,
   SubmitResponse,
   UploadResponse,
   VerificationSession,
 } from "../types";
+
+/** Base pública para construir las URLs token-auth de las fotos de revisión. */
+const EVIDENCE_BASE_URL = (
+  process.env.PUBLIC_BASE_URL ||
+  process.env.TEKO_PUBLIC_URL ||
+  "http://localhost:4400"
+).replace(/\/+$/, "");
 
 /**
  * Umbral de nitidez (varianza del Laplaciano) para el pre-check de la cédula. La
@@ -53,6 +68,9 @@ export const captureRouter = Router();
  * Estados TERMINALES: la sesión ya tiene un resultado definitivo y NO debe
  * re-ejecutar el pipeline ni aceptar más capturas (§6/§9). `error` se trata como
  * terminal para la captura (anti-replay): reintentar exige una sesión nueva.
+ *
+ * NOTA: 'review' NO es terminal — es intermedio (processing→review→verified|rejected):
+ * loadSession lo deja pasar para que /confirm y /evidence puedan operar sobre él.
  */
 const TERMINAL_STATES = new Set<SessionState>([
   "verified",
@@ -344,6 +362,146 @@ captureRouter.post("/:token/submit", async (req: Request, res: Response) => {
       .catch(() => {});
     res.status(500).json({ error: "submit_failed", state: "error", detail: (e as Error).message });
   }
+});
+
+// POST /verify/:token/preview  → corre el pipeline, persiste checks, estado 'review'
+// NO finaliza: no crea verified_identity, no webhook. Devuelve extracted + match +
+// decisionPreview + photos (URLs token-auth de los recortes). Fail-closed.
+captureRouter.post("/:token/preview", async (req: Request, res: Response) => {
+  const session = await loadSession(req, res);
+  if (!session) return;
+  // /preview transiciona desde {capturing, needs_recapture} (o re-preview desde review).
+  if (
+    session.state !== "capturing" &&
+    session.state !== "needs_recapture" &&
+    session.state !== "review"
+  ) {
+    res.status(409).json({ error: "invalid_state_for_preview", state: session.state });
+    return;
+  }
+  try {
+    const tenant = await repos.tenants.getById(session.tenantId);
+    if (!tenant) {
+      res.status(404).json({ error: "tenant_not_found" });
+      return;
+    }
+    const selfie = await evidenceStore.read(session.tenantId, session.id, "selfie");
+    const docFront = await evidenceStore.read(session.tenantId, session.id, "doc_front");
+    const docBack = await evidenceStore.read(session.tenantId, session.id, "doc_back");
+    if (!selfie || !docFront || !docBack) {
+      res.status(409).json({ error: "incomplete_uploads", state: session.state });
+      return;
+    }
+    const frame = await evidenceStore.read(session.tenantId, session.id, "frames");
+    const frames: Buffer[] | undefined = frame ? [selfie, frame] : undefined;
+
+    await repos.sessions.update(session.tenantId, session.id, { state: "processing" });
+
+    const out = await computeChecks(
+      { ...session, state: "processing" },
+      tenant.policies,
+      { selfie, docFront, docBack, frames },
+      realPipelineDeps
+    );
+
+    // computeChecks puede divergir a needs_recapture / rejected / error (no review).
+    if (out.state !== "review" || !out.checks) {
+      res.status(409).json({ error: "preview_not_review", state: out.state, reasons: out.reasons });
+      return;
+    }
+
+    const document: DocumentResult = out.checks.document;
+    const quality: QualityResult = out.checks.quality;
+    const match: MatchResult | undefined = out.checks.match;
+    const ex = document.extracted;
+    const extracted: PreviewExtracted = {
+      titular: ex.titular,
+      documento: ex.documento,
+      documentoFisico: ex.documentoFisico,
+      registroInterno: ex.registroInterno,
+      autoridadEmisora: ex.autoridadEmisora,
+      mrz: ex.mrz,
+    };
+
+    // decisionPreview: corre la MISMA decision() que usará /confirm sobre los checks
+    // ya computados (sin persistir nada). Garantiza paridad con el veredicto final.
+    const verdict = decideVerdict(out.checks, tenant.policies);
+    const decisionPreview = { loa: verdict.loa, wouldPass: verdict.verdict === "verified" };
+    void quality; // quality ya está en checks; lo dejamos explícito para legibilidad.
+
+    const base = `${EVIDENCE_BASE_URL}/verify/${session.linkToken}/evidence`;
+    const resp: PreviewResponse = {
+      state: "review",
+      extracted,
+      match: { cosine: match?.cosine ?? 0, passed: match?.passed ?? false },
+      decisionPreview,
+      photos: {
+        selfieCrop: `${base}/selfie`,
+        docFaceCrop: `${base}/doc_face`,
+        docFrontCrop: `${base}/doc_front`,
+      },
+    };
+    res.json(resp);
+  } catch (e) {
+    await repos.sessions
+      .update(session.tenantId, session.id, { state: "error", usedAt: new Date() })
+      .catch(() => {});
+    res.status(500).json({ error: "preview_failed", state: "error", detail: (e as Error).message });
+  }
+});
+
+// POST /verify/:token/confirm  → finaliza DESDE 'review' con los checks computados.
+captureRouter.post("/:token/confirm", async (req: Request, res: Response) => {
+  const session = await loadSession(req, res);
+  if (!session) return;
+  // /confirm SOLO desde 'review'.
+  if (session.state !== "review") {
+    res.status(409).json({ error: "invalid_state_for_confirm", state: session.state });
+    return;
+  }
+  try {
+    const tenant = await repos.tenants.getById(session.tenantId);
+    if (!tenant) {
+      res.status(404).json({ error: "tenant_not_found" });
+      return;
+    }
+    // La selfie original se necesita para re-inferir el embedding de la identidad.
+    const selfie = await evidenceStore.read(session.tenantId, session.id, "selfie");
+    if (!selfie) {
+      res.status(409).json({ error: "incomplete_uploads", state: session.state });
+      return;
+    }
+    const out = await finalizeFromChecks(session, tenant.policies, selfie, realPipelineDeps);
+    const resp: ConfirmResponse = { state: out.state, result: out.result, reasons: out.reasons };
+    res.json(resp);
+  } catch (e) {
+    await repos.sessions
+      .update(session.tenantId, session.id, { state: "error", usedAt: new Date() })
+      .catch(() => {});
+    res.status(500).json({ error: "confirm_failed", state: "error", detail: (e as Error).message });
+  }
+});
+
+// GET /verify/:token/evidence/:type  → sirve un recorte de evidencia (token-auth).
+// type ∈ selfie|doc_face|doc_front. El link_token ES la credencial (la sesión se
+// resuelve por él); allowTerminalRead para servir durante review Y tras confirm.
+const EVIDENCE_CROP_TYPES: EvidenceCropType[] = ["selfie", "doc_face", "doc_front"];
+captureRouter.get("/:token/evidence/:type", async (req: Request, res: Response) => {
+  const session = await loadSession(req, res, { allowTerminalRead: true });
+  if (!session) return;
+  const type = req.params.type as EvidenceCropType;
+  if (!EVIDENCE_CROP_TYPES.includes(type)) {
+    res.status(400).json({ error: "invalid_evidence_type" });
+    return;
+  }
+  const buf = await evidenceStore.readCrop(session.tenantId, session.id, type);
+  if (!buf) {
+    res.status(404).json({ error: "evidence_not_found" });
+    return;
+  }
+  res.setHeader("Content-Type", "image/jpeg");
+  res.setHeader("Cache-Control", "private, max-age=60");
+  res.send(buf);
 });
 
 // GET /verify/:token/status  (polling; SSE más abajo)

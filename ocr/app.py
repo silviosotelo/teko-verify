@@ -58,9 +58,122 @@ class OcrIn(BaseModel):
     image: str  # base64 (crudo o data URL)
 
 
+class DocCropIn(BaseModel):
+    image: str  # base64 (crudo o data URL)
+
+
 @app.get("/health")
 def health():
     return {"status": "ok", "ready": _ocr is not None}
+
+
+def _decode_b64_image(raw: str):
+    """base64/data-URL -> ndarray BGR (OpenCV). Lanza HTTPException si es invalida."""
+    if raw.startswith("data:") and "," in raw:
+        raw = raw.split(",", 1)[1]
+    try:
+        blob = base64.b64decode(raw)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=f"invalid base64: {exc}") from exc
+    if not blob:
+        raise HTTPException(status_code=400, detail="empty image")
+    import cv2
+    import numpy as np
+
+    arr = np.frombuffer(blob, dtype=np.uint8)
+    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if img is None:
+        raise HTTPException(status_code=400, detail="invalid image")
+    return img
+
+
+def _order_quad(pts):
+    """Ordena 4 puntos a [top-left, top-right, bottom-right, bottom-left]."""
+    import numpy as np
+
+    pts = pts.reshape(4, 2).astype("float32")
+    s = pts.sum(axis=1)
+    d = np.diff(pts, axis=1).reshape(-1)
+    return np.array(
+        [
+            pts[np.argmin(s)],  # TL: menor x+y
+            pts[np.argmin(d)],  # TR: menor y-x
+            pts[np.argmax(s)],  # BR: mayor x+y
+            pts[np.argmax(d)],  # BL: mayor y-x
+        ],
+        dtype="float32",
+    )
+
+
+def _find_doc_quad(img):
+    """Detecta el mayor cuadrilatero de 4 vertices (borde del carnet). None si no hay."""
+    import cv2
+
+    h, w = img.shape[:2]
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    gray = cv2.GaussianBlur(gray, (5, 5), 0)
+    edges = cv2.Canny(gray, 50, 150)
+    # Dilata para cerrar bordes discontinuos del marco del documento.
+    edges = cv2.dilate(edges, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)), iterations=2)
+    contours, _ = cv2.findContours(edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+    img_area = float(w * h)
+    best = None
+    best_area = 0.0
+    for c in contours:
+        area = cv2.contourArea(c)
+        # El documento debe ocupar una fraccion razonable del frame (>=20%).
+        if area < img_area * 0.20:
+            continue
+        peri = cv2.arcLength(c, True)
+        approx = cv2.approxPolyDP(c, 0.02 * peri, True)
+        if len(approx) == 4 and cv2.isContourConvex(approx) and area > best_area:
+            best = approx
+            best_area = area
+    return best
+
+
+@app.post("/doc-crop")
+def doc_crop(inp: DocCropIn):
+    """
+    Recorta/endereza el documento a su BORDE (warpPerspective sobre el mayor quad de
+    4 vertices). FAIL-OPEN: si no hay quad o cualquier error, devuelve la imagen
+    original (re-codificada a JPEG). Contrato:
+      POST /doc-crop  { "image": "<base64>" }
+        -> { "image": "<base64 JPEG>", "cropped": bool }
+    """
+    img = _decode_b64_image(inp.image or "")
+    import cv2
+    import numpy as np
+
+    cropped = False
+    out_img = img
+    try:
+        quad = _find_doc_quad(img)
+        if quad is not None:
+            src = _order_quad(quad)
+            (tl, tr, br, bl) = src
+            wA = np.linalg.norm(br - bl)
+            wB = np.linalg.norm(tr - tl)
+            hA = np.linalg.norm(tr - br)
+            hB = np.linalg.norm(tl - bl)
+            out_w = int(max(wA, wB))
+            out_h = int(max(hA, hB))
+            if out_w >= 40 and out_h >= 40:
+                dst = np.array(
+                    [[0, 0], [out_w - 1, 0], [out_w - 1, out_h - 1], [0, out_h - 1]],
+                    dtype="float32",
+                )
+                M = cv2.getPerspectiveTransform(src, dst)
+                out_img = cv2.warpPerspective(img, M, (out_w, out_h))
+                cropped = True
+    except Exception:  # noqa: BLE001  — fail-open: cualquier fallo => original
+        out_img = img
+        cropped = False
+
+    ok, enc = cv2.imencode(".jpg", out_img, [int(cv2.IMWRITE_JPEG_QUALITY), 92])
+    if not ok:
+        raise HTTPException(status_code=500, detail="jpeg encode failed")
+    return {"image": base64.b64encode(enc.tobytes()).decode("ascii"), "cropped": cropped}
 
 
 @app.post("/ocr")

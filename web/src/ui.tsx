@@ -59,7 +59,7 @@ export function Notice({ children }: { children: ReactNode }) {
   )
 }
 
-const STEP_LABELS = ["Consentimiento", "Selfie", "Cédula", "Verificación"]
+const STEP_LABELS = ["Consentimiento", "Selfie", "Cédula", "Revisión", "Listo"]
 
 /** Stepper de progreso (consentimiento → selfie → cédula → verificación). */
 export function Stepper({ active }: { active: number }) {
