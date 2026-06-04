@@ -677,8 +677,23 @@ function resolveOldNames(
   lines: AnchorLine[],
   combinedLabel: AnchorLine
 ): { apellidos?: AnchorLine; nombres?: AnchorLine } {
-  const maxDy = 80;
-  const maxRowGap = 50;
+  // BANDA Y ESCALADA POR ALTURA (no absoluta). REGRESIÓN real cazada: el Inspector
+  // (variant "deskew-upscale") y el fallback ampliado de producción re-OCR-ean el
+  // frente a 1600px, donde el gap etiqueta→valor crece con el texto. Con un `maxDy`
+  // FIJO de 80px, en la cédula vieja real upscaleada la 2ª fila (nombres "JULIO
+  // CESAR", dy≈92 desde el rótulo combinado de h≈56) caía FUERA de banda → sólo
+  // sobrevivía 1 candidato → `< 2` → identidad VACÍA. Mismo patrón que ya forzó el
+  // `max(56, h*1.8)` del camino de formato nuevo. Escalamos igual:
+  //   `max(80, label.h*1.8)`. Con h≈56 da ≈101 → admite nombres (dy≈92) y SIGUE
+  //   excluyendo el lugar de nacimiento (dy≈300 ≫ 101): la guarda fail-closed se
+  //   sostiene sólo con maxDy. El piso 80 conserva el comportamiento en `raw`
+  //   (h≈18 → piso 80, dy≈35 ≤ 80).
+  const maxDy = Math.max(80, combinedLabel.h * 1.8);
+  // ADYACENCIA también escalada: en raw las dos filas distan ~18px; upscaleadas
+  // ~48px y el 50 fijo las clareaba por sólo 2px (frágil). `max(50, label.h)` da
+  // ≈56 a escala upscale. Seguro: maxDy ya excluye el lugar, así que aflojar el
+  // rowGap no puede colar el par {nombre, lugar}.
+  const maxRowGap = Math.max(50, combinedLabel.h);
   const candidates = lines
     .filter((l) => l !== combinedLabel)
     .filter((l) => l.score >= 0.5)
@@ -1010,14 +1025,25 @@ function findFusedCiLine(lines: AnchorLine[]): AnchorLine | undefined {
     .sort((a, b) => b.score - a.score)[0];
 }
 
-function oldFormatCiFallback(lines: AnchorLine[]): string {
-  const cand = lines
+/**
+ * Línea-candidata del CI suelto del FORMATO VIEJO (token 6-8 dígitos no-fecha,
+ * abajo-derecha). Devuelve la `AnchorLine` elegida para que el debug pueda
+ * dibujar su ancla; `extractFront`/producción sólo usan sus dígitos vía
+ * `oldFormatCiFallback`. Mismo criterio de selección en ambos (línea única).
+ */
+function oldFormatCiFallbackLine(lines: AnchorLine[]): AnchorLine | undefined {
+  return lines
     .filter((l) => !DATE_RE.test(l.text))
-    .map((l) => ({ d: l.text.replace(/\D/g, ""), cx: l.cx, cy: l.cy }))
-    .filter((o) => o.d.length >= 6 && o.d.length <= 8)
+    .filter((l) => {
+      const d = l.text.replace(/\D/g, "");
+      return d.length >= 6 && d.length <= 8;
+    })
     // Más abajo primero; a igual fila, más a la derecha.
     .sort((a, b) => b.cy - a.cy || b.cx - a.cx)[0];
-  return cand?.d ?? "";
+}
+
+function oldFormatCiFallback(lines: AnchorLine[]): string {
+  return oldFormatCiFallbackLine(lines)?.text.replace(/\D/g, "") ?? "";
 }
 
 // ---------------------------------------------------------------------------
@@ -1251,11 +1277,24 @@ export function extractFrontDebug(frontLines: OcrLine[]): FrontDebug {
       }
     }
   }
-  // Fallback global (sin ancla posicional): token de 6-8 dígitos no-fecha,
-  // abajo-derecha (mismo helper que extractFront).
+  // Fallback (CI suelto del formato viejo, p.ej. "8354119" sin rótulo "Nº"):
+  // token de 6-8 dígitos no-fecha, abajo-derecha. Ahora SÍ recupera la línea
+  // elegida para anclarla en el Inspector (labelBox = su propia caja, no hay
+  // rótulo separado). Mismo valor que producción vía `oldFormatCiFallback`.
   if (!extracted.documento.numeroCedula) {
-    const cand = oldFormatCiFallback(lines);
-    if (cand) extracted.documento.numeroCedula = cand;
+    const candLine = oldFormatCiFallbackLine(lines);
+    const digits = candLine?.text.replace(/\D/g, "") ?? "";
+    if (digits) {
+      extracted.documento.numeroCedula = digits;
+      if (candLine) {
+        anchors["ci"] = {
+          lineIndex: candLine.idx,
+          box: boxOf(frontLines, candLine.idx),
+          labelBox: boxOf(frontLines, candLine.idx),
+          text: candLine.text.trim(),
+        };
+      }
+    }
   }
 
   return { extracted, anchors };

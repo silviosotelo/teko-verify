@@ -38,24 +38,32 @@ function line(text: string, score: number, cx: number, cy: number, w = 120, h = 
 }
 
 /**
- * OCR REAL de la cédula vieja (sidecar PaddleOCR), líneas con su centro (cx,cy)
- * y score tal como se volcaron. Anchos aproximados a partir del rango [x1-x2].
+ * OCR REAL de la cédula vieja (Dd6ZC-sV4AAhdNM.jpg) capturado del SIDECAR sobre
+ * la variante `deskew-upscale` (1600px) — la MISMA que ejecuta el Inspector OCR
+ * y el fallback ampliado de producción. (cx,cy,w,h) son las cajas REALES.
+ *
+ * POR QUÉ UPSCALE Y NO RAW: a escala raw (~610px) el gap rótulo→nombres es ~35px
+ * y un `maxDy` fijo de 80px lo admitía → el fixture viejo (raw) pasaba en VERDE
+ * mientras la cédula REAL en el Inspector (upscale) devolvía nombres VACÍOS. Acá
+ * el gap rótulo→"JULIO CESAR" es ~93px (rótulo h≈56): con el `maxDy=80` fijo caía
+ * FUERA de banda → identidad vacía. Este fixture REPRODUCE esa regresión; el fix
+ * (banda escalada `max(80, h*1.8)`) la corrige. NO tocar estas coords a mano.
  */
 const OLD_FRONT: OcrLine[] = [
-  line("REPUBLICA DEL PARAGUAY", 0.99, 298, 61, 313),
-  line("Cédula de Identidad Civil", 0.97, 303, 83, 229),
-  line("APELLIDOS. NOMBRES", 0.97, 151, 117, 145),
-  line("FRANCO MOREL", 0.98, 145, 134, 136),
-  line("JULIO CESAR", 0.98, 134, 152, 114),
-  line("FECHA DE NACIMIENTO", 1.0, 151, 172, 150),
-  line("SEXO", 0.99, 325, 175, 37),
-  line("19-04-1975", 1.0, 122, 190, 87),
-  line("Masculino", 1.0, 348, 193, 83),
-  line("LUGAR DE NACIMIENTO", 0.98, 152, 213, 149),
-  line("SANTA ROSA MISIONES", 0.99, 175, 231, 195),
-  line("FECHA DE VENCIMENTO", 0.98, 154, 254, 155),
-  line("26-03-2028", 1.0, 120, 272, 88),
-  line("8354119", 1.0, 476, 308, 89),
+  line("REPUBLICA DEL PARAGUAY", 0.999, 784, 159, 821, 78),
+  line("Cédula de Identidad Civil", 0.993, 793, 217, 605, 64),
+  line("APELLIDOS, NOMBRES", 0.983, 396, 304, 381, 56),
+  line("FRANCO MOREL", 0.998, 384, 349, 362, 59),
+  line("JULIO CESAR", 0.996, 354, 397, 302, 55),
+  line("FECHA DE NACIMIENTO", 0.994, 399, 450, 395, 55),
+  line("SEXO", 0.994, 854, 456, 102, 43),
+  line("19-04-1975", 1.0, 320, 495, 232, 52),
+  line("Masculino", 1.0, 913, 504, 219, 52),
+  line("LUGAR DE NACIMIENTO", 0.998, 400, 558, 394, 50),
+  line("SANTA ROSA MISIONES", 0.998, 460, 604, 513, 53),
+  line("FECHA DE VENCIMENTO", 0.976, 406, 666, 409, 50),
+  line("26-03-2028", 0.996, 317, 711, 231, 51),
+  line("8354119", 1.0, 1250, 808, 229, 60),
 ];
 
 describe("document — formato VIEJO (etiqueta combinada APELLIDOS, NOMBRES)", () => {
@@ -90,14 +98,18 @@ describe("document — formato VIEJO (etiqueta combinada APELLIDOS, NOMBRES)", (
     expect(extracted.titular.lugarNacimiento.ciudad).toBe("SANTA ROSA MISIONES");
   });
 
-  it("CI suelto (sin rótulo Nº) por fallback", () => {
+  it("CI suelto (sin rótulo Nº) por fallback, CON ancla en el inspector", () => {
     expect(extracted.documento.numeroCedula).toBe("8354119");
+    const dbg = extractFrontDebug(OLD_FRONT);
+    // El CI suelto del formato viejo ahora se ancla (su propia caja como labelBox).
+    expect(dbg.anchors.ci?.text).toBe("8354119");
+    expect(dbg.anchors.ci?.box).toBeDefined();
   });
 
   it("FAIL-CLOSED: si el OCR pierde la línea de apellido, NO toma el lugar como nombre", () => {
-    // Quitamos "FRANCO MOREL": queda sólo JULIO CESAR (dy≈35) y, más abajo,
-    // SANTA ROSA MISIONES (dy≈114). La guarda de adyacencia/banda debe RECHAZAR
-    // el par {JULIO CESAR, SANTA ROSA MISIONES} → identidad vacía, no errónea.
+    // Quitamos "FRANCO MOREL": queda sólo JULIO CESAR (dy≈93) y, mucho más abajo,
+    // SANTA ROSA MISIONES (dy≈300). Con la banda escalada `max(80, h*1.8)`≈101 el
+    // lugar SIGUE fuera de banda → sólo 1 candidato → identidad vacía, no errónea.
     const dropped = OLD_FRONT.filter((l) => l.text !== "FRANCO MOREL");
     const { extracted: ex } = extractFrontDebug(dropped);
     expect(ex.titular.nombres).not.toContain("SANTA");
