@@ -554,6 +554,93 @@ function looksLikeCity(s: string): boolean {
   return c.length >= 3 && c.length <= 40;
 }
 
+/**
+ * DETECCIÓN DE FORMATO (frente PY). Dos layouts conviven en circulación:
+ *
+ *   - NUEVO: etiquetas "APELLIDOS" y "NOMBRES" en LÍNEAS SEPARADAS (cy lejanos),
+ *     cada una con su valor debajo; CI con rótulo "Nº". Lógica histórica intacta.
+ *   - VIEJO: una sola etiqueta COMBINADA "APELLIDOS, NOMBRES" (PaddleOCR la lee
+ *     como "APELLIDOS. NOMBRES" — coma OCR-eada como punto) con DOS líneas de
+ *     valor debajo en la MISMA columna: 1ª=apellidos, 2ª=nombres. CI suelto.
+ *
+ * Discriminador (data-driven, NO el regex del spec que falla con el punto):
+ * existe UNA línea cuyo canon contiene a la vez "APELLIDOS" y "NOMBRES". En el
+ * formato nuevo esos dos tokens caen en líneas distintas, así que ninguna sola
+ * línea los tiene → modo nuevo. Robusto al ruido OCR (coma/punto/espacios).
+ */
+function findCombinedNameLabel(lines: AnchorLine[]): AnchorLine | undefined {
+  return lines
+    .filter((l) => {
+      const c = canon(l.text);
+      return c.includes("APELLIDOS") && c.includes("NOMBRES");
+    })
+    .sort((a, b) => b.score - a.score)[0];
+}
+
+/**
+ * Resolución de apellidos/nombres del FORMATO VIEJO. Bajo la etiqueta combinada
+ * hay DOS líneas de valor en la misma columna; la 1ª (cy menor) = apellidos, la
+ * 2ª = nombres. Helper COMPARTIDO entre `extractFront` (producción) y
+ * `extractFrontDebug` (inspector) para que ambos anclen idéntico.
+ *
+ * Guardas (validadas contra el OCR real de la cédula vieja):
+ *   - `maxDx` ESTRECHO (140px): la columna de nombres está en cx≈134-145 (label
+ *     cx≈151, dx≤17). Sin esto, "Masculino" (cx≈348, dx≈197) y otros valores de
+ *     columnas vecinas pasan `looksLikeName` y se colarían. La banda angosta los
+ *     descarta por X.
+ *   - banda Y ESTRECHA (`maxDy` 80px): las dos filas de valor caen a ~17px y ~35px
+ *     del rótulo combinado. Una banda más ancha dejaría entrar la fila "LUGAR DE
+ *     NACIMIENTO" de valor (real: "SANTA ROSA MISIONES" a dy≈114, misma columna,
+ *     que pasa `looksLikeName`). FAIL-CLOSED: si el OCR PERDIÓ la línea de apellido,
+ *     NO queremos que el valor del lugar se cuele como 2º candidato y produzca una
+ *     identidad CONFIANZADA-pero-errónea; preferimos campos vacíos → revisión manual.
+ *   - ADYACENCIA: las dos filas de nombre son contiguas (~18px entre sí); el valor
+ *     del lugar está ~79px bajo nombres. Exigir que las dos candidatas estén juntas
+ *     (≤ `maxRowGap` 50px) descarta un par {nombre, lugar} aunque ambos entren en
+ *     la banda con una foto más grande.
+ *   - `looksLikeName` (mismo saneo que el modo nuevo: rechaza watermark, no
+ *     numérico, score mínimo).
+ *   - se exigen DOS líneas distintas Y ADYACENTES; si no, fail-closed (no se inventa).
+ */
+function resolveOldNames(
+  lines: AnchorLine[],
+  combinedLabel: AnchorLine
+): { apellidos?: AnchorLine; nombres?: AnchorLine } {
+  const maxDy = 80;
+  const maxRowGap = 50;
+  const candidates = lines
+    .filter((l) => l !== combinedLabel)
+    .filter((l) => l.score >= 0.5)
+    .filter((l) => l.cy > combinedLabel.cy)
+    .filter((l) => l.cy - combinedLabel.cy <= maxDy)
+    .filter((l) => Math.abs(l.cx - combinedLabel.cx) <= 140)
+    .filter((l) => looksLikeName(l.text))
+    .sort((a, b) => a.cy - b.cy);
+  if (candidates.length < 2) return {};
+  // Las dos primeras filas DEBEN ser contiguas (mismo bloque apellidos/nombres).
+  // Si están separadas, es señal de que falta una línea y la 2ª es de otra fila
+  // (p.ej. lugar de nacimiento) → fail-closed, no inventamos identidad.
+  if (candidates[1].cy - candidates[0].cy > maxRowGap) return {};
+  return { apellidos: candidates[0], nombres: candidates[1] };
+}
+
+/**
+ * Localiza una etiqueta de FECHA tolerante al ruido OCR. El formato viejo lee
+ * "FECHA DE VENCIMENTO" (sin la "I") que NO matchea por substring contra
+ * "FECHA DE VENCIMIENTO". Anclamos por el token distintivo del canon ("VENC" /
+ * "NAC") en una línea que además empieza con "FECHA". TARGETED, no fuzzing
+ * global: en el formato nuevo "FECHA DE VENCIMIENTO" sigue conteniendo "VENC"
+ * → mismo ancla, cero regresión; "VENC" no aparece en "NACIMIENTO".
+ */
+function findDateLabel(lines: AnchorLine[], token: "VENC" | "NAC"): AnchorLine | undefined {
+  return lines
+    .filter((l) => {
+      const c = canon(l.text);
+      return c.includes("FECHA") && c.includes(token);
+    })
+    .sort((a, b) => b.score - a.score)[0];
+}
+
 /** Etiquetas conocidas del frente y dorso (para excluirlas como valores). */
 const KNOWN_LABELS = [
   "APELLIDOS",
@@ -659,6 +746,19 @@ function extractFront(frontLines: OcrLine[], extracted: ExtractedDocument): void
   // Specimen: muestras llevan la palabra "SPECIMEN"/"MUESTRA".
   extracted.documento.specimen = /\bSPECIMEN\b|\bMUESTRA\b/.test(allText);
 
+  // FORMATO VIEJO: etiqueta combinada "APELLIDOS, NOMBRES" con dos líneas de valor
+  // debajo (1ª=apellidos, 2ª=nombres). Si la detectamos, resolvemos por aquí y
+  // SALTAMOS la lógica de etiquetas separadas (que en este layout colapsaría: tanto
+  // findLabel("APELLIDOS") como findLabel("NOMBRES") matchearían la MISMA línea
+  // combinada). El resto de campos (fechas/sexo/lugar/CI) se comparten más abajo.
+  const combinedLabel = findCombinedNameLabel(lines);
+  if (combinedLabel) {
+    const { apellidos: apeLine, nombres: nomLine } = resolveOldNames(lines, combinedLabel);
+    const ape = cleanName(apeLine?.text ?? "");
+    const nom = cleanName(nomLine?.text ?? "");
+    if (ape) extracted.titular.apellidos = ape;
+    if (nom) extracted.titular.nombres = nom;
+  } else {
   // Nombres / Apellidos (valor debajo de la etiqueta). `accept: looksLikeName`
   // salta el ruido del watermark/guilloche ("DEL","PARA","ICA"...) que en capturas
   // movidas/comprimidas cae más cerca en Y que el valor real. Sin este filtro el
@@ -716,18 +816,22 @@ function extractFront(frontLines: OcrLine[], extracted: ExtractedDocument): void
   );
   // Anti-copia: apellidos jamás puede quedar igual a nombres (síntoma del bug).
   if (apellidos && apellidos !== nombres) extracted.titular.apellidos = apellidos;
+  } // fin modo nuevo (etiquetas APELLIDOS/NOMBRES separadas)
 
-  // Fecha de vencimiento. `accept` salta fragmentos de guilloche: sólo acepta el
-  // candidato con forma DD-MM-YYYY.
-  const venc = printedDateToIso(
-    fieldBelow(lines, "FECHA DE VENCIMIENTO", labels, { accept: looksLikeDate })
-  );
+  // Fecha de vencimiento. Etiqueta tolerante (`VENC`): el formato viejo la lee
+  // "FECHA DE VENCIMENTO" (sin "I"). `accept` salta fragmentos de guilloche: sólo
+  // acepta el candidato con forma DD-MM-YYYY.
+  const vencLbl = findDateLabel(lines, "VENC");
+  const venc = vencLbl
+    ? printedDateToIso(valueBelow(lines, vencLbl, { accept: looksLikeDate, exclude: labels }))
+    : "";
   if (venc) extracted.documentoFisico.fechaVencimiento = venc;
 
   // Fecha de nacimiento. Idem: el valor "13-11-1997" está debajo, con ruido en medio.
-  const nac = printedDateToIso(
-    fieldBelow(lines, "FECHA DE NACIMIENTO", labels, { accept: looksLikeDate })
-  );
+  const nacLbl = findDateLabel(lines, "NAC");
+  const nac = nacLbl
+    ? printedDateToIso(valueBelow(lines, nacLbl, { accept: looksLikeDate, exclude: labels }))
+    : "";
   if (nac) extracted.titular.fechaNacimiento = nac;
 
   // Sexo (MASCULINO/FEMENINO). El fragmento de watermark "CAL" queda más cerca en Y
@@ -780,12 +884,26 @@ function extractFront(frontLines: OcrLine[], extracted: ExtractedDocument): void
   // tokens con forma DD-MM-YYYY: "12-07-2033" colapsa a "12072033" (8 dígitos) y
   // robaría el lugar del Nº real.
   if (!extracted.documento.numeroCedula) {
-    const cand = lines
-      .filter((l) => !/\d{2}[\/.\-]\d{2}[\/.\-]\d{4}/.test(l.text))
-      .map((l) => l.text.replace(/\D/g, ""))
-      .find((d) => d.length >= 6 && d.length <= 8);
+    const cand = oldFormatCiFallback(lines);
     if (cand) extracted.documento.numeroCedula = cand;
   }
+}
+
+/**
+ * Fallback de Nº de cédula para el FORMATO VIEJO (sin rótulo "Nº"): el número va
+ * suelto ABAJO-A-LA-DERECHA del frente (real: "8354119", 7 dígitos). Tomamos el
+ * token de 6-8 dígitos que NO sea una fecha, priorizando el MÁS ABAJO y luego el
+ * MÁS A LA DERECHA (spec §formato-viejo). Excluimos DD-MM-YYYY: "26-03-2028"
+ * colapsa a 8 dígitos y robaría el lugar. Devuelve "" si no hay candidato.
+ */
+function oldFormatCiFallback(lines: AnchorLine[]): string {
+  const cand = lines
+    .filter((l) => !/\d{2}[\/.\-]\d{2}[\/.\-]\d{4}/.test(l.text))
+    .map((l) => ({ d: l.text.replace(/\D/g, ""), cx: l.cx, cy: l.cy }))
+    .filter((o) => o.d.length >= 6 && o.d.length <= 8)
+    // Más abajo primero; a igual fila, más a la derecha.
+    .sort((a, b) => b.cy - a.cy || b.cx - a.cx)[0];
+  return cand?.d ?? "";
 }
 
 // ---------------------------------------------------------------------------
@@ -864,6 +982,39 @@ export function extractFrontDebug(frontLines: OcrLine[]): FrontDebug {
   }
   extracted.documento.specimen = /\bSPECIMEN\b|\bMUESTRA\b/.test(allText);
 
+  // Registra un ancla con etiqueta EXPLÍCITA (no por nombre canónico): el modo
+  // viejo usa etiquetas combinadas/tolerantes cuya caja no recupera findLabel.
+  const recordWith = (
+    field: string,
+    valueLine: AnchorLine | undefined,
+    label: AnchorLine | undefined
+  ): void => {
+    if (!valueLine) return;
+    anchors[field] = {
+      lineIndex: valueLine.idx,
+      box: boxOf(frontLines, valueLine.idx),
+      labelBox: label ? boxOf(frontLines, label.idx) : null,
+      text: valueLine.text.trim(),
+    };
+  };
+
+  // FORMATO VIEJO: etiqueta combinada "APELLIDOS, NOMBRES" + dos valores debajo
+  // (1ª=apellidos, 2ª=nombres). Mismo helper compartido que extractFront → mismas
+  // anclas. Si no hay etiqueta combinada, cae al modo nuevo (etiquetas separadas).
+  const combinedLabel = findCombinedNameLabel(lines);
+  if (combinedLabel) {
+    const { apellidos: apeLine, nombres: nomLine } = resolveOldNames(lines, combinedLabel);
+    const ape = cleanName(apeLine?.text ?? "");
+    const nom = cleanName(nomLine?.text ?? "");
+    if (ape) {
+      extracted.titular.apellidos = ape;
+      recordWith("apellidos", apeLine, combinedLabel);
+    }
+    if (nom) {
+      extracted.titular.nombres = nom;
+      recordWith("nombres", nomLine, combinedLabel);
+    }
+  } else {
   // NOMBRES (resuelto primero, igual que en extractFront).
   const nombresLine = findValueLineBelow(lines, "NOMBRES", labels, {
     accept: looksLikeName,
@@ -889,25 +1040,28 @@ export function extractFrontDebug(frontLines: OcrLine[]): FrontDebug {
     extracted.titular.apellidos = apellidos;
     record("apellidos", apellidosLine, "APELLIDOS");
   }
+  } // fin modo nuevo
 
-  // Fecha de vencimiento.
-  const vencLine = findValueLineBelow(lines, "FECHA DE VENCIMIENTO", labels, {
-    accept: looksLikeDate,
-  });
+  // Fecha de vencimiento (etiqueta tolerante `VENC`: soporta "VENCIMENTO" viejo).
+  const vencLbl = findDateLabel(lines, "VENC");
+  const vencLine = vencLbl
+    ? lineBelow(lines, vencLbl, { accept: looksLikeDate, exclude: labels })
+    : undefined;
   const venc = printedDateToIso(vencLine?.text ?? "");
   if (venc) {
     extracted.documentoFisico.fechaVencimiento = venc;
-    record("fechaVencimiento", vencLine, "FECHA DE VENCIMIENTO");
+    recordWith("fechaVencimiento", vencLine, vencLbl);
   }
 
-  // Fecha de nacimiento.
-  const nacLine = findValueLineBelow(lines, "FECHA DE NACIMIENTO", labels, {
-    accept: looksLikeDate,
-  });
+  // Fecha de nacimiento (etiqueta tolerante `NAC`).
+  const nacLbl = findDateLabel(lines, "NAC");
+  const nacLine = nacLbl
+    ? lineBelow(lines, nacLbl, { accept: looksLikeDate, exclude: labels })
+    : undefined;
   const nac = printedDateToIso(nacLine?.text ?? "");
   if (nac) {
     extracted.titular.fechaNacimiento = nac;
-    record("fechaNacimiento", nacLine, "FECHA DE NACIMIENTO");
+    recordWith("fechaNacimiento", nacLine, nacLbl);
   }
 
   // Sexo.
@@ -967,12 +1121,10 @@ export function extractFrontDebug(frontLines: OcrLine[]): FrontDebug {
       }
     }
   }
-  // Fallback global (sin ancla posicional): una línea de 6-8 dígitos no-fecha.
+  // Fallback global (sin ancla posicional): token de 6-8 dígitos no-fecha,
+  // abajo-derecha (mismo helper que extractFront).
   if (!extracted.documento.numeroCedula) {
-    const cand = lines
-      .filter((l) => !/\d{2}[\/.\-]\d{2}[\/.\-]\d{4}/.test(l.text))
-      .map((l) => l.text.replace(/\D/g, ""))
-      .find((d) => d.length >= 6 && d.length <= 8);
+    const cand = oldFormatCiFallback(lines);
     if (cand) extracted.documento.numeroCedula = cand;
   }
 
