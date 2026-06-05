@@ -59,35 +59,139 @@ export function Notice({ children }: { children: ReactNode }) {
   )
 }
 
-const STEP_LABELS = ["Consentimiento", "Selfie", "Cédula", "Revisión", "Listo"]
+// Fases macro del flujo, estilo Didit (barra sutil, SIN micro-labels por paso).
+// 0 Inicio · 1 Documento · 2 Selfie · 3 Verificación.
+export const PHASE_COUNT = 4
 
-/** Stepper de progreso (consentimiento → selfie → cédula → verificación). */
+/**
+ * Barra de progreso sutil (estilo Didit): N segmentos finos, los <= activos en
+ * verde. Sin texto por paso — sólo una pista visual de avance arriba.
+ */
 export function Stepper({ active }: { active: number }) {
   return (
-    <div className="mb-5 w-full max-w-md">
+    <div className="mb-4 w-full max-w-md">
       <div className="flex gap-1.5">
-        {STEP_LABELS.map((_, i) => (
+        {Array.from({ length: PHASE_COUNT }).map((_, i) => (
           <div
             key={i}
-            className={`h-1.5 flex-1 rounded-full transition-colors ${
+            className={`h-1 flex-1 rounded-full transition-colors duration-300 ${
               i <= active ? "bg-primary" : "bg-gray-200"
             }`}
           />
         ))}
       </div>
-      <div className="mt-2 flex justify-between px-0.5">
-        {STEP_LABELS.map((l, i) => (
-          <span
-            key={l}
-            className={`text-[11px] font-medium ${
-              i <= active ? "text-primary-deep" : "text-gray-400"
-            }`}
-          >
-            {l}
-          </span>
-        ))}
-      </div>
     </div>
+  )
+}
+
+/**
+ * Botón "atrás" sutil (chevron + "Volver"), alineado a la izquierda. Estilo
+ * Didit: discreto, arriba del contenido. Oculto si no hay onBack.
+ */
+export function BackBar({ onBack }: { onBack?: () => void }) {
+  if (!onBack) return null
+  return (
+    <button
+      type="button"
+      onClick={onBack}
+      className="-ml-1 mb-1 flex items-center gap-1 self-start rounded-lg px-1 py-1 text-sm font-medium text-gray-400 transition hover:text-gray-600 active:scale-95"
+    >
+      <svg viewBox="0 0 24 24" className="size-5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+        <path d="M15 18l-6-6 6-6" />
+      </svg>
+      Volver
+    </button>
+  )
+}
+
+/**
+ * Ítem de checklist Didit: ícono en círculo suave + texto (título + opcional
+ * subtítulo). Usado en intro y en las pantallas de "preparar".
+ */
+export function ChecklistItem({
+  icon,
+  title,
+  desc,
+}: {
+  icon: ReactNode
+  title: string
+  desc?: string
+}) {
+  return (
+    <li className="flex items-start gap-3.5">
+      <span className="flex size-11 shrink-0 items-center justify-center rounded-2xl bg-primary-subtle text-primary">
+        {icon}
+      </span>
+      <div className="pt-0.5">
+        <p className="text-sm font-semibold text-gray-900">{title}</p>
+        {desc && <p className="mt-0.5 text-[13px] leading-snug text-gray-500">{desc}</p>}
+      </div>
+    </li>
+  )
+}
+
+/**
+ * Fila de opción seleccionable (elegir tipo de documento / país). Radio a la
+ * derecha. Soporta estado deshabilitado ("próximamente").
+ */
+export function OptionRow({
+  icon,
+  label,
+  hint,
+  selected,
+  disabled,
+  badge,
+  onClick,
+}: {
+  icon?: ReactNode
+  label: string
+  hint?: string
+  selected?: boolean
+  disabled?: boolean
+  badge?: string
+  onClick?: () => void
+}) {
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={onClick}
+      className={`flex w-full items-center gap-3 rounded-2xl border px-4 py-3.5 text-left transition ${
+        disabled
+          ? "cursor-not-allowed border-gray-100 bg-gray-50/60 opacity-70"
+          : selected
+            ? "border-primary bg-primary-subtle/50 ring-1 ring-primary"
+            : "border-gray-200 bg-white hover:border-gray-300 active:scale-[0.99]"
+      }`}
+    >
+      {icon && (
+        <span className={`flex size-9 shrink-0 items-center justify-center rounded-xl ${selected && !disabled ? "bg-primary text-white" : "bg-gray-100 text-gray-500"}`}>
+          {icon}
+        </span>
+      )}
+      <span className="min-w-0 flex-1">
+        <span className="block truncate text-sm font-semibold text-gray-900">{label}</span>
+        {hint && <span className="block truncate text-xs text-gray-400">{hint}</span>}
+      </span>
+      {badge && (
+        <span className="shrink-0 rounded-full bg-gray-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-gray-400">
+          {badge}
+        </span>
+      )}
+      {!disabled && !badge && (
+        <span
+          className={`flex size-5 shrink-0 items-center justify-center rounded-full border-2 ${
+            selected ? "border-primary bg-primary" : "border-gray-300"
+          }`}
+        >
+          {selected && (
+            <svg viewBox="0 0 24 24" className="size-3 text-white" fill="none" stroke="currentColor" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+              <path d="M5 13l4 4L19 7" />
+            </svg>
+          )}
+        </span>
+      )}
+    </button>
   )
 }
 

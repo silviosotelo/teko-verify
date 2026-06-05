@@ -2,61 +2,75 @@ import { useEffect, useState } from "react"
 import { TOKEN, getStatus, ApiError, type StatusResult } from "./api"
 import { errorMessage } from "./messages"
 import { Brand, Card, Stepper } from "./ui"
-import { Consent } from "./screens/Consent"
-import { Selfie } from "./screens/Selfie"
+import { Spinner, CameraHero, IconSun, IconFace, IconNoGlasses } from "./Icons"
+import { Intro } from "./screens/Intro"
+import { ChooseDocument } from "./screens/ChooseDocument"
 import { DocCapture } from "./screens/DocCapture"
-import { Review } from "./screens/Review"
+import { Prepare } from "./screens/Prepare"
+import { Selfie } from "./screens/Selfie"
 import { Processing } from "./screens/Processing"
 import { Result } from "./screens/Result"
 
 /**
- * Wizard de captura Teko Verify. Máquina de estados que reproduce el flujo del
- * HTML vanilla original:
- *   consent → selfie → doc (frente/dorso) → review → processing → result
+ * Wizard de captura Teko Verify — flujo estilo Didit (marca Teko), DOCUMENTO
+ * PRIMERO, luego selfie:
+ *
+ *   intro → choose-doc → [DocCapture: prep·frente·revisar·dorso·revisar·subido]
+ *         → prep-selfie → selfie → processing → result
+ *
+ * DocCapture es un sub-flujo (orquesta sus propias pantallas de preparación,
+ * captura, revisión por lado y "documento subido"). Processing orquesta
+ * preview→confirm (sin pantalla de datos, como Didit).
+ *
  * El token sale de location.pathname (último segmento de /verify/:token).
  */
 type Step =
   | "loading"
-  | "consent"
-  | "selfie"
+  | "intro"
+  | "choose-doc"
   | "doc"
-  | "review"
+  | "prep-selfie"
+  | "selfie"
   | "processing"
   | "result"
   | "error"
 
-// Índice de paso para el Stepper. Labels: Consentimiento·Selfie·Cédula·Revisión·Listo.
-// review = paso 3 (Revisión); processing/result = paso 4 (Listo).
-const STEP_INDEX: Record<Step, number> = {
+// Fase macro (0..3) para la barra de progreso sutil (Stepper).
+// 0 Inicio · 1 Documento · 2 Selfie · 3 Verificación.
+const STEP_PHASE: Record<Step, number> = {
   loading: 0,
-  consent: 0,
-  selfie: 1,
-  doc: 2,
-  review: 3,
-  processing: 4,
-  result: 4,
-  error: 4,
+  intro: 0,
+  "choose-doc": 1,
+  doc: 1,
+  "prep-selfie": 2,
+  selfie: 2,
+  processing: 3,
+  result: 3,
+  error: 3,
 }
 
 /**
- * Mapea el estado del backend (GET /status) a la pantalla del wizard (#3).
- * - created → consentimiento AÚN no registrado (la transición created→capturing
- *   la hace el consent, §4/Ley 7593). NO saltearlo: debe ver la pantalla de
- *   consentimiento (de lo contrario bypassearíamos el registro de consentimiento).
- * - capturing → reanuda la captura desde la selfie (el front no persiste en qué
- *   sub-paso quedó; la selfie es el punto de re-entrada seguro).
- * - review → pantalla de revisión (re-corre /preview, idempotente).
- * - processing → spinner de verificación (polling).
- * - verified/rejected/needs_recapture/error/expired → resultado (terminal/tip).
+ * Mapea el estado del backend (GET /status) a la pantalla del wizard al
+ * rehidratar (#3). El backend sólo tiene ~4 estados; no sabe en qué sub-paso de
+ * captura quedó el front, así que reentramos al INICIO de cada fase (todas las
+ * subidas son idempotentes — /selfie y /document sobrescriben):
+ *
+ *  - created → intro. El consentimiento AÚN no se registró: la transición
+ *    created→capturing la dispara "Continuar" en intro (Ley 7593). NO saltearlo.
+ *  - capturing → choose-doc (inicio de la fase de captura). Reentrar acá es
+ *    seguro aunque ya hubiera un lado subido: el flujo vuelve a subir todo.
+ *  - review → processing (re-corre /preview, idempotente, y confirma).
+ *  - processing → processing (polling).
+ *  - verified/rejected/needs_recapture/error/expired → resultado (terminal/tip).
  */
 function stepForState(state: string): Step {
   switch (state) {
     case "created":
-      return "consent"
+      return "intro"
     case "capturing":
-      return "selfie"
+      return "choose-doc"
     case "review":
-      return "review"
+      return "processing"
     case "processing":
       return "processing"
     case "verified":
@@ -66,7 +80,7 @@ function stepForState(state: string): Step {
     case "expired":
       return "result"
     default:
-      return "consent"
+      return "intro"
   }
 }
 
@@ -81,7 +95,7 @@ function Shell({
     <div className="teko-bg flex min-h-full flex-col items-center px-4 py-6">
       <div className="flex w-full max-w-md flex-col items-center">
         <Brand />
-        <Stepper active={STEP_INDEX[step]} />
+        <Stepper active={STEP_PHASE[step]} />
         {children}
         <footer className="mt-5 max-w-md px-4 text-center text-[11px] leading-relaxed text-gray-400">
           Tus datos se tratan solo para verificar tu identidad · Ley N°
@@ -117,7 +131,7 @@ function LinkError({ title, desc }: { title: string; desc: string }) {
 export function App() {
   // Arrancamos en 'loading': consultamos /status ANTES de pintar el wizard para
   // rehidratar al estado correcto (#3) y mostrar error directo si el token es
-  // inválido/expirado (#6), sin pasar por consentimiento.
+  // inválido/expirado (#6), sin pasar por el flujo.
   const [step, setStep] = useState<Step>("loading")
   const [status, setStatus] = useState<StatusResult | null>(null)
   const [linkError, setLinkError] = useState<string | null>(null)
@@ -141,13 +155,13 @@ export function App() {
       } catch (e) {
         if (!alive) return
         // Token inválido (404) o expirado/consumido (410) → pantalla de error
-        // directa, NO consentimiento (#6). Otros errores: dejamos arrancar en
-        // consentimiento (fail-open hacia el flujo normal; el backend re-valida).
+        // directa, NO el flujo (#6). Otros errores: arrancamos en intro
+        // (fail-open hacia el flujo normal; el backend re-valida).
         if (e instanceof ApiError && (e.status === 404 || e.status === 410)) {
           setLinkError(errorMessage(e))
           setStep("error")
         } else {
-          setStep("consent")
+          setStep("intro")
         }
       }
     })()
@@ -172,10 +186,7 @@ export function App() {
           <Brand />
           <Card>
             <div className="flex flex-col items-center gap-5 py-10 text-center">
-              <div
-                className="size-12 rounded-full border-4 border-gray-200 border-t-primary"
-                style={{ animation: "teko-spin 1s linear infinite" }}
-              />
+              <Spinner />
               <p className="text-sm text-gray-500">Cargando tu verificación…</p>
             </div>
           </Card>
@@ -186,22 +197,35 @@ export function App() {
 
   return (
     <Shell step={step}>
-      {step === "consent" && <Consent onDone={() => setStep("selfie")} />}
-      {step === "selfie" && <Selfie onDone={() => setStep("doc")} />}
-      {step === "doc" && <DocCapture onDone={() => setStep("review")} />}
-      {step === "review" && (
-        <Review
-          onConfirmed={(s) => {
-            // #8: si /confirm ya devolvió un estado terminal, vamos directo al
-            // resultado sin esperar el primer poll de Processing.
-            if (s) {
-              setStatus(s)
-              setStep("result")
-            } else {
-              setStep("processing")
-            }
-          }}
-          onRetry={() => setStep("selfie")}
+      {step === "intro" && <Intro onDone={() => setStep("choose-doc")} />}
+      {step === "choose-doc" && (
+        <ChooseDocument onDone={() => setStep("doc")} />
+      )}
+      {step === "doc" && (
+        <DocCapture
+          onDone={() => setStep("prep-selfie")}
+          onBack={() => setStep("choose-doc")}
+        />
+      )}
+      {step === "prep-selfie" && (
+        <Prepare
+          hero={<CameraHero className="h-28 w-32" />}
+          title="Preparate para la cámara"
+          subtitle="Última parte: una selfie para confirmar que sos vos."
+          tips={[
+            { icon: <IconSun className="size-6" />, title: "Buena luz", desc: "Ubicate frente a una fuente de luz, no a contraluz." },
+            { icon: <IconFace className="size-6" />, title: "Despejá tu cara", desc: "Sin gorro ni nada que tape tu rostro." },
+            { icon: <IconNoGlasses className="size-6" />, title: "Sin anteojos ni reflejos", desc: "Quitate los anteojos para que se vean tus ojos." },
+          ]}
+          cta="Estoy listo"
+          onDone={() => setStep("selfie")}
+          onBack={() => setStep("doc")}
+        />
+      )}
+      {step === "selfie" && (
+        <Selfie
+          onDone={() => setStep("processing")}
+          onBack={() => setStep("prep-selfie")}
         />
       )}
       {step === "processing" && (
@@ -213,7 +237,7 @@ export function App() {
         />
       )}
       {step === "result" && status && (
-        <Result status={status} onRetry={() => setStep("selfie")} />
+        <Result status={status} onRetry={() => setStep("choose-doc")} />
       )}
     </Shell>
   )

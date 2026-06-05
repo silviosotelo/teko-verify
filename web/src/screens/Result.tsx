@@ -20,8 +20,8 @@ interface Meta {
 const MAP: Record<string, Meta> = {
   verified: {
     tone: "ok",
-    title: "¡Identidad verificada!",
-    desc: "Listo, confirmamos que sos vos. Gracias.",
+    title: "¡Te verificaste!",
+    desc: "Eso es todo, no hace falta nada más. Gracias.",
   },
   rejected: {
     tone: "bad",
@@ -77,8 +77,8 @@ export function Result({
 
   const badge =
     m.tone === "ok" ? (
-      <div className="flex size-20 items-center justify-center rounded-full bg-success-subtle text-primary">
-        <IconCheck className="size-10" />
+      <div className="flex size-24 items-center justify-center rounded-full bg-success-subtle text-primary ring-8 ring-success-subtle/40">
+        <IconCheck className="size-12" />
       </div>
     ) : m.tone === "bad" ? (
       <div className="flex size-20 items-center justify-center rounded-full bg-error-subtle text-error">

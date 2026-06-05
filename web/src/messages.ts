@@ -11,8 +11,8 @@ export const QUALITY_MSG: Record<string, string> = {
   over_exposed: "Hay demasiada luz o reflejo. Probá en otro lugar.",
   low_light: "Necesitamos un poco más de luz.",
   off_pose: "Mirá de frente a la cámara.",
-  no_face: "No detectamos bien tu rostro. Centralo en el óvalo.",
-  align_failed: "No detectamos bien tu rostro. Centralo en el óvalo.",
+  no_face: "No detectamos bien tu rostro. Centralo en el círculo.",
+  align_failed: "No detectamos bien tu rostro. Centralo en el círculo.",
 }
 
 // Reasons que el usuario NO puede corregir → no tiene sentido bloquearlo.
@@ -49,11 +49,11 @@ import type { FrameVerdict } from "./useFaceDetector"
 export const FACE_LIVE_MSG: Record<FrameVerdict, string> = {
   loading: "Preparando la cámara…",
   "no-camera": "Iniciando cámara…",
-  "no-face": "Ubicá tu rostro en el óvalo",
+  "no-face": "Ubicá tu rostro en el círculo",
   multiple: "Que aparezca un solo rostro",
-  "too-far": "Acercate un poco",
+  "too-far": "Acercate a la cámara",
   "too-close": "Alejate un poco",
-  "off-center": "Centrate en el óvalo",
+  "off-center": "Centrate en el círculo",
   dark: "Necesitamos más luz",
   bright: "Hay demasiada luz",
   "off-pose": "Mirá de frente",

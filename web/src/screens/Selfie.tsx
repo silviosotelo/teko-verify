@@ -3,7 +3,7 @@ import { apiPost, type QualityResult } from "../api"
 import { evalQuality, FACE_LIVE_MSG, errorMessage } from "../messages"
 import { useCamera } from "../useCamera"
 import { useFaceDetector } from "../useFaceDetector"
-import { Button, Card, Notice } from "../ui"
+import { Button, Card, Notice, BackBar } from "../ui"
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
@@ -31,7 +31,13 @@ const REACQUIRE_ABSENT_FRAMES = 4
  *
  * Pipeline (contrato intacto): POST /selfie {image, frames}.
  */
-export function Selfie({ onDone }: { onDone: () => void }) {
+export function Selfie({
+  onDone,
+  onBack,
+}: {
+  onDone: () => void
+  onBack?: () => void
+}) {
   const cam = useCamera("user")
   // La detección corre solo cuando la cámara está lista y no estamos procesando.
   const [busy, setBusy] = useState(false)
@@ -212,17 +218,21 @@ export function Selfie({ onDone }: { onDone: () => void }) {
     ? "No pudimos usar la cámara"
     : detect.status === "loading"
       ? "Preparando detección…"
-      : (FACE_LIVE_MSG[detect.verdict] ?? "Ubicá tu rostro en el óvalo")
+      : (FACE_LIVE_MSG[detect.verdict] ?? "Ubicá tu rostro en el círculo")
 
-  // Color del óvalo: verde cuando está bien, gris cuando no.
-  const ovalColor = isGood ? "border-primary" : "border-white/70"
-  const ovalGlow = isGood ? "shadow-[0_0_0_4px_rgba(22,163,74,0.25)]" : ""
+  // Color del CÍRCULO (Didit): azul mientras buscás encuadre, verde cuando está
+  // bien. El "good" cierra con verde + halo; el resto, azul tenue sobre la cámara.
+  const ringColor = isGood ? "border-primary" : "border-info"
+  const ringGlow = isGood
+    ? "shadow-[0_0_0_5px_rgba(22,163,74,0.30)]"
+    : "shadow-[0_0_0_4px_rgba(14,165,233,0.22)]"
 
   return (
     <Card>
+      <BackBar onBack={onBack} />
       <h1 className="text-xl font-bold text-gray-900">Sacate una selfie</h1>
       <p className="mt-1 text-sm leading-relaxed text-gray-500">
-        Ubicá tu rostro dentro del óvalo, con buena luz y de frente. Cuando
+        Ubicá tu rostro dentro del círculo, con buena luz y de frente. Cuando
         estés bien encuadrado, la foto se saca sola.
       </p>
 
@@ -244,12 +254,13 @@ export function Selfie({ onDone }: { onDone: () => void }) {
           style={{ transform: "scaleX(-1)" }}
         />
 
-        {/* óvalo guía: gris → verde según el encuadre en vivo */}
+        {/* CÍRCULO guía (Didit): azul → verde según el encuadre en vivo. Es un
+            círculo real (aspect-square), no un óvalo. */}
         <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
           <div
-            className={`h-[78%] w-[62%] rounded-[50%] border-[3px] ${
+            className={`aspect-square w-[78%] rounded-full border-[3px] ${
               isGood ? "border-solid" : "border-dashed"
-            } ${ovalColor} ${ovalGlow} transition-all duration-300`}
+            } ${ringColor} ${ringGlow} transition-all duration-300`}
           />
         </div>
 
@@ -279,7 +290,7 @@ export function Selfie({ onDone }: { onDone: () => void }) {
                   ? "bg-error/90 text-white"
                   : isGood
                     ? "bg-primary/90 text-white"
-                    : "bg-black/45 text-white"
+                    : "bg-info/80 text-white"
               }`}
             >
               <span

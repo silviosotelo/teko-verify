@@ -4,6 +4,10 @@ import { docMsg, DOC_LIVE_MSG, errorMessage } from "../messages"
 import { useCamera } from "../useCamera"
 import { useDocDetector, type Quad } from "../useDocDetector"
 import { Button, Card, Notice } from "../ui"
+import { DocReview } from "./DocReview"
+import { Prepare } from "./Prepare"
+import { DocSubmitted } from "./DocSubmitted"
+import { DocHero, IconFrame, IconSun, IconNoGlare } from "../Icons"
 
 // El documento debe quedar VÁLIDO y estable ~1.5s antes de la cuenta regresiva.
 const STABLE_MS = 1500
@@ -17,70 +21,202 @@ const COOLDOWN_MS = 1200
 const REACQUIRE_ABSENT_FRAMES = 4
 
 /**
- * Cédula (frente/dorso) con AUTO-CAPTURA por DETECCIÓN GEOMÉTRICA REAL:
- *  - useDocDetector (OpenCV.js, self-hosted, lazy) detecta el CUADRILÁTERO del
- *    documento en vivo y valida fill + esquinas + proporción ID-1 + nitidez.
- *  - Dibujamos el contorno detectado EN VIVO sobre la cámara (overlay): verde
- *    cuando es válido, ámbar cuando es parcial → el usuario VE que se detectó.
- *  - Coaching accionable: "poné la cédula", "acercá/alineá", "enderezá",
- *    "mantené quieto", "perfecto ✓ 3·2·1".
- *  - Cuando el quad es válido y estable ~1.5s → cuenta 3·2·1 → captura.
- *  - Botón manual SIEMPRE disponible como recovery (obligatorio si OpenCV no
- *    cargó → modo manual, sin colgarse en "preparando detector…").
+ * Captura de cédula con REVISIÓN/RETAKE POR LADO (estilo Didit) — orquestador:
  *
- * Un teclado/pared NO forma un quad con proporción de tarjeta que llene la
- * guía → NO dispara. El backend valida el borde real; acá pre-chequeamos
- * (POST /doc-check) y subimos ambos lados (POST /document). La trasera NO se espeja.
+ *   prep-front → capture-front → review-front → prep-back → capture-back →
+ *   review-back → submitted (POST /document {front,back}) → onDone()
+ *
+ * La cámara real por lado (DocSideCamera) conserva INTACTA la lógica anti-loop
+ * del detector geométrico (OpenCV.js) del commit 8b27e42: cooldown, re-adquisición
+ * por ausencia real, refs espejo, overlay del contorno en vivo y auto-captura
+ * 3·2·1. La diferencia: en vez de auto-avanzar/subir, devuelve el dataURL al
+ * orquestador, que muestra la revisión y permite retomar el lado.
+ *
+ * Backend SIN cambios: las dos imágenes viajan juntas en /document al final;
+ * /doc-check sigue siendo informativo por lado.
  */
-export function DocCapture({ onDone }: { onDone: () => void }) {
+type Phase =
+  | "prep-front"
+  | "capture-front"
+  | "review-front"
+  | "prep-back"
+  | "capture-back"
+  | "review-back"
+  | "submitted"
+
+export function DocCapture({
+  onDone,
+  onBack,
+}: {
+  onDone: () => void
+  onBack?: () => void
+}) {
+  const [phase, setPhase] = useState<Phase>("prep-front")
+  const [front, setFront] = useState<string | null>(null)
+  const [back, setBack] = useState<string | null>(null)
+  const [uploadErr, setUploadErr] = useState<string | null>(null)
+  const [uploading, setUploading] = useState(false)
+
+  // Sube ambos lados al confirmar el dorso. Fail-closed: si falla, dejamos
+  // reintentar el dorso (no perdemos el frente).
+  const submitBoth = useCallback(
+    async (frontImg: string, backImg: string) => {
+      setUploading(true)
+      setUploadErr(null)
+      try {
+        await apiPost("/document", { front: frontImg, back: backImg })
+        setUploading(false)
+        setPhase("submitted")
+      } catch (e) {
+        setUploading(false)
+        setUploadErr(errorMessage(e))
+        setPhase("review-back")
+      }
+    },
+    [],
+  )
+
+  switch (phase) {
+    case "prep-front":
+      return (
+        <Prepare
+          hero={<DocHero className="h-24 w-32" />}
+          title="Preparemos tu documento"
+          subtitle="Vamos a sacar una foto del frente de tu cédula."
+          tips={[
+            { icon: <IconFrame className="size-6" />, title: "Frente del documento", desc: "Empezamos por el lado de la foto y los datos." },
+            { icon: <IconSun className="size-6" />, title: "Buena luz", desc: "Buscá un lugar bien iluminado, sin sombras." },
+            { icon: <IconNoGlare className="size-6" />, title: "Que entre completo, sin reflejos", desc: "Las 4 esquinas dentro del marco." },
+          ]}
+          cta="Estoy listo"
+          onDone={() => setPhase("capture-front")}
+          onBack={onBack}
+        />
+      )
+
+    case "capture-front":
+      return (
+        <DocSideCamera
+          side="front"
+          onCaptured={(img) => {
+            setFront(img)
+            setPhase("review-front")
+          }}
+        />
+      )
+
+    case "review-front":
+      return (
+        <DocReview
+          side="front"
+          image={front!}
+          onConfirm={() => setPhase("prep-back")}
+          onRetake={() => setPhase("capture-front")}
+        />
+      )
+
+    case "prep-back":
+      return (
+        <Prepare
+          hero={<DocHero className="h-24 w-32" />}
+          title="Ahora el dorso de tu cédula"
+          subtitle="Damos vuelta la cédula y sacamos el otro lado."
+          tips={[
+            { icon: <IconFrame className="size-6" />, title: "Dorso del documento", desc: "Que se vean las líneas (MRZ) y el código de barras." },
+            { icon: <IconSun className="size-6" />, title: "Buena luz", desc: "Mismo lugar iluminado, sin sombras." },
+            { icon: <IconNoGlare className="size-6" />, title: "Sin reflejos", desc: "Inclinala apenas si ves brillos." },
+          ]}
+          cta="Estoy listo"
+          onDone={() => setPhase("capture-back")}
+        />
+      )
+
+    case "capture-back":
+      return (
+        <DocSideCamera
+          side="back"
+          onCaptured={(img) => {
+            setBack(img)
+            setPhase("review-back")
+          }}
+        />
+      )
+
+    case "review-back":
+      return (
+        <>
+          {uploadErr && (
+            <Card>
+              <p className="text-sm text-error" role="alert">
+                {uploadErr}
+              </p>
+            </Card>
+          )}
+          <DocReview
+            side="back"
+            image={back!}
+            onConfirm={() => void submitBoth(front!, back!)}
+            onRetake={() => setPhase("capture-back")}
+          />
+          {uploading && (
+            <p className="mt-2 text-center text-xs text-gray-400">
+              Subiendo tus fotos…
+            </p>
+          )}
+        </>
+      )
+
+    case "submitted":
+      return <DocSubmitted onDone={onDone} />
+  }
+}
+
+/**
+ * Cámara de un lado de la cédula. Lógica IDÉNTICA al detector del commit 8b27e42:
+ * auto-captura por detección geométrica real con OpenCV.js + overlay del contorno
+ * en vivo + botón manual de recovery. ÚNICA diferencia: al pasar el /doc-check
+ * informativo, en vez de subir o auto-avanzar, llama onCaptured(dataURL) y deja
+ * que el orquestador muestre la revisión/retake.
+ */
+function DocSideCamera({
+  side,
+  onCaptured,
+}: {
+  side: "front" | "back"
+  onCaptured: (image: string) => void
+}) {
   const cam = useCamera("environment")
-  const [side, setSide] = useState<"front" | "back">("front")
-  const frontRef = useRef<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
-  const [fatal, setFatal] = useState<string | null>(null)
   const [count, setCount] = useState<number | null>(null)
   const [flash, setFlash] = useState(false)
 
   const det = useDocDetector(cam.videoRef, cam.ready && !busy)
-  // OpenCV no disponible (offline/timeout) → degradar a captura manual.
   const manualMode = det.status === "unavailable"
   const detLoading = det.status === "loading"
-  // "good" = quad válido, lleno, derecho y nítido → habilita la cuenta.
   const isGood = det.verdict === "good"
-  // "Ausencia real": sin cuadrilátero, con el detector corriendo (no warm-up).
-  // Solo esto cuenta como re-adquisición tras un rechazo.
   const isAbsent = det.verdict === "no-doc"
 
   const stableSinceRef = useRef<number | null>(null)
   const capturingRef = useRef(false)
   const countingRef = useRef(false)
   const timersRef = useRef<ReturnType<typeof setTimeout>[]>([])
-  // --- Guard anti-loop robusto (sobrevive al warm-up de cámara) -------------
-  // Tras un rechazo: enfriamiento por tiempo (cooldownUntilRef) + exigir que el
-  // documento SALGA de la guía de verdad (absentFramesRef llega al umbral) antes
-  // de volver a auto-disparar. El warm-up de cámara (loading/no-camera) NO
-  // satisface la re-adquisición (si no, el bloqueo caía solo y re-disparaba).
   const cooldownUntilRef = useRef(0)
   const needReacquireRef = useRef(false)
   const absentFramesRef = useRef(0)
 
-  // Limpia todos los timers de cuenta pendientes (clearTimeout real, no solo []).
   const clearTimers = () => {
     timersRef.current.forEach(clearTimeout)
     timersRef.current = []
     countingRef.current = false
   }
 
-  // Arma el enfriamiento + re-adquisición tras un rechazo de captura.
   const armCooldown = () => {
     cooldownUntilRef.current = Date.now() + COOLDOWN_MS
     needReacquireRef.current = true
     absentFramesRef.current = 0
   }
 
-  // Refs espejo de los veredictos vivos (leídos por el loop sin reejecutar su
-  // efecto, para que la cuenta 3·2·1 no se autocancele).
   const isGoodRef = useRef(isGood)
   isGoodRef.current = isGood
   const isAbsentRef = useRef(isAbsent)
@@ -91,11 +227,9 @@ export function DocCapture({ onDone }: { onDone: () => void }) {
   const doCapture = useCallback(async () => {
     if (capturingRef.current) return
     capturingRef.current = true
-    // Matamos timers de cuenta pendientes (evita disparo zombi tras tap manual).
     clearTimers()
     setBusy(true)
     setNotice(null)
-    setFatal(null)
     setCount(null)
     setFlash(true)
     setTimeout(() => setFlash(false), 450)
@@ -117,45 +251,17 @@ export function DocCapture({ onDone }: { onDone: () => void }) {
       stableSinceRef.current = null
       capturingRef.current = false
       clearTimers()
-      // Rechazo: enfriamiento + exigir que el usuario reacomode la cédula
-      // (sacarla y volver a encuadrarla) antes de re-disparar.
+      // Rechazo: enfriamiento + exigir que el usuario reacomode la cédula.
       armCooldown()
       void cam.start()
       return
     }
 
-    if (isFront) {
-      frontRef.current = img
-      setBusy(false)
-      stableSinceRef.current = null
-      capturingRef.current = false
-      clearTimers()
-      // Cambio de lado: re-armar limpio para el dorso (no es un rechazo). Pero
-      // pedimos re-adquisición igual para que no dispare con el dorso a medio
-      // poner (el frente seguía válido y disparaba al instante).
-      armCooldown()
-      setSide("back")
-      void cam.start()
-      return
-    }
-
-    // Dorso OK → subimos ambos lados.
+    // OK → paramos la cámara y devolvemos la foto al orquestador (revisión).
     cam.stop()
-    try {
-      await apiPost("/document", { front: frontRef.current, back: img })
-      onDone()
-    } catch (e) {
-      setBusy(false)
-      capturingRef.current = false
-      clearTimers()
-      stableSinceRef.current = null
-      armCooldown()
-      setFatal(errorMessage(e))
-      void cam.start()
-    }
-  }, [cam, isFront, side, onDone])
+    onCaptured(img)
+  }, [cam, side, onCaptured])
 
-  // Ref siempre a la última doCapture (evita meterla en deps del countdown).
   const doCaptureRef = useRef(doCapture)
   doCaptureRef.current = doCapture
 
@@ -164,9 +270,7 @@ export function DocCapture({ onDone }: { onDone: () => void }) {
     setCount(null)
   }, [])
 
-  // Estabilidad + cuenta regresiva — re-render-immune (mismo patrón que Selfie):
-  // el loop lee refs y programa los timers UNA vez; no se cancelan en cada
-  // render, solo si se rompe la validez/estabilidad o al desmontar.
+  // Estabilidad + cuenta regresiva — re-render-immune (mismo patrón que Selfie).
   useEffect(() => {
     if (manualMode || busy) {
       cancelCountdown()
@@ -176,24 +280,18 @@ export function DocCapture({ onDone }: { onDone: () => void }) {
     let raf = 0
     const loop = () => {
       if (!capturingRef.current) {
-        // Re-adquisición tras rechazo: contamos AUSENCIA REAL (no-doc con el
-        // detector corriendo). El warm-up de cámara (loading/no-camera) NO
-        // cuenta — por eso el loop ya no se re-arma solo.
         if (needReacquireRef.current) {
           if (isAbsentRef.current) {
             absentFramesRef.current++
             if (absentFramesRef.current >= REACQUIRE_ABSENT_FRAMES)
               needReacquireRef.current = false
           }
-          // Mientras re-adquirimos, jamás contamos estabilidad ni disparamos.
           stableSinceRef.current = null
           if (countingRef.current) cancelCountdown()
         } else if (
           isGoodRef.current &&
           Date.now() >= cooldownUntilRef.current
         ) {
-          // Documento detectado (quad válido + lleno + derecho + nítido),
-          // cooldown cumplido y ya re-adquirido. Acumulamos estabilidad.
           if (stableSinceRef.current == null)
             stableSinceRef.current = Date.now()
           const held = Date.now() - stableSinceRef.current
@@ -207,9 +305,6 @@ export function DocCapture({ onDone }: { onDone: () => void }) {
             )
           }
         } else {
-          // No detectado/válido aún (o en cooldown): reseteamos estabilidad y
-          // cancelamos cualquier cuenta en curso. NO tocamos los guards de
-          // re-adquisición acá (ese era el bug: se levantaban con el warm-up).
           stableSinceRef.current = null
           if (countingRef.current) cancelCountdown()
         }
@@ -226,9 +321,6 @@ export function DocCapture({ onDone }: { onDone: () => void }) {
   }, [manualMode, busy, cancelCountdown])
 
   // --- Overlay: dibuja el contorno detectado EN VIVO sobre la cámara ---------
-  // El quad viene NORMALIZADO [0..1] en coords del frame del video. El <video>
-  // usa object-cover dentro de un box 1.586:1, así que mapeamos por el mismo
-  // escalado+recorte de "cover" para que el contorno caiga donde corresponde.
   const overlayRef = useRef<HTMLCanvasElement | null>(null)
   const quadRef = useRef<Quad | null>(det.quad)
   quadRef.current = det.quad
@@ -252,8 +344,6 @@ export function DocCapture({ onDone }: { onDone: () => void }) {
           ctx.clearRect(0, 0, cw, ch)
           const q = quadRef.current
           if (q && count == null) {
-            // Mapa object-cover: el video (vw×vh) llena el box (cw×ch) por el
-            // lado que sobra; el resto se recorta y centra.
             const vw = v.videoWidth
             const vh = v.videoHeight
             const scale = Math.max(cw / vw, ch / vh)
@@ -278,7 +368,6 @@ export function DocCapture({ onDone }: { onDone: () => void }) {
               : "rgba(245,158,11,0.10)"
             ctx.fill()
             ctx.stroke()
-            // Marcas en las 4 esquinas para reforzar la guía.
             ctx.fillStyle = good ? "#16a34a" : "#f59e0b"
             for (const p of pts) {
               ctx.beginPath()
@@ -294,7 +383,6 @@ export function DocCapture({ onDone }: { onDone: () => void }) {
     return () => cancelAnimationFrame(raf)
   }, [manualMode, count, cam.videoRef])
 
-  // Copy de coaching en vivo (mapeo veredicto → texto accionable).
   const liveMsg = detLoading
     ? "Preparando el detector…"
     : det.verdict === "loading" || det.verdict === "no-camera"
@@ -306,59 +394,15 @@ export function DocCapture({ onDone }: { onDone: () => void }) {
   return (
     <Card>
       <h1 className="text-xl font-bold text-gray-900">
-        Cédula — {isFront ? "frente" : "dorso"}
+        {isFront ? "Capturá el frente" : "Capturá el dorso"}
       </h1>
       <p className="mt-1 text-sm leading-relaxed text-gray-500">
         {isFront
-          ? "Mostranos el frente de tu cédula, con la foto y los datos bien visibles. La foto se saca sola."
-          : "Ahora el dorso: que se vean las líneas (MRZ) y el código de barras."}
+          ? "Encuadrá el frente de tu cédula dentro del marco. La foto se saca sola."
+          : "Encuadrá el dorso dentro del marco. La foto se saca sola."}
       </p>
 
-      {/* Mini-ejemplo ilustrado: cómo sostener la cédula dentro del marco. */}
-      <div className="mt-3 flex items-center gap-3 rounded-2xl bg-gray-50 p-3 ring-1 ring-gray-100">
-        <svg
-          viewBox="0 0 64 44"
-          className="h-11 w-16 shrink-0"
-          fill="none"
-          aria-hidden
-        >
-          <rect
-            x="3"
-            y="3"
-            width="58"
-            height="38"
-            rx="4"
-            className="text-primary"
-            stroke="currentColor"
-            strokeWidth="2"
-            strokeDasharray="4 3"
-          />
-          <rect
-            x="10"
-            y="10"
-            width="44"
-            height="24"
-            rx="3"
-            className="text-primary"
-            fill="currentColor"
-            opacity="0.18"
-          />
-          <circle cx="20" cy="20" r="5" className="text-primary" fill="currentColor" opacity="0.5" />
-          <rect x="30" y="16" width="18" height="3" rx="1.5" className="text-primary" fill="currentColor" opacity="0.5" />
-          <rect x="30" y="23" width="13" height="3" rx="1.5" className="text-primary" fill="currentColor" opacity="0.35" />
-        </svg>
-        <p className="text-xs leading-snug text-gray-500">
-          Encuadrá la cédula <span className="font-semibold text-gray-700">llenando el marco</span> y alineá las
-          4 esquinas. Cuando el contorno se ponga <span className="font-semibold text-primary">verde</span>, no te muevas.
-        </p>
-      </div>
-
       {notice && <Notice>{notice}</Notice>}
-      {fatal && (
-        <p className="mt-3 text-sm text-error" role="alert">
-          {fatal}
-        </p>
-      )}
 
       <div className="relative my-4 aspect-[1.586/1] w-full overflow-hidden rounded-3xl bg-gray-900">
         <video
@@ -369,7 +413,6 @@ export function DocCapture({ onDone }: { onDone: () => void }) {
           className="size-full object-cover"
         />
 
-        {/* overlay del contorno detectado en vivo (verde válido / ámbar parcial) */}
         {!manualMode && (
           <canvas
             ref={overlayRef}
@@ -377,14 +420,12 @@ export function DocCapture({ onDone }: { onDone: () => void }) {
           />
         )}
 
-        {/* guía rectangular redondeada: gris → verde según validez */}
         <div
           className={`pointer-events-none absolute inset-[8%] rounded-2xl border-[3px] ${
             isGood ? "border-solid" : "border-dashed"
           } ${frameColor} transition-colors duration-300`}
         />
 
-        {/* preparando detector OpenCV (lazy) */}
         {detLoading && (
           <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/30">
             <span className="flex items-center gap-2 rounded-full bg-black/60 px-4 py-2 text-sm font-medium text-white">
@@ -394,12 +435,10 @@ export function DocCapture({ onDone }: { onDone: () => void }) {
           </div>
         )}
 
-        {/* destello de captura */}
         {flash && (
           <div className="teko-flash pointer-events-none absolute inset-0 bg-white" />
         )}
 
-        {/* cuenta regresiva */}
         {count != null && (
           <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
             <span
@@ -411,7 +450,6 @@ export function DocCapture({ onDone }: { onDone: () => void }) {
           </div>
         )}
 
-        {/* feedback / coaching en vivo */}
         {count == null && !detLoading && (
           <div className="pointer-events-none absolute inset-x-0 top-3 flex justify-center">
             <span
@@ -454,9 +492,6 @@ export function DocCapture({ onDone }: { onDone: () => void }) {
         {manualMode
           ? "Sacá la foto cuando la cédula llene el marco"
           : "La captura es automática · o tocá el botón cuando quieras"}
-      </p>
-      <p className="mt-3 text-center text-[11px] leading-snug text-gray-400">
-        Tus datos se usan solo para verificar tu identidad · Ley 7593
       </p>
     </Card>
   )
