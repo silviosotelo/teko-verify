@@ -62,25 +62,32 @@ export const FACE_LIVE_MSG: Record<FrameVerdict, string> = {
 }
 
 /**
- * Copy en vivo del encuadre de la cédula (auto-captura por nitidez + brillo).
+ * Copy en vivo del encuadre de la cédula. Ahora alimentado por el detector
+ * GEOMÉTRICO (OpenCV.js): `no-doc` = no hay cuadrilátero; `partial`/`tilt` =
+ * hay quad pero no llena/alinea o no tiene proporción de tarjeta (coaching, no
+ * dispara); `good` = documento real, lleno, derecho y nítido.
  */
 export type DocLiveVerdict =
   | "loading"
   | "no-camera"
   | "no-doc"
+  | "partial"
+  | "tilt"
   | "blurry"
   | "glare"
   | "dark"
   | "good"
 
 export const DOC_LIVE_MSG: Record<DocLiveVerdict, string> = {
-  loading: "Preparando la cámara…",
+  loading: "Preparando el detector…",
   "no-camera": "Iniciando cámara…",
-  "no-doc": "Encuadrá la cédula dentro del recuadro",
-  blurry: "Acercá la cédula y mantené firme",
+  "no-doc": "Poné la cédula dentro del marco",
+  partial: "Acercá y alineá las 4 esquinas",
+  tilt: "Enderezá la cédula dentro del marco",
+  blurry: "Mantené quieto, que quede nítida",
   glare: "Hay reflejo, movela un poco",
   dark: "Necesitamos un poco más de luz",
-  good: "Perfecto, no te muevas",
+  good: "Perfecto ✓ no te muevas",
 }
 
 export const DOC_MSG: Record<string, string> = {

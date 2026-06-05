@@ -342,6 +342,9 @@ export function Selfie({ onDone }: { onDone: () => void }) {
           )}
         </>
       )}
+      <p className="mt-3 text-center text-[11px] leading-snug text-gray-400">
+        Tus datos se usan solo para verificar tu identidad · Ley 7593
+      </p>
     </Card>
   )
 }

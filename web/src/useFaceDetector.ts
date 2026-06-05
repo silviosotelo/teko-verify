@@ -9,7 +9,9 @@ import {
 /**
  * Detección facial EN VIVO con MediaPipe Tasks Vision (FaceDetector).
  *
- * - Carga el wasm + modelo desde el CDN de jsDelivr (sin assets en el bundle).
+ * - Carga el wasm + modelo SELF-HOSTED desde el mismo origen (/app/mediapipe/…)
+ *   — NADA de CDN en runtime (on-prem, Ley 7593). Los assets se copian a
+ *   public/mediapipe en build-time.
  * - Corre detección sobre el <video> que le pasamos (mismo ref que useCamera)
  *   en un loop de requestAnimationFrame.
  * - Devuelve un veredicto ACCIONABLE de encuadre (no rostro / lejos / descentrado
@@ -21,10 +23,9 @@ import {
  * CENTRADO y el TAMAÑO, no la dirección, así que el espejado del preview no afecta.
  */
 
-const WASM_CDN =
-  "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.35/wasm"
-const MODEL_CDN =
-  "https://storage.googleapis.com/mediapipe-models/face_detector/blaze_face_short_range/float16/1/blaze_face_short_range.tflite"
+// Self-hosted (mismo origen, base "/app/"): copiados a public/mediapipe en build.
+const WASM_PATH = `${import.meta.env.BASE_URL}mediapipe/wasm`
+const MODEL_PATH = `${import.meta.env.BASE_URL}mediapipe/blaze_face_short_range.tflite`
 
 export type FrameVerdict =
   | "loading" // cargando modelo
@@ -164,7 +165,7 @@ export function useFaceDetector(
     aliveRef.current = true
     let cancelled = false
     async function load() {
-      const fileset = await FilesetResolver.forVisionTasks(WASM_CDN).catch(
+      const fileset = await FilesetResolver.forVisionTasks(WASM_PATH).catch(
         (e) => {
           console.warn("[teko] FilesetResolver falló:", e)
           return null
@@ -179,7 +180,7 @@ export function useFaceDetector(
       // modo manual. Así el gating facial sigue activo aunque no haya GPU.
       const make = (delegate: "GPU" | "CPU") =>
         FaceDetector.createFromOptions(fileset, {
-          baseOptions: { modelAssetPath: MODEL_CDN, delegate },
+          baseOptions: { modelAssetPath: MODEL_PATH, delegate },
           runningMode: "VIDEO",
           minDetectionConfidence: 0.45,
         })

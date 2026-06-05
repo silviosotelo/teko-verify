@@ -2,10 +2,10 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import { apiPost, type DocCheckResult } from "../api"
 import { docMsg, DOC_LIVE_MSG, errorMessage } from "../messages"
 import { useCamera } from "../useCamera"
-import { useDocQuality } from "../useDocQuality"
+import { useDocDetector, type Quad } from "../useDocDetector"
 import { Button, Card, Notice } from "../ui"
 
-// El documento debe quedar nítido y estable ~1.5s antes de la cuenta regresiva.
+// El documento debe quedar VÁLIDO y estable ~1.5s antes de la cuenta regresiva.
 const STABLE_MS = 1500
 const COUNTDOWN = [3, 2, 1]
 // Enfriamiento tras una captura RECHAZADA: nunca re-disparamos antes de esto.
@@ -13,20 +13,24 @@ const COOLDOWN_MS = 1200
 // Re-adquisición: tras un rechazo exigimos que el documento DESAPAREZCA de la
 // guía (no-doc real, detector corriendo) por estos frames consecutivos antes de
 // volver a habilitar el auto-disparo. Los frames "loading"/"no-camera" del
-// reinicio de cámara NO cuentan como ausencia (ese era el bug del loop: el
-// warm-up "rompía" el encuadre y re-armaba solo, sin que el usuario reacomode).
+// reinicio de cámara NO cuentan como ausencia (ese era el bug del loop).
 const REACQUIRE_ABSENT_FRAMES = 4
 
 /**
- * Cédula (frente/dorso) con AUTO-CAPTURA por heurística en vivo:
- *  - useDocQuality mide nitidez (varianza Laplaciano) + brillo sobre el stream.
- *  - Feedback accionable: borrosa/lejos, reflejo, oscura, o "perfecto".
- *  - Cuando queda nítida y estable ~0.9s → cuenta 3·2·1 → captura.
- *  - Botón manual SIEMPRE disponible como recovery.
+ * Cédula (frente/dorso) con AUTO-CAPTURA por DETECCIÓN GEOMÉTRICA REAL:
+ *  - useDocDetector (OpenCV.js, self-hosted, lazy) detecta el CUADRILÁTERO del
+ *    documento en vivo y valida fill + esquinas + proporción ID-1 + nitidez.
+ *  - Dibujamos el contorno detectado EN VIVO sobre la cámara (overlay): verde
+ *    cuando es válido, ámbar cuando es parcial → el usuario VE que se detectó.
+ *  - Coaching accionable: "poné la cédula", "acercá/alineá", "enderezá",
+ *    "mantené quieto", "perfecto ✓ 3·2·1".
+ *  - Cuando el quad es válido y estable ~1.5s → cuenta 3·2·1 → captura.
+ *  - Botón manual SIEMPRE disponible como recovery (obligatorio si OpenCV no
+ *    cargó → modo manual, sin colgarse en "preparando detector…").
  *
- * El backend recorta la evidencia y valida el borde real; acá pre-chequeamos
- * (POST /doc-check informativo) y subimos ambos lados (POST /document).
- * La cámara trasera NO se espeja.
+ * Un teclado/pared NO forma un quad con proporción de tarjeta que llene la
+ * guía → NO dispara. El backend valida el borde real; acá pre-chequeamos
+ * (POST /doc-check) y subimos ambos lados (POST /document). La trasera NO se espeja.
  */
 export function DocCapture({ onDone }: { onDone: () => void }) {
   const cam = useCamera("environment")
@@ -38,12 +42,15 @@ export function DocCapture({ onDone }: { onDone: () => void }) {
   const [count, setCount] = useState<number | null>(null)
   const [flash, setFlash] = useState(false)
 
-  const quality = useDocQuality(cam.videoRef, cam.ready && !busy)
-  const isGood = quality.verdict === "good"
-  // "Ausencia real": documento NO encuadrado, con el detector efectivamente
-  // corriendo (no es el transitorio de warm-up de cámara). Solo esto cuenta
-  // como re-adquisición tras un rechazo.
-  const isAbsent = quality.verdict === "no-doc"
+  const det = useDocDetector(cam.videoRef, cam.ready && !busy)
+  // OpenCV no disponible (offline/timeout) → degradar a captura manual.
+  const manualMode = det.status === "unavailable"
+  const detLoading = det.status === "loading"
+  // "good" = quad válido, lleno, derecho y nítido → habilita la cuenta.
+  const isGood = det.verdict === "good"
+  // "Ausencia real": sin cuadrilátero, con el detector corriendo (no warm-up).
+  // Solo esto cuenta como re-adquisición tras un rechazo.
+  const isAbsent = det.verdict === "no-doc"
 
   const stableSinceRef = useRef<number | null>(null)
   const capturingRef = useRef(false)
@@ -52,10 +59,8 @@ export function DocCapture({ onDone }: { onDone: () => void }) {
   // --- Guard anti-loop robusto (sobrevive al warm-up de cámara) -------------
   // Tras un rechazo: enfriamiento por tiempo (cooldownUntilRef) + exigir que el
   // documento SALGA de la guía de verdad (absentFramesRef llega al umbral) antes
-  // de volver a auto-disparar. El viejo blockedRef se levantaba con CUALQUIER
-  // frame no-good — y el reinicio de cámara produce frames "loading"/"no-camera",
-  // así que el bloqueo caía solo y re-disparaba en loop. Ahora el warm-up NO
-  // satisface la re-adquisición.
+  // de volver a auto-disparar. El warm-up de cámara (loading/no-camera) NO
+  // satisface la re-adquisición (si no, el bloqueo caía solo y re-disparaba).
   const cooldownUntilRef = useRef(0)
   const needReacquireRef = useRef(false)
   const absentFramesRef = useRef(0)
@@ -127,7 +132,7 @@ export function DocCapture({ onDone }: { onDone: () => void }) {
       clearTimers()
       // Cambio de lado: re-armar limpio para el dorso (no es un rechazo). Pero
       // pedimos re-adquisición igual para que no dispare con el dorso a medio
-      // poner (el frente seguía nítido y disparaba al instante).
+      // poner (el frente seguía válido y disparaba al instante).
       armCooldown()
       setSide("back")
       void cam.start()
@@ -161,9 +166,9 @@ export function DocCapture({ onDone }: { onDone: () => void }) {
 
   // Estabilidad + cuenta regresiva — re-render-immune (mismo patrón que Selfie):
   // el loop lee refs y programa los timers UNA vez; no se cancelan en cada
-  // render, solo si se rompe la nitidez/estabilidad o al desmontar.
+  // render, solo si se rompe la validez/estabilidad o al desmontar.
   useEffect(() => {
-    if (busy) {
+    if (manualMode || busy) {
       cancelCountdown()
       stableSinceRef.current = null
       return
@@ -187,8 +192,8 @@ export function DocCapture({ onDone }: { onDone: () => void }) {
           isGoodRef.current &&
           Date.now() >= cooldownUntilRef.current
         ) {
-          // Documento presente + encuadrado + nítido (good), cooldown cumplido y
-          // ya re-adquirido. Acumulamos estabilidad y disparamos la cuenta.
+          // Documento detectado (quad válido + lleno + derecho + nítido),
+          // cooldown cumplido y ya re-adquirido. Acumulamos estabilidad.
           if (stableSinceRef.current == null)
             stableSinceRef.current = Date.now()
           const held = Date.now() - stableSinceRef.current
@@ -202,7 +207,7 @@ export function DocCapture({ onDone }: { onDone: () => void }) {
             )
           }
         } else {
-          // No encuadrado/nítido aún (o en cooldown): reseteamos estabilidad y
+          // No detectado/válido aún (o en cooldown): reseteamos estabilidad y
           // cancelamos cualquier cuenta en curso. NO tocamos los guards de
           // re-adquisición acá (ese era el bug: se levantaban con el warm-up).
           stableSinceRef.current = null
@@ -218,12 +223,83 @@ export function DocCapture({ onDone }: { onDone: () => void }) {
       timersRef.current = []
       countingRef.current = false
     }
-  }, [busy, cancelCountdown])
+  }, [manualMode, busy, cancelCountdown])
 
-  const liveMsg =
-    quality.verdict === "loading"
-      ? "Preparando la cámara…"
-      : (DOC_LIVE_MSG[quality.verdict] ?? "Acercá la cédula y mantené firme")
+  // --- Overlay: dibuja el contorno detectado EN VIVO sobre la cámara ---------
+  // El quad viene NORMALIZADO [0..1] en coords del frame del video. El <video>
+  // usa object-cover dentro de un box 1.586:1, así que mapeamos por el mismo
+  // escalado+recorte de "cover" para que el contorno caiga donde corresponde.
+  const overlayRef = useRef<HTMLCanvasElement | null>(null)
+  const quadRef = useRef<Quad | null>(det.quad)
+  quadRef.current = det.quad
+  const isGoodForDraw = isGood
+  const isGoodDrawRef = useRef(isGoodForDraw)
+  isGoodDrawRef.current = isGoodForDraw
+
+  useEffect(() => {
+    if (manualMode) return
+    let raf = 0
+    const draw = () => {
+      const cnv = overlayRef.current
+      const v = cam.videoRef.current
+      if (cnv && v && v.videoWidth > 0) {
+        const cw = cnv.clientWidth
+        const ch = cnv.clientHeight
+        if (cnv.width !== cw) cnv.width = cw
+        if (cnv.height !== ch) cnv.height = ch
+        const ctx = cnv.getContext("2d")
+        if (ctx) {
+          ctx.clearRect(0, 0, cw, ch)
+          const q = quadRef.current
+          if (q && count == null) {
+            // Mapa object-cover: el video (vw×vh) llena el box (cw×ch) por el
+            // lado que sobra; el resto se recorta y centra.
+            const vw = v.videoWidth
+            const vh = v.videoHeight
+            const scale = Math.max(cw / vw, ch / vh)
+            const dw = vw * scale
+            const dh = vh * scale
+            const ox = (cw - dw) / 2
+            const oy = (ch - dh) / 2
+            const map = (p: { x: number; y: number }) => ({
+              x: ox + p.x * dw,
+              y: oy + p.y * dh,
+            })
+            const good = isGoodDrawRef.current
+            ctx.beginPath()
+            const pts = q.map(map)
+            ctx.moveTo(pts[0].x, pts[0].y)
+            for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y)
+            ctx.closePath()
+            ctx.lineWidth = 3
+            ctx.strokeStyle = good ? "#16a34a" : "#f59e0b"
+            ctx.fillStyle = good
+              ? "rgba(22,163,74,0.14)"
+              : "rgba(245,158,11,0.10)"
+            ctx.fill()
+            ctx.stroke()
+            // Marcas en las 4 esquinas para reforzar la guía.
+            ctx.fillStyle = good ? "#16a34a" : "#f59e0b"
+            for (const p of pts) {
+              ctx.beginPath()
+              ctx.arc(p.x, p.y, 5, 0, Math.PI * 2)
+              ctx.fill()
+            }
+          }
+        }
+      }
+      raf = requestAnimationFrame(draw)
+    }
+    raf = requestAnimationFrame(draw)
+    return () => cancelAnimationFrame(raf)
+  }, [manualMode, count, cam.videoRef])
+
+  // Copy de coaching en vivo (mapeo veredicto → texto accionable).
+  const liveMsg = detLoading
+    ? "Preparando el detector…"
+    : det.verdict === "loading" || det.verdict === "no-camera"
+      ? "Iniciando cámara…"
+      : (DOC_LIVE_MSG[det.verdict] ?? "Poné la cédula dentro del marco")
 
   const frameColor = isGood ? "border-primary" : "border-white/60"
 
@@ -237,6 +313,45 @@ export function DocCapture({ onDone }: { onDone: () => void }) {
           ? "Mostranos el frente de tu cédula, con la foto y los datos bien visibles. La foto se saca sola."
           : "Ahora el dorso: que se vean las líneas (MRZ) y el código de barras."}
       </p>
+
+      {/* Mini-ejemplo ilustrado: cómo sostener la cédula dentro del marco. */}
+      <div className="mt-3 flex items-center gap-3 rounded-2xl bg-gray-50 p-3 ring-1 ring-gray-100">
+        <svg
+          viewBox="0 0 64 44"
+          className="h-11 w-16 shrink-0"
+          fill="none"
+          aria-hidden
+        >
+          <rect
+            x="3"
+            y="3"
+            width="58"
+            height="38"
+            rx="4"
+            className="text-primary"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeDasharray="4 3"
+          />
+          <rect
+            x="10"
+            y="10"
+            width="44"
+            height="24"
+            rx="3"
+            className="text-primary"
+            fill="currentColor"
+            opacity="0.18"
+          />
+          <circle cx="20" cy="20" r="5" className="text-primary" fill="currentColor" opacity="0.5" />
+          <rect x="30" y="16" width="18" height="3" rx="1.5" className="text-primary" fill="currentColor" opacity="0.5" />
+          <rect x="30" y="23" width="13" height="3" rx="1.5" className="text-primary" fill="currentColor" opacity="0.35" />
+        </svg>
+        <p className="text-xs leading-snug text-gray-500">
+          Encuadrá la cédula <span className="font-semibold text-gray-700">llenando el marco</span> y alineá las
+          4 esquinas. Cuando el contorno se ponga <span className="font-semibold text-primary">verde</span>, no te muevas.
+        </p>
+      </div>
 
       {notice && <Notice>{notice}</Notice>}
       {fatal && (
@@ -254,12 +369,30 @@ export function DocCapture({ onDone }: { onDone: () => void }) {
           className="size-full object-cover"
         />
 
-        {/* guía rectangular redondeada: gris → verde según nitidez */}
+        {/* overlay del contorno detectado en vivo (verde válido / ámbar parcial) */}
+        {!manualMode && (
+          <canvas
+            ref={overlayRef}
+            className="pointer-events-none absolute inset-0 size-full"
+          />
+        )}
+
+        {/* guía rectangular redondeada: gris → verde según validez */}
         <div
           className={`pointer-events-none absolute inset-[8%] rounded-2xl border-[3px] ${
             isGood ? "border-solid" : "border-dashed"
           } ${frameColor} transition-colors duration-300`}
         />
+
+        {/* preparando detector OpenCV (lazy) */}
+        {detLoading && (
+          <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/30">
+            <span className="flex items-center gap-2 rounded-full bg-black/60 px-4 py-2 text-sm font-medium text-white">
+              <span className="size-3 animate-pulse rounded-full bg-mint" />
+              Preparando el detector…
+            </span>
+          </div>
+        )}
 
         {/* destello de captura */}
         {flash && (
@@ -278,8 +411,8 @@ export function DocCapture({ onDone }: { onDone: () => void }) {
           </div>
         )}
 
-        {/* feedback en vivo */}
-        {count == null && (
+        {/* feedback / coaching en vivo */}
+        {count == null && !detLoading && (
           <div className="pointer-events-none absolute inset-x-0 top-3 flex justify-center">
             <span
               className={`flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-semibold backdrop-blur-sm transition-colors ${
@@ -291,7 +424,7 @@ export function DocCapture({ onDone }: { onDone: () => void }) {
                   isGood ? "bg-white" : "bg-mint"
                 }`}
               />
-              {liveMsg}
+              {manualMode ? "Poné la cédula dentro del marco" : liveMsg}
             </span>
           </div>
         )}
@@ -301,17 +434,29 @@ export function DocCapture({ onDone }: { onDone: () => void }) {
         <Notice>No se pudo abrir la cámara: {cam.error}.</Notice>
       )}
 
+      {manualMode && (
+        <Notice>
+          No pudimos preparar el detector automático. Encuadrá la cédula
+          llenando el marco y tocá el botón para sacar la foto.
+        </Notice>
+      )}
+
       <Button
         disabled={busy || !cam.ready}
         onClick={() => void doCapture()}
-        variant="ghost"
+        variant={manualMode ? "primary" : "ghost"}
       >
         {busy
           ? "Revisando la foto…"
           : `Sacar foto del ${isFront ? "frente" : "dorso"} ahora`}
       </Button>
       <p className="mt-2 text-center text-xs text-gray-400">
-        La captura es automática · o tocá el botón cuando quieras
+        {manualMode
+          ? "Sacá la foto cuando la cédula llene el marco"
+          : "La captura es automática · o tocá el botón cuando quieras"}
+      </p>
+      <p className="mt-3 text-center text-[11px] leading-snug text-gray-400">
+        Tus datos se usan solo para verificar tu identidad · Ley 7593
       </p>
     </Card>
   )
