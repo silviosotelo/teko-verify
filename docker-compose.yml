@@ -22,7 +22,7 @@ services:
       LIVENESS_THRESHOLD: "0.70"
       GLASSES_MAX: "0.50"
       # Base pública para construir el verificationUrl (se ajusta al dominio del túnel).
-      PUBLIC_BASE_URL: "${PUBLIC_BASE_URL:-http://localhost:4400}"
+      PUBLIC_BASE_URL: "${PUBLIC_BASE_URL:-https://teko.rohekawebservices.online}"
       # Operador admin bootstrap (se crea al arrancar si admin_operators está vacía).
       TEKO_ADMIN_BOOTSTRAP_USER: "admin"
       TEKO_ADMIN_BOOTSTRAP_PASSWORD: "TekoAdmin2026!"
