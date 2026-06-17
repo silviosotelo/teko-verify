@@ -30,6 +30,7 @@ import {
 } from "../lib/crypto";
 import { adminLoginRateLimiter } from "../lib/rateLimit";
 import { mergePolicy } from "../lib/policy";
+import { resolveTestSessionTtlSec } from "./testSessionTtl";
 import { decodeBase64Image } from "../lib/images";
 import { ensureRasterImage } from "../lib/raster";
 import { isMailerConfigured, isValidEmail, sendVerificationEmail } from "../lib/mailer";
@@ -638,7 +639,12 @@ adminRouter.post(
         return;
       }
       const linkToken = generateLinkToken();
-      const ttlSec = tenant.policies.linkTokenTtlSeconds || 900;
+      // TTL override OPCIONAL solo para los links de PRUEBA del admin (testear caducidad
+      // sin tocar el default de producción): `ttlMinutes` entero positivo → ese TTL,
+      // clampeado a ≤120min. Inválido o ausente → default del tenant (15min). El flujo
+      // público /v1/sessions y el default global quedan intactos.
+      const defaultTtlSec = tenant.policies.linkTokenTtlSeconds || 900;
+      const ttlSec = resolveTestSessionTtlSec(req.body?.ttlMinutes, defaultTtlSec);
       const created = await repos.sessions.create({
         tenantId: tenant.id,
         externalRef: `admin-test-live:${Date.now()}`,
@@ -652,7 +658,7 @@ adminRouter.post(
         sessionId: created.id,
         actor: `admin:${req.adminOperator?.operatorId ?? "?"}`,
         event: "admin.test_session",
-        detail: { assurance, email: email ?? null },
+        detail: { assurance, email: email ?? null, ttlMinutes: ttlSec / 60 },
         ip: req.ip ?? null,
       });
       const verifyUrl = `${PUBLIC_BASE_URL}/verify/${linkToken}`;
@@ -667,6 +673,7 @@ adminRouter.post(
         sessionId: created.id,
         assurance,
         verifyUrl,
+        expiresAt: created.expiresAt,
         ...(email ? { emailSent } : {}),
       });
     } catch (e) {
