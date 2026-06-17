@@ -13,9 +13,10 @@
  * Healthcheck en /health reporta el estado de cada subsistema.
  */
 import express from "express";
-import type { Request, Response } from "express";
+import type { NextFunction, Request, Response } from "express";
 import cors from "cors";
 import type { CorsOptions } from "cors";
+import helmet from "helmet";
 import fs from "fs";
 import path from "path";
 import * as cfg from "./config";
@@ -34,6 +35,30 @@ import {
 
 const app = express();
 app.set("trust proxy", true); // detrás del túnel Cloudflare (X-Forwarded-For) §11
+app.disable("x-powered-by"); // no revelar el stack (Express) — fingerprinting
+
+// =============================== security headers ========================= //
+// Helmet aplica cabeceras seguras (HSTS, X-Content-Type-Options:nosniff,
+// Referrer-Policy, X-DNS-Prefetch-Control, etc.). DECISIONES CONSERVADORAS para
+// NO romper el flujo en vivo (captura SPA + Didit + dashboard):
+//   - CSP DESACTIVADA globalmente: las SPAs (captura/admin) usan inline/eval de
+//     bundlers; una CSP estricta las rompería. (Recomendación: definir CSP a medida
+//     más adelante, fuera de este hardening de bajo riesgo.)
+//   - frameguard (X-Frame-Options) NO global: la página de captura /verify/:token
+//     puede embeberse en un iframe del tenant; un DENY global rompería ese embed.
+//     Se aplica SOLO a /admin y /admin-ui (anti-clickjacking donde importa).
+//   - HSTS: el túnel sirve siempre HTTPS, seguro habilitarlo.
+app.use(
+  helmet({
+    contentSecurityPolicy: false,
+    frameguard: false,
+    crossOriginEmbedderPolicy: false,
+    crossOriginResourcePolicy: false, // no bloquear el fetch de evidencia cross-origin del dashboard
+    hsts: { maxAge: 31536000, includeSubDomains: true },
+  })
+);
+// Anti-clickjacking SOLO en superficies admin (no afecta la captura embebible).
+app.use(["/admin", "/admin-ui"], helmet.frameguard({ action: "deny" }));
 
 // =============================== CORS (allowlist) ========================= //
 // Reemplaza el cors() abierto por una allowlist explícita desde env (orígenes de
@@ -128,6 +153,36 @@ if (fs.existsSync(ADMIN_DIST)) {
 
 app.get("/", (_req: Request, res: Response) => {
   res.json({ service: "teko-verify", health: "/health" });
+});
+
+// ===================== error handling (sin fugas) ========================= //
+// 404 JSON genérico (no filtra rutas internas ni HTML por defecto de Express).
+app.use((_req: Request, res: Response) => {
+  res.status(404).json({ error: "not_found" });
+});
+
+// Handler de errores terminal: reemplaza el default de Express, que en NODE_ENV !=
+// production responde HTML con el STACK TRACE completo (rutas /app/node_modules…).
+// Devuelve JSON genérico sin stack ni PII. Distingue el JSON malformado del body-
+// parser (400) del resto (500). El detalle real se registra server-side, no se
+// envía al cliente. Firma de 4 args = Express lo reconoce como error handler.
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
+  if (res.headersSent) return;
+  const e = err as { type?: string; status?: number; statusCode?: number };
+  const status = e?.status || e?.statusCode || 500;
+  // body-parser/raw-body: JSON malformado o payload demasiado grande.
+  if (e?.type === "entity.parse.failed" || status === 400) {
+    res.status(400).json({ error: "invalid_request_body" });
+    return;
+  }
+  if (e?.type === "entity.too.large" || status === 413) {
+    res.status(413).json({ error: "payload_too_large" });
+    return;
+  }
+  // eslint-disable-next-line no-console
+  console.error("[teko-verify] unhandled error:", (err as Error)?.message);
+  res.status(500).json({ error: "internal_error" });
 });
 
 // =============================== bootstrap ================================ //
