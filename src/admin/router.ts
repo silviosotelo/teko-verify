@@ -1552,6 +1552,29 @@ adminRouter.post(
         res.status(404).json({ error: "tenant_not_found" });
         return;
       }
+      // Workflow binding OPCIONAL (paridad con POST /v1/sessions): si viene un
+      // `workflowId`, se RESUELVE y SNAPSHOTEA reusando exactamente la misma lógica
+      // que la API pública (resolveForSession valida que la versión exista y sea del
+      // tenant). El assurance_required efectivo se DERIVA del workflow. Fail-closed:
+      // un workflowId inexistente o de otro tenant → 400 (no se crea sesión).
+      // Sin `workflowId` → comportamiento idéntico al actual: sin workflow ligado,
+      // default según `assurance`.
+      const workflowId =
+        typeof req.body?.workflowId === "string" && req.body.workflowId.trim()
+          ? req.body.workflowId.trim()
+          : undefined;
+      let wf: Awaited<ReturnType<typeof repos.workflows.resolveForSession>> | undefined;
+      if (workflowId) {
+        try {
+          wf = await repos.workflows.resolveForSession(tenant.id, {
+            workflowId,
+            assuranceRequired: assurance,
+          });
+        } catch (e) {
+          res.status(400).json({ error: "invalid_workflow", detail: (e as Error).message });
+          return;
+        }
+      }
       const linkToken = generateLinkToken();
       // TTL override OPCIONAL solo para los links de PRUEBA del admin (testear caducidad
       // sin tocar el default de producción): `ttlMinutes` entero positivo → ese TTL,
@@ -1573,7 +1596,10 @@ adminRouter.post(
         externalRef: `admin-test-live:${Date.now()}`,
         linkToken,
         callbackUrl: null,
-        assuranceRequired: assurance,
+        assuranceRequired: wf ? wf.assuranceRequired : assurance,
+        workflowId: wf?.workflowId,
+        workflowVersion: wf?.workflowVersion,
+        workflowSnapshot: wf?.snapshot,
         expiresAt: new Date(Date.now() + ttlSec * 1000).toISOString(),
       });
       await repos.auditLog.record({
@@ -1581,7 +1607,13 @@ adminRouter.post(
         sessionId: created.id,
         actor: `admin:${req.adminOperator?.operatorId ?? "?"}`,
         event: "admin.test_session",
-        detail: { assurance, email: email ?? null, ttlMinutes: ttlSec / 60 },
+        detail: {
+          assurance: created.assuranceRequired,
+          email: email ?? null,
+          ttlMinutes: ttlSec / 60,
+          workflowId: wf?.workflowId ?? null,
+          workflowVersion: wf?.workflowVersion ?? null,
+        },
         ip: req.ip ?? null,
       });
       // Timeline forense (P0 #3): primer evento de la sesión (contexto del operador
@@ -1597,7 +1629,12 @@ adminRouter.post(
           country: ctx.country,
           userAgent: ctx.userAgent,
           device: ctx.device,
-          meta: { assurance, via: "admin.test_session" },
+          meta: {
+            assurance: created.assuranceRequired,
+            via: "admin.test_session",
+            workflowId: wf?.workflowId ?? null,
+            workflowVersion: wf?.workflowVersion ?? null,
+          },
         });
       }
       const verifyUrl = `${PUBLIC_BASE_URL}/verify/${linkToken}`;
@@ -1610,9 +1647,12 @@ adminRouter.post(
 
       res.status(201).json({
         sessionId: created.id,
-        assurance,
+        assurance: created.assuranceRequired,
         verifyUrl,
         expiresAt: created.expiresAt,
+        ...(wf?.workflowId
+          ? { workflowId: wf.workflowId, workflowVersion: wf.workflowVersion }
+          : {}),
         ...(email ? { emailSent } : {}),
       });
     } catch (e) {
