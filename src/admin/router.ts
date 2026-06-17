@@ -45,6 +45,8 @@ import { computeChecks, applyReviewDecision } from "../pipeline";
 import { realPipelineDeps } from "../pipelineDeps";
 import { decision as decideVerdict } from "../modules/decision";
 import { assuranceFromDefinition } from "../lib/workflow";
+import { can } from "../lib/rbac";
+import type { Permission } from "../types";
 import sharp from "sharp";
 import {
   PaddleOcrClient,
@@ -237,12 +239,16 @@ function adminGuard(req: Request, res: Response, next: NextFunction): void {
   next();
 }
 
-/** Restringe una ruta a los roles indicados (AdminRole). Fail-closed → 403. */
-function requireRole(...roles: AdminRole[]) {
+/**
+ * Enforcement RBAC por ACCIÓN (no por rol). Resuelve `can(role, permission)` contra
+ * la matriz pura de lib/rbac.ts. Fail-closed: rol ausente/desconocido o permiso no
+ * concedido → 403. Reemplaza el viejo requireRole/canWrite por checks granulares.
+ */
+function requirePermission(permission: Permission) {
   return function (req: Request, res: Response, next: NextFunction): void {
     const role = req.adminOperator?.role;
-    if (!role || !roles.includes(role)) {
-      res.status(403).json({ error: "forbidden", requiredRoles: roles });
+    if (!can(role, permission)) {
+      res.status(403).json({ error: "forbidden", requiredPermission: permission });
       return;
     }
     next();
@@ -252,8 +258,9 @@ function requireRole(...roles: AdminRole[]) {
 // Todo lo que sigue requiere sesión válida.
 adminRouter.use(adminGuard);
 
-// Roles de mutación: owner/operator pueden escribir; viewer solo lee.
-const canWrite = requireRole("owner", "operator");
+// Atajos de permiso reusables por las rutas (legibilidad). Cada mutación exige su
+// permiso concreto; lo existente que usaba `canWrite` mapea ahora a permisos reales.
+const requireReview = requirePermission("review_sessions");
 
 function toTenantResponse(t: {
   id: string;
@@ -284,7 +291,7 @@ const logoUpload = multer({
 
 // ---- Tenants -------------------------------------------------------------- //
 
-adminRouter.post("/tenants", canWrite, async (req: Request, res: Response) => {
+adminRouter.post("/tenants", requirePermission("manage_tenants"), async (req: Request, res: Response) => {
   try {
     const { name, slug, policies, branding } = req.body ?? {};
     if (!name || !slug) {
@@ -327,7 +334,7 @@ adminRouter.get("/tenants/:id", async (req: Request, res: Response) => {
   res.json(toTenantResponse(t));
 });
 
-adminRouter.patch("/tenants/:id", canWrite, async (req: Request, res: Response) => {
+adminRouter.patch("/tenants/:id", requirePermission("manage_tenants"), async (req: Request, res: Response) => {
   const existing = await repos.tenants.getById(req.params.id);
   if (!existing) {
     res.status(404).json({ error: "tenant_not_found" });
@@ -364,7 +371,7 @@ adminRouter.patch("/tenants/:id", canWrite, async (req: Request, res: Response) 
 // MUTACIÓN → canWrite. Fail-closed: imagen inválida → 400.
 adminRouter.post(
   "/tenants/:id/branding/logo",
-  canWrite,
+  requirePermission("manage_branding"),
   logoUpload.single("logo"),
   async (req: Request, res: Response) => {
     const tenant = await repos.tenants.getById(req.params.id);
@@ -400,7 +407,7 @@ adminRouter.post(
 
 // ---- API keys ------------------------------------------------------------- //
 
-adminRouter.post("/tenants/:id/api-keys", canWrite, async (req: Request, res: Response) => {
+adminRouter.post("/tenants/:id/api-keys", requirePermission("manage_api_keys"), async (req: Request, res: Response) => {
   const tenant = await repos.tenants.getById(req.params.id);
   if (!tenant) {
     res.status(404).json({ error: "tenant_not_found" });
@@ -448,7 +455,7 @@ adminRouter.get("/tenants/:id/api-keys", async (req: Request, res: Response) => 
   res.json({ apiKeys: resp });
 });
 
-adminRouter.delete("/tenants/:id/api-keys/:keyId", canWrite, async (req: Request, res: Response) => {
+adminRouter.delete("/tenants/:id/api-keys/:keyId", requirePermission("manage_api_keys"), async (req: Request, res: Response) => {
   const revoked = await repos.apiKeys.revoke(req.params.id, req.params.keyId);
   if (!revoked) {
     res.status(404).json({ error: "api_key_not_found" });
@@ -648,7 +655,7 @@ adminRouter.get("/tenants/:id/workflows", async (req: Request, res: Response) =>
 });
 
 // POST /admin/tenants/:id/workflows {name, definition} → workflow NUEVO (version 1).
-adminRouter.post("/tenants/:id/workflows", canWrite, async (req: Request, res: Response) => {
+adminRouter.post("/tenants/:id/workflows", requirePermission("manage_workflows"), async (req: Request, res: Response) => {
   const tenant = await repos.tenants.getById(req.params.id);
   if (!tenant) {
     res.status(404).json({ error: "tenant_not_found" });
@@ -677,7 +684,7 @@ adminRouter.post("/tenants/:id/workflows", canWrite, async (req: Request, res: R
 });
 
 // PUT /admin/tenants/:id/workflows/:name {definition} → EDITAR = nueva versión.
-adminRouter.put("/tenants/:id/workflows/:name", canWrite, async (req: Request, res: Response) => {
+adminRouter.put("/tenants/:id/workflows/:name", requirePermission("manage_workflows"), async (req: Request, res: Response) => {
   const tenant = await repos.tenants.getById(req.params.id);
   if (!tenant) {
     res.status(404).json({ error: "tenant_not_found" });
@@ -759,7 +766,7 @@ adminRouter.get("/tenants/:id/webhooks", async (req: Request, res: Response) => 
 });
 
 // POST /admin/tenants/:id/webhooks {url, events, description?} → crea (secreto 1 vez).
-adminRouter.post("/tenants/:id/webhooks", canWrite, async (req: Request, res: Response) => {
+adminRouter.post("/tenants/:id/webhooks", requirePermission("manage_webhooks"), async (req: Request, res: Response) => {
   const tenant = await repos.tenants.getById(req.params.id);
   if (!tenant) {
     res.status(404).json({ error: "tenant_not_found" });
@@ -795,7 +802,7 @@ adminRouter.post("/tenants/:id/webhooks", canWrite, async (req: Request, res: Re
 });
 
 // PUT /admin/tenants/:id/webhooks/:whid {url?, events?, enabled?, description?}
-adminRouter.put("/tenants/:id/webhooks/:whid", canWrite, async (req: Request, res: Response) => {
+adminRouter.put("/tenants/:id/webhooks/:whid", requirePermission("manage_webhooks"), async (req: Request, res: Response) => {
   const tenant = await repos.tenants.getById(req.params.id);
   if (!tenant) {
     res.status(404).json({ error: "tenant_not_found" });
@@ -841,7 +848,7 @@ adminRouter.put("/tenants/:id/webhooks/:whid", canWrite, async (req: Request, re
 });
 
 // DELETE /admin/tenants/:id/webhooks/:whid
-adminRouter.delete("/tenants/:id/webhooks/:whid", canWrite, async (req: Request, res: Response) => {
+adminRouter.delete("/tenants/:id/webhooks/:whid", requirePermission("manage_webhooks"), async (req: Request, res: Response) => {
   const ok = await repos.webhookEndpoints.remove(req.params.id, req.params.whid);
   if (!ok) {
     res.status(404).json({ error: "webhook_not_found" });
@@ -879,7 +886,7 @@ adminRouter.get(
 // POST /admin/tenants/:id/webhooks/:whid/test → envía un evento de prueba (ping).
 adminRouter.post(
   "/tenants/:id/webhooks/:whid/test",
-  canWrite,
+  requirePermission("manage_webhooks"),
   async (req: Request, res: Response) => {
     const endpoint = await repos.webhookEndpoints.getById(req.params.id, req.params.whid);
     if (!endpoint) {
@@ -901,7 +908,7 @@ adminRouter.post(
 // POST /admin/tenants/:id/webhooks/:whid/deliveries/:did/resend → reenvía una entrega.
 adminRouter.post(
   "/tenants/:id/webhooks/:whid/deliveries/:did/resend",
-  canWrite,
+  requirePermission("manage_webhooks"),
   async (req: Request, res: Response) => {
     const endpoint = await repos.webhookEndpoints.getById(req.params.id, req.params.whid);
     if (!endpoint) {
@@ -952,7 +959,7 @@ adminRouter.get("/review-queue", async (req: Request, res: Response) => {
 
 // POST /admin/sessions/:id/review {decision, reason}  → decisión del operador.
 // Cross-tenant (el id es global). Sólo opera sobre sesiones `in_review`. canWrite.
-adminRouter.post("/sessions/:id/review", canWrite, async (req: Request, res: Response) => {
+adminRouter.post("/sessions/:id/review", requireReview, async (req: Request, res: Response) => {
   try {
     const decision = req.body?.decision === "approve" ? "approve" : req.body?.decision === "decline" ? "decline" : null;
     if (!decision) {
@@ -1024,7 +1031,7 @@ adminRouter.post("/sessions/:id/review", canWrite, async (req: Request, res: Res
 // Ambas son MUTACIONES (crean sesión / persisten checks) → canWrite (owner/operator).
 
 // POST /admin/test-verify  {tenantId, assurance, selfie, front, back}
-adminRouter.post("/test-verify", canWrite, async (req: Request, res: Response) => {
+adminRouter.post("/test-verify", requireReview, async (req: Request, res: Response) => {
   try {
     const tenantId = typeof req.body?.tenantId === "string" ? req.body.tenantId : "";
     const assurance = String(req.body?.assurance ?? "") as LoA;
@@ -1162,7 +1169,7 @@ adminRouter.post("/test-verify", canWrite, async (req: Request, res: Response) =
 // POST /admin/tenants/:id/test-session  {assurance}  → {verifyUrl}
 adminRouter.post(
   "/tenants/:id/test-session",
-  canWrite,
+  requireReview,
   async (req: Request, res: Response) => {
     try {
       const assurance = String(req.body?.assurance ?? "") as LoA;
@@ -1250,7 +1257,7 @@ adminRouter.post(
 // emailSent:false (no es un error del operador). MUTACIÓN → canWrite.
 adminRouter.post(
   "/tenants/:id/sessions/:sessionId/send-link",
-  canWrite,
+  requireReview,
   async (req: Request, res: Response) => {
     try {
       const email =
@@ -1311,7 +1318,7 @@ adminRouter.post(
 const OCR_DEBUG_VARIANTS = new Set(["production", "raw", "deskew-upscale", "enhanced"]);
 const OCR_DEBUG_ALLOWED = ["production", "raw", "deskew-upscale", "enhanced"];
 
-adminRouter.post("/ocr-debug", canWrite, async (req: Request, res: Response) => {
+adminRouter.post("/ocr-debug", requireReview, async (req: Request, res: Response) => {
   try {
     const variant =
       typeof req.body?.variant === "string" ? req.body.variant : "production";

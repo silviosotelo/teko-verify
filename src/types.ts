@@ -136,8 +136,32 @@ export type AttackType = "none" | "print" | "replay" | "mask" | "deepfake" | "un
 /** Desafío activo de liveness (refuerzo opcional configurable por policy) — §6/§13. */
 export type LivenessChallenge = "blink" | "turn_left" | "turn_right" | "smile" | "nod";
 
-/** Roles del operador del dashboard admin — §8.C. */
-export type AdminRole = "owner" | "operator" | "viewer";
+/**
+ * Roles del operador del dashboard admin — §8.C / RBAC.
+ *   - owner    → dueño de la org: TODOS los permisos (incl. crear orgs y miembros).
+ *   - admin    → gestiona apps/workflows/webhooks/branding/keys + revisa. NO miembros/orgs.
+ *   - reviewer → revisa sesiones (cola de revisión) + lee. No configura.
+ *   - viewer   → solo lectura (sesiones + uso).
+ *   - operator → LEGACY (compat): equivale a `admin`. Conservado para no romper filas
+ *                existentes en admin_operators. Mapea a permisos de admin en rbac.ts.
+ */
+export type AdminRole = "owner" | "admin" | "reviewer" | "viewer" | "operator";
+
+/**
+ * Permisos atómicos por acción (matriz en lib/rbac.ts). Fail-closed: un rol
+ * desconocido o un permiso no concedido → denegado (403). Ver `can(role, permission)`.
+ */
+export type Permission =
+  | "manage_tenants" // crear/editar orgs (tenants) — owner only
+  | "manage_apps" // CRUD de apps bajo la org
+  | "manage_workflows" // crear/editar workflows
+  | "manage_webhooks" // CRUD/test de webhooks
+  | "manage_branding" // white-label (branding + logo)
+  | "manage_members" // alta/rol de operadores — owner only
+  | "manage_api_keys" // crear/revocar API keys
+  | "review_sessions" // decidir en la cola de revisión + correr pruebas
+  | "view_sessions" // leer sesiones/detalle/timeline/evidencia
+  | "view_usage"; // leer métricas/uso/auditoría
 
 /**
  * admin_operators — operador del dashboard admin con auth/roles propios (§8.C).
