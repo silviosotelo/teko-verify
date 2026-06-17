@@ -15,6 +15,9 @@ Loop autopaceado: trabajar de arriba a abajo; el deploy del subdominio es el pas
    - **[✓]** Chequeo de regresión post-cambios: las 3 cédulas siguen OK en el dominio live (89 tests).
    - **[gated]** Purga PII de prueba (`/tmp/batch` = 57 cédulas reales de clientes) → recomendado; decisión del usuario (¿se usan para entrenar el ML?).
 
+## ML detector — RESUELTO ✓
+- **[✓ d6f14b2]** **DocAligner (Apache-2.0)** integrado: Web Worker onnxruntime-web, 4 esquinas → gating geométrico post-filtro. Flag `?detector=ml`, default OpenCV, fallback ML→OpenCV→manual. Validado en cédula PY real (specimen sobre fondo: quad perfecto, has_obj 0.99). Pendiente: field-test en celu → si va bien, hacerlo default.
+
 ## Decisiones pendientes del usuario (gates)
 - **ML Fase 2 (YOLO26):** mejor candidato técnico (n=2.4M params, NMS-free, Pose=4 esquinas/OBB, ONNX). Bloqueante = licencia **AGPL vs Enterprise**. Decisión (a) Enterprise/AGPL → entrenar YOLO26n-pose, o (b) sin-AGPL → U-Net MobileNetV3. + entrenar sobre MIDV+cédula PY (~1 sem GPU 34).
 - **Polish visual del flujo cliente:** gated por tu prueba real en el celu.
