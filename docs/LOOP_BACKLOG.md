@@ -10,7 +10,9 @@ Loop autopaceado: trabajar de arriba a abajo; el deploy del subdominio es el pas
 5. **[parcial]** Robustez/limpieza:
    - **[✓ 0ab5367]** Split apellidos pegados desde MRZ (CI-gated, reconstruye `<`→C/K).
    - **[✓ 0ab5367]** Persistir imagen cruda (`doc_front_raw`/`doc_back_raw`, migración 0005).
-   - **[diferido]** Calibrar umbrales match/liveness + ensemble PAD anti-spoof → necesitan eval set + GPU (esfuerzo grande).
+   - **[✓ 11ca3d1]** Ensemble PAD anti-spoof (2 MiniFASNet 2.7+4.0, Apache) integrado; preserva live pass-through. Calibración `LIVENESS_THRESHOLD` pendiente de eval set de spoofs reales.
+   - **[diferido]** Calibrar umbrales match/liveness → necesitan eval set etiquetado.
+   - **[✓]** Runbook de deploy/operación en `docs/RUNBOOK.md`. Revisión de seguridad en `docs/specs/2026-06-17-security-review.md`.
    - **[✓ a587bdf]** Orientación 0/90/180/270 (cédula cabeza-abajo soportada). PDF pág2=dorso [diferido: no byte-seguro].
    - **[✓]** Chequeo de regresión post-cambios: las 3 cédulas siguen OK en el dominio live (89 tests).
    - **[gated]** Purga PII de prueba (`/tmp/batch` = 57 cédulas reales de clientes) → recomendado; decisión del usuario (¿se usan para entrenar el ML?).
