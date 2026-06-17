@@ -19,6 +19,7 @@ import type {
   VerifiedIdentity,
   VerifiedIdentityInput,
 } from "../../types";
+import type { GalleryEntry } from "../../modules/faceSearch";
 
 interface IdentityRow {
   id: string;
@@ -109,6 +110,46 @@ export async function getBySession(
     [tenantId, sessionId]
   );
   return res.rows[0] ? mapIdentity(res.rows[0]) : null;
+}
+
+/**
+ * Galería de embeddings para la búsqueda facial 1:N (P1 #2). Devuelve las
+ * identidades verificadas del tenant con su embedding YA decodificado a
+ * Float32Array, listo para el brute-force coseno de `searchFaces`.
+ *
+ * Reusa el biométrico que el pipeline ya persiste (`face_embedding` bytea, 512×4 =
+ * 2048 bytes): NO duplicamos el vector en otra columna. Excluye:
+ *   - la sesión consultada (`excludeSessionId`) — no compararse a sí misma;
+ *   - embeddings PURGADOS/tombstone (octet_length ≠ 2048): `purgeEmbedding` los deja
+ *     en un Buffer vacío por minimización (§12); no son comparables.
+ *
+ * Escala v1: escaneo lineal en Node (suficiente para miles por tenant). Para escala
+ * mayor, migrar a pgvector (ver nota en modules/faceSearch.ts).
+ */
+export async function listGallery(
+  tenantId: string,
+  opts: { excludeSessionId?: string; limit?: number } = {},
+  exec: Executor = pool
+): Promise<GalleryEntry[]> {
+  const res = await exec.query<
+    Pick<IdentityRow, "id" | "session_id" | "ci" | "nombre" | "face_embedding">
+  >(
+    `SELECT id, session_id, ci, nombre, face_embedding
+       FROM verified_identities
+      WHERE tenant_id = $1
+        AND ($2::uuid IS NULL OR session_id <> $2::uuid)
+        AND octet_length(face_embedding) = 2048
+      ORDER BY created_at DESC
+      LIMIT $3`,
+    [tenantId, opts.excludeSessionId ?? null, opts.limit ?? 100000]
+  );
+  return res.rows.map((r) => ({
+    identityId: r.id,
+    sessionId: r.session_id,
+    ci: r.ci,
+    name: r.nombre,
+    embedding: decodeEmbedding(r.face_embedding),
+  }));
 }
 
 export async function listByTenant(

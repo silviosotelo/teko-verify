@@ -35,6 +35,7 @@ import type {
   DocumentResult,
   EvidenceCropType,
   EvidenceType,
+  FaceSearchResult,
   LivenessChallenge,
   LivenessResult,
   MatchResult,
@@ -113,6 +114,20 @@ export interface PipelineModules {
    * invoca si el workflow tiene `aml.required`. `opts.threshold` viene del workflow.
    */
   aml?(input: AmlInput, opts?: { threshold?: number }): Promise<AmlResult>;
+  /**
+   * Búsqueda facial 1:N contra la galería de identidades verificadas del tenant
+   * (P1 #2). Opcional: sólo se invoca si el workflow tiene `faceSearch.required`.
+   * La impl excluye la sesión actual y deriva las señales dedup/returning-user.
+   */
+  faceSearch?(
+    input: {
+      query: Float32Array;
+      tenantId: string;
+      currentSessionId: string;
+      currentCi: string;
+    },
+    opts?: { threshold?: number }
+  ): Promise<FaceSearchResult>;
 }
 
 /**
@@ -143,10 +158,16 @@ export interface PipelineRepos {
       input: {
         tenantId: string;
         sessionId: string;
-        type: "quality" | "liveness" | "document" | "match" | "aml";
+        type: "quality" | "liveness" | "document" | "match" | "aml" | "face_search";
         score?: number | null;
         passed: boolean;
-        detail: QualityResult | LivenessResult | DocumentResult | MatchResult | AmlResult;
+        detail:
+          | QualityResult
+          | LivenessResult
+          | DocumentResult
+          | MatchResult
+          | AmlResult
+          | FaceSearchResult;
       },
       exec: Executor
     ): Promise<unknown>;
@@ -157,9 +178,15 @@ export interface PipelineRepos {
       exec?: Executor
     ): Promise<
       Array<{
-        type: "quality" | "liveness" | "document" | "match" | "aml";
+        type: "quality" | "liveness" | "document" | "match" | "aml" | "face_search";
         passed: boolean;
-        detail: QualityResult | LivenessResult | DocumentResult | MatchResult | AmlResult;
+        detail:
+          | QualityResult
+          | LivenessResult
+          | DocumentResult
+          | MatchResult
+          | AmlResult
+          | FaceSearchResult;
       }>
     >;
     /** Borra los checks de una sesión (idempotencia de /preview). */
@@ -326,6 +353,52 @@ async function runAml(
   if (!deps.modules.aml) return failClosed("aml_provider_unavailable");
   try {
     return await deps.modules.aml(input, { threshold: cfg.threshold });
+  } catch (e) {
+    return failClosed(e instanceof Error ? e.message : String(e));
+  }
+}
+
+/**
+ * Corre la búsqueda facial 1:N (P1 #2) SI el workflow la exige (`faceSearch.required`)
+ * y hay un embedding de selfie disponible. Devuelve undefined cuando no aplica.
+ * FAIL-CLOSED (seguridad): si el módulo no está cableado o lanza, NO se silencia como
+ * "sin duplicados" — se devuelve un resultado con `duplicateSuspected:true` + `error`,
+ * de modo que un workflow con onDuplicate:'review' igualmente rutee a revisión humana.
+ * NO es rechazo duro.
+ */
+async function runFaceSearch(
+  deps: PipelineDeps,
+  session: VerificationSession,
+  selfieEmb: Float32Array | null,
+  currentCi: string
+): Promise<FaceSearchResult | undefined> {
+  const cfg = session.workflowSnapshot?.faceSearch;
+  if (!cfg?.required) return undefined;
+  const failClosed = (error: string): FaceSearchResult => ({
+    matches: [],
+    topCosine: 0,
+    threshold: cfg.threshold ?? 0,
+    gallerySize: 0,
+    // Fail-closed: tratamos la indisponibilidad como sospecha de duplicado para que
+    // onDuplicate:'review' rutee a revisión (no dejamos pasar en silencio).
+    duplicateSuspected: true,
+    returningUser: false,
+    queryCi: currentCi,
+    passed: false,
+    error,
+  });
+  if (!deps.modules.faceSearch) return failClosed("face_search_unavailable");
+  if (!selfieEmb) return failClosed("selfie_embedding_unavailable");
+  try {
+    return await deps.modules.faceSearch(
+      {
+        query: selfieEmb,
+        tenantId: session.tenantId,
+        currentSessionId: session.id,
+        currentCi,
+      },
+      { threshold: cfg.threshold }
+    );
   } catch (e) {
     return failClosed(e instanceof Error ? e.message : String(e));
   }
@@ -503,8 +576,23 @@ export async function processSession(
     // corta el flujo: el ruteo a revisión lo decide el workflow (aml.onMatch).
     const aml = await runAml(deps, session, document);
 
+    // === 4.ter) FACE SEARCH 1:N (señal/score, NO rechazo duro) — P1 #2 ==== //
+    // Dedup/anti-fraude + returning user contra la galería del tenant. Reusa el
+    // embedding de la selfie ya computado por el match; si el workflow pide
+    // face_search sin match (raro), se computa acá. La sesión actual se excluye.
+    let faceSearch: FaceSearchResult | undefined;
+    if (session.workflowSnapshot?.faceSearch?.required) {
+      if (!selfieEmb) selfieEmb = await deps.modules.embed(images.selfie);
+      faceSearch = await runFaceSearch(
+        deps,
+        session,
+        selfieEmb,
+        extractedFrom(document)?.ci ?? ""
+      );
+    }
+
     // === 5) DECISION (fusión + LoA) ======================================= //
-    const checks: PipelineChecks = { quality, document, match: matchRes, liveness, aml };
+    const checks: PipelineChecks = { quality, document, match: matchRes, liveness, aml, faceSearch };
     const verdict = decideVerdict(checks, policy);
 
     // Persistencia atómica de checks + (si verified) identity + evidence + audit.
@@ -531,6 +619,7 @@ export async function processSession(
         match: matchRes?.cosine,
         liveness: liveness?.score,
         amlDecision: aml?.decision,
+        faceSearchDuplicate: faceSearch?.duplicateSuspected,
       })
     ) {
       return await goToReview(deps, session, result, { checks, images });
@@ -801,8 +890,10 @@ export async function computeChecks(
 
     // === 4) MATCH (NO cortocircuita) — sólo si el LoA lo exige ============= //
     let matchRes: MatchResult | undefined;
+    // El embedding de la selfie se reusa para el face search 1:N (P1 #2).
+    let selfieEmb: Float32Array | null = null;
     if (needsMatch(policy)) {
-      const selfieEmb = await deps.modules.embed(images.selfie);
+      selfieEmb = await deps.modules.embed(images.selfie);
       let docFaceEmb = document.docFaceCrop
         ? await deps.modules.embed(Buffer.from(document.docFaceCrop.base64Jpeg, "base64"))
         : null;
@@ -821,7 +912,21 @@ export async function computeChecks(
     // se intenta el cruce con lo que se haya extraído). Ver runAml (fail-closed).
     const aml = await runAml(deps, session, document);
 
-    const checks: PipelineChecks = { quality, document, match: matchRes, liveness, aml };
+    // FACE SEARCH 1:N (señal/score, NO rechazo duro) — P1 #2. Dedup/anti-fraude +
+    // returning user. Reusa el embedding de la selfie del match; si el workflow pide
+    // face_search sin match (raro), se computa acá. Ver runFaceSearch (fail-closed).
+    let faceSearch: FaceSearchResult | undefined;
+    if (session.workflowSnapshot?.faceSearch?.required) {
+      if (!selfieEmb) selfieEmb = await deps.modules.embed(images.selfie);
+      faceSearch = await runFaceSearch(
+        deps,
+        session,
+        selfieEmb,
+        extractedFrom(document)?.ci ?? ""
+      );
+    }
+
+    const checks: PipelineChecks = { quality, document, match: matchRes, liveness, aml, faceSearch };
 
     // Persistencia: checks (reemplazando previos) + evidencia + recortes → estado 'review'.
     await deps.withTransaction(async (tx) => {
@@ -882,6 +987,7 @@ export async function finalizeFromChecks(
     const match = byType.get("match")?.detail as MatchResult | undefined;
     const liveness = byType.get("liveness")?.detail as LivenessResult | undefined;
     const aml = byType.get("aml")?.detail as AmlResult | undefined;
+    const faceSearch = byType.get("face_search")?.detail as FaceSearchResult | undefined;
     if (!quality || !document) {
       // Sin checks base no se puede decidir → fail-closed (rechazo).
       const result: SessionResult = { decision: "rejected", loa: "L0", reasons: ["missing_checks"] };
@@ -901,7 +1007,7 @@ export async function finalizeFromChecks(
       return { state: "rejected", result, reasons: result.reasons };
     }
 
-    const checks: PipelineChecks = { quality, document, match, liveness, aml };
+    const checks: PipelineChecks = { quality, document, match, liveness, aml, faceSearch };
     const verdict = decideVerdict(checks, policy);
     const result: SessionResult = {
       decision: verdict.verdict,
@@ -918,6 +1024,7 @@ export async function finalizeFromChecks(
         match: match?.cosine,
         liveness: liveness?.score,
         amlDecision: aml?.decision,
+        faceSearchDuplicate: faceSearch?.duplicateSuspected,
       })
     ) {
       return await goToReview(deps, session, result, {});
@@ -1048,6 +1155,19 @@ async function persistAllChecks(
   if (checks.aml) {
     await deps.repos.checks.create(
       { tenantId, sessionId, type: "aml", score: checks.aml.topScore, passed: checks.aml.passed, detail: checks.aml },
+      tx
+    );
+  }
+  if (checks.faceSearch) {
+    await deps.repos.checks.create(
+      {
+        tenantId,
+        sessionId,
+        type: "face_search",
+        score: checks.faceSearch.topCosine,
+        passed: checks.faceSearch.passed,
+        detail: checks.faceSearch,
+      },
       tx
     );
   }

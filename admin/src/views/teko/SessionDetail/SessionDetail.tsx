@@ -32,6 +32,8 @@ import {
     TbCircleCheck,
     TbDeviceDesktop,
     TbRobot,
+    TbUsers,
+    TbExternalLink,
 } from 'react-icons/tb'
 import Card from '@/components/ui/Card'
 import Spinner from '@/components/ui/Spinner'
@@ -55,6 +57,7 @@ import type {
     DeviceIpAnalysis,
     EvidenceType,
     ExtractedDocument,
+    FaceSearchResult,
     ParsedDevice,
     RiskSeverity,
     SessionDetail,
@@ -370,7 +373,7 @@ function LivenessVideoCard({
 
 // Pestañas navegables del detalle (P0 #3 añade Eventos + Device & IP funcionales;
 // P1 #1 añade AML / Sanciones).
-type TabKey = 'overview' | 'events' | 'device' | 'aml'
+type TabKey = 'overview' | 'events' | 'device' | 'aml' | 'face_search'
 
 type ModuleDef = {
     key: string
@@ -389,6 +392,12 @@ const MODULE_ROW: ModuleDef[] = [
     { key: 'match', label: 'Face Match', type: 'match' },
     { key: 'quality', label: 'Calidad', type: 'quality' },
     { key: 'aml', label: 'AML / Sanciones', type: null, tab: 'aml' },
+    {
+        key: 'face_search',
+        label: 'Coincidencias faciales',
+        type: null,
+        tab: 'face_search',
+    },
     { key: 'events', label: 'Eventos', type: null, tab: 'events' },
     { key: 'device', label: 'Device & IP', type: null, tab: 'device' },
 ]
@@ -413,7 +422,9 @@ function ModuleTab({
                   ? TbDeviceMobile
                   : def.tab === 'aml'
                     ? TbGavel
-                    : TbShieldCheck
+                    : def.tab === 'face_search'
+                      ? TbUsers
+                      : TbShieldCheck
         return (
             <button
                 type="button"
@@ -943,6 +954,211 @@ function AmlPanel({ aml }: { aml: AmlResult | undefined }) {
 }
 
 // ----------------------------------------------------------------------------
+// Panel Coincidencias faciales 1:N (P1 #2)
+// ----------------------------------------------------------------------------
+
+/** Miniatura de la selfie de una identidad encontrada en la galería (1:N). */
+function MatchThumb({
+    tenantId,
+    sessionId,
+}: {
+    tenantId: string
+    sessionId: string
+}) {
+    const [url, setUrl] = useState<string | null>(null)
+    const [error, setError] = useState(false)
+
+    useEffect(() => {
+        let revoked: string | null = null
+        let alive = true
+        setError(false)
+        // Intenta la selfie; si no, la foto del documento de esa identidad.
+        tekoApi
+            .evidenceBlob(tenantId, sessionId, 'selfie')
+            .catch(() => tekoApi.evidenceBlob(tenantId, sessionId, 'doc_front'))
+            .then((blob) => {
+                if (!alive) return
+                const u = URL.createObjectURL(blob)
+                revoked = u
+                setUrl(u)
+            })
+            .catch(() => alive && setError(true))
+        return () => {
+            alive = false
+            if (revoked) URL.revokeObjectURL(revoked)
+        }
+    }, [tenantId, sessionId])
+
+    return (
+        <div className="h-16 w-16 shrink-0 overflow-hidden rounded-lg border border-gray-200 bg-gray-100 dark:border-gray-700 dark:bg-gray-700">
+            {error || !url ? (
+                <span className="flex h-full items-center justify-center px-1 text-center text-[9px] text-gray-400">
+                    s/foto
+                </span>
+            ) : (
+                <img src={url} alt="match" className="h-full w-full object-cover" />
+            )}
+        </div>
+    )
+}
+
+/**
+ * Panel "Coincidencias faciales (1:N)": resultado de la búsqueda contra la galería
+ * de identidades verificadas (P1 #2). Muestra el estado (duplicado / usuario
+ * recurrente / sin coincidencias) y la lista de matches con miniatura, coseno,
+ * CI/nombre, badge de duplicado-CI-distinto vs usuario recurrente, y link a la
+ * sesión encontrada. On-prem: la biometría nunca salió del server.
+ */
+function FaceMatchesPanel({
+    fs,
+    tenantId,
+}: {
+    fs: FaceSearchResult | undefined
+    tenantId: string
+}) {
+    if (!fs) {
+        return (
+            <Card>
+                <p className="text-sm text-gray-400">
+                    La búsqueda facial 1:N no corrió en esta sesión (el workflow no
+                    tiene el check{' '}
+                    <span className="font-mono">face_search</span> activo).
+                </p>
+            </Card>
+        )
+    }
+    const banner = fs.duplicateSuspected
+        ? {
+              label: 'POSIBLE DUPLICADO',
+              cls: 'bg-red-50 text-red-700 ring-red-200 dark:bg-red-500/10 dark:text-red-300 dark:ring-red-500/30',
+              icon: <TbAlertTriangle className="text-sm" />,
+          }
+        : fs.returningUser
+          ? {
+                label: 'USUARIO RECURRENTE',
+                cls: 'bg-sky-50 text-sky-700 ring-sky-200 dark:bg-sky-500/10 dark:text-sky-300 dark:ring-sky-500/30',
+                icon: <TbUsers className="text-sm" />,
+            }
+          : {
+                label: 'SIN COINCIDENCIAS',
+                cls: 'bg-emerald-50 text-emerald-700 ring-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-300 dark:ring-emerald-500/30',
+                icon: <TbCircleCheck className="text-sm" />,
+            }
+    return (
+        <div className="space-y-4">
+            <Card>
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                        <h6 className="text-sm font-semibold heading-text">
+                            Búsqueda facial 1:N (dedup / anti-fraude)
+                        </h6>
+                        <p className="mt-1 text-xs text-gray-400">
+                            La cara se comparó contra {fs.gallerySize} identidad
+                            {fs.gallerySize === 1 ? '' : 'es'} verificada
+                            {fs.gallerySize === 1 ? '' : 's'} del tenant (excluida
+                            esta sesión). On-prem: la biometría no salió del server.
+                        </p>
+                    </div>
+                    <span
+                        className={`inline-flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-bold uppercase tracking-wide ring-1 ${banner.cls}`}
+                    >
+                        {banner.icon}
+                        {banner.label}
+                    </span>
+                </div>
+                <dl className="mt-4 grid grid-cols-2 gap-x-8 gap-y-2 text-sm sm:grid-cols-4">
+                    <div>
+                        <dt className="text-gray-400">Top coseno</dt>
+                        <dd className="font-mono font-semibold heading-text">
+                            {fs.topCosine.toFixed(3)}
+                        </dd>
+                    </div>
+                    <div>
+                        <dt className="text-gray-400">Umbral</dt>
+                        <dd className="font-mono font-semibold heading-text">
+                            {fs.threshold.toFixed(2)}
+                        </dd>
+                    </div>
+                    <div>
+                        <dt className="text-gray-400">Matches</dt>
+                        <dd className="font-semibold heading-text">
+                            {fs.matches.length}
+                        </dd>
+                    </div>
+                    <div>
+                        <dt className="text-gray-400">CI consultado</dt>
+                        <dd className="font-mono font-medium heading-text">
+                            {fs.queryCi || '—'}
+                        </dd>
+                    </div>
+                </dl>
+                {fs.error && (
+                    <div className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-700 dark:bg-red-500/10 dark:text-red-300">
+                        Búsqueda no disponible ({fs.error}). Por seguridad
+                        (fail-closed) se trató como posible duplicado.
+                    </div>
+                )}
+            </Card>
+
+            {fs.matches.length > 0 && (
+                <Card>
+                    <h6 className="mb-3 text-sm font-semibold heading-text">
+                        Coincidencias
+                    </h6>
+                    <ul className="space-y-3">
+                        {fs.matches.map((m) => (
+                            <li
+                                key={m.identityId}
+                                className="flex items-center gap-3 rounded-lg border border-gray-200 p-3 dark:border-gray-700"
+                            >
+                                <MatchThumb
+                                    tenantId={tenantId}
+                                    sessionId={m.sessionId}
+                                />
+                                <div className="min-w-0 flex-1">
+                                    <div className="flex flex-wrap items-center gap-2">
+                                        <span className="truncate text-sm font-semibold heading-text">
+                                            {m.name || '—'}
+                                        </span>
+                                        {m.ciMismatch ? (
+                                            <span className="inline-flex items-center gap-1 rounded-full bg-red-50 px-2 py-0.5 text-[10px] font-bold uppercase text-red-700 ring-1 ring-red-200 dark:bg-red-500/10 dark:text-red-300">
+                                                <TbAlertTriangle className="text-[11px]" />
+                                                CI distinto
+                                            </span>
+                                        ) : (
+                                            <span className="inline-flex items-center gap-1 rounded-full bg-sky-50 px-2 py-0.5 text-[10px] font-bold uppercase text-sky-700 ring-1 ring-sky-200 dark:bg-sky-500/10 dark:text-sky-300">
+                                                <TbUsers className="text-[11px]" />
+                                                Usuario recurrente
+                                            </span>
+                                        )}
+                                    </div>
+                                    <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-gray-500 dark:text-gray-400">
+                                        <span className="font-mono">
+                                            CI {m.ci || '—'}
+                                        </span>
+                                        <span className="font-mono">
+                                            coseno {m.cosine.toFixed(3)}
+                                        </span>
+                                    </div>
+                                </div>
+                                <Link
+                                    to={`/sessions/${m.sessionId}`}
+                                    title="Abrir la sesión de esta identidad"
+                                    className="inline-flex items-center gap-1 rounded-lg border border-gray-200 px-2.5 py-1.5 text-xs font-medium text-gray-600 transition hover:border-emerald-400 hover:text-emerald-600 dark:border-gray-700 dark:text-gray-300"
+                                >
+                                    Ver sesión
+                                    <TbExternalLink className="text-sm" />
+                                </Link>
+                            </li>
+                        ))}
+                    </ul>
+                </Card>
+            )}
+        </div>
+    )
+}
+
+// ----------------------------------------------------------------------------
 // Campo editable de "Datos personales"
 // ----------------------------------------------------------------------------
 
@@ -1129,6 +1345,9 @@ const SessionDetailView = () => {
     const checkByType = (t: CheckType) => data.checks.find((c) => c.type === t)
     const docCheck = checkByType('document')
     const amlResult = checkByType('aml')?.detail as AmlResult | undefined
+    const faceSearchResult = checkByType('face_search')?.detail as
+        | FaceSearchResult
+        | undefined
     const reasons = data.result?.reasons ?? []
     const fullName =
         [form.firstName, form.lastName].filter(Boolean).join(' ').trim() ||
@@ -1259,7 +1478,17 @@ const SessionDetailView = () => {
                                                   amlResult?.decision ===
                                                   'potential_match',
                                           }
-                                        : def
+                                        : def.tab === 'face_search'
+                                          ? {
+                                                ...def,
+                                                badge:
+                                                    faceSearchResult?.matches
+                                                        .length ?? 0,
+                                                danger:
+                                                    faceSearchResult?.duplicateSuspected ===
+                                                    true,
+                                            }
+                                          : def
                             return (
                                 <ModuleTab
                                     key={def.key}
@@ -1349,6 +1578,14 @@ const SessionDetailView = () => {
 
             {/* ---------- Pestaña AML / Sanciones ---------- */}
             {activeTab === 'aml' && <AmlPanel aml={amlResult} />}
+
+            {/* ---------- Pestaña Coincidencias faciales (1:N) ---------- */}
+            {activeTab === 'face_search' && (
+                <FaceMatchesPanel
+                    fs={faceSearchResult}
+                    tenantId={data.tenantId}
+                />
+            )}
 
             {/* ---------- Pestaña Overview (contenido por defecto) ---------- */}
             {activeTab === 'overview' && (

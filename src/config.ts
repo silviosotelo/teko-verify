@@ -129,6 +129,20 @@ export const AML_MATCH_THRESHOLD = parseFloat(
   process.env.AML_MATCH_THRESHOLD || "0.85"
 );
 
+/**
+ * Umbral coseno (0..1) para que la búsqueda 1:N (face_search, P1 #2) considere a
+ * una identidad de la galería como la MISMA cara (dedup/anti-fraude + returning
+ * user). Es DISTINTO y más alto que el 1:1 (MATCH_THRESHOLD=0.40): el 1:1 compara
+ * selfie vs su propia foto del documento (mismo individuo garantizado, sólo se
+ * verifica que no sea otra persona), mientras que 1:N busca colisiones contra
+ * TODA la galería, donde un umbral bajo inundaría de falsos positivos. Default
+ * 0.55 (ArcFace: misma persona suele dar >0.5; distintas <0.4). Calibrable por env;
+ * el workflow puede sobreescribirlo por sesión (def.faceSearch.threshold).
+ */
+export const FACE_SEARCH_THRESHOLD = parseFloat(
+  process.env.FACE_SEARCH_THRESHOLD || "0.55"
+);
+
 // ---------------------------------------------------------------------------
 // Contrato heredado del engine de v9 — NO MODIFICAR VALORES
 // ---------------------------------------------------------------------------

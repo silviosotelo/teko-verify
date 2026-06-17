@@ -54,7 +54,13 @@ export type SessionState =
 export type DecisionVerdict = "verified" | "rejected" | "needs_recapture";
 
 /** Tipo de check granular auditable — §5 (verification_checks.tipo). */
-export type CheckType = "quality" | "liveness" | "document" | "match" | "aml";
+export type CheckType =
+  | "quality"
+  | "liveness"
+  | "document"
+  | "match"
+  | "aml"
+  | "face_search";
 
 /**
  * Tipo de evidencia almacenada — §5 (evidence.tipo).
@@ -374,6 +380,68 @@ export interface PipelineChecks {
    * `aml.onMatch`. Sólo corre cuando el workflow tiene `aml.required`.
    */
   aml?: AmlResult;
+  /**
+   * Búsqueda facial 1:N contra la galería de identidades verificadas (P1 #2). NO
+   * la consume `decision()` (no es rechazo duro): es señal/score. El ruteo a
+   * revisión humana ante un duplicado (cara conocida con CI distinto) lo decide el
+   * workflow vía `faceSearch.onDuplicate`. Sólo corre con `faceSearch.required`.
+   */
+  faceSearch?: FaceSearchResult;
+}
+
+// ============================================================================ //
+// 2.ter MÓDULO FACE SEARCH — dedup/anti-fraude 1:N + KYC reusable (P1 #2)
+// ============================================================================ //
+
+/** Un match 1:N: una identidad de la galería que se parece a la cara consultada. */
+export interface FaceSearchMatch {
+  /** id de la verified_identity encontrada. */
+  identityId: string;
+  /** Sesión que generó esa identidad (para link + miniatura en el admin). */
+  sessionId: string;
+  ci: string;
+  name: string;
+  /** Similitud coseno 0..1 (embeddings L2-normalizados → producto punto). */
+  cosine: number;
+  /**
+   * true si el CI de esta identidad es DISTINTO al de la sesión consultada → señal
+   * fuerte de duplicado/fraude (misma cara con otra identidad). false = mismo CI
+   * (usuario recurrente / KYC reusable).
+   */
+  ciMismatch: boolean;
+}
+
+/**
+ * Resultado de la búsqueda facial 1:N (P1 #2) — se persiste como check `face_search`.
+ * Señal/score, NUNCA rechazo duro (fail-closed lo maneja el pipeline). Dos señales:
+ *   - `duplicateSuspected`: hay match(es) sobre umbral con CI DISTINTO → posible
+ *     misma persona con otra identidad → según workflow rutea a in_review.
+ *   - `returningUser`: hay match con el MISMO CI → usuario recurrente; expone la
+ *     verificación previa (no fuerza re-KYC).
+ */
+export interface FaceSearchResult {
+  /** Matches sobre el umbral, ordenados por cosine desc (top primero). */
+  matches: FaceSearchMatch[];
+  /** Coseno del mejor match (0 si no hay matches). */
+  topCosine: number;
+  /** Umbral 1:N aplicado (auditable). */
+  threshold: number;
+  /** Tamaño de la galería comparada (identidades del tenant, excluida la sesión). */
+  gallerySize: number;
+  /** Hay ≥1 match con CI distinto → posible duplicado/fraude (señal a revisar). */
+  duplicateSuspected: boolean;
+  /** Hay ≥1 match con el mismo CI → usuario recurrente (KYC reusable). */
+  returningUser: boolean;
+  /** CI consultado (de la sesión actual), para auditoría del cruce. */
+  queryCi: string;
+  /**
+   * true (clear) si NO hay sospecha de duplicado — informativo para la columna
+   * `passed` del check. NO afecta decision() (no es rechazo duro). returningUser
+   * con mismo CI sigue siendo `passed=true` (no es un problema).
+   */
+  passed: boolean;
+  /** Si la búsqueda no pudo correr (fail-closed → duplicateSuspected=true). */
+  error?: string;
 }
 
 // ============================================================================ //
@@ -516,6 +584,18 @@ export interface WorkflowDefinition {
    * persiste el hallazgo (sin frenar la auto-decisión). NO es rechazo duro.
    */
   aml?: { required: boolean; threshold?: number; onMatch?: "review" | "flag" };
+  /**
+   * Búsqueda facial 1:N contra la galería de identidades verificadas (P1 #2).
+   * `required` = el check corre tras el match 1:1. `threshold` = coseno mínimo para
+   * considerar a una identidad como la misma cara. `onDuplicate` = qué hacer ante un
+   * duplicado (cara conocida con CI DISTINTO): 'review' rutea a la cola de revisión
+   * humana; 'flag' sólo persiste el hallazgo. NO es rechazo duro.
+   */
+  faceSearch?: {
+    required: boolean;
+    threshold?: number;
+    onDuplicate?: "review" | "flag";
+  };
   review?: {
     mode: ReviewMode;
     /** Para on_borderline: bandas de score [min,max] que disparan revisión humana. */
@@ -631,7 +711,8 @@ export type CheckDetail =
   | LivenessResult
   | DocumentResult
   | MatchResult
-  | AmlResult;
+  | AmlResult
+  | FaceSearchResult;
 
 /** verification_checks — resultado granular por módulo, auditable (§5). */
 export interface VerificationCheck {

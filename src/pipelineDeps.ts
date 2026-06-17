@@ -16,6 +16,7 @@ import { webhookSender } from "./lib/webhook";
 import { OCR_SIDECAR_URL } from "./config";
 import { screen as amlScreen } from "./modules/aml";
 import { createLocalAmlProvider } from "./modules/amlProvider";
+import { runFaceSearch as faceSearch1N } from "./modules/faceSearch";
 import type { DocCropper, PipelineDeps, PipelineModules } from "./pipeline";
 
 /**
@@ -85,6 +86,19 @@ const modules: PipelineModules = {
   // el nombre del titular sólo viaja a la propia DB del 34, nunca a un tercero.
   aml: (input, opts) =>
     amlScreen(input, localAmlProvider, { threshold: opts?.threshold }),
+  // Búsqueda facial 1:N (P1 #2): dedup/anti-fraude + returning user contra la galería
+  // de `verified_identities` del tenant (reusa el embedding 512D ya persistido). El
+  // provider lee la galería (excluyendo la sesión actual) y el matching brute-force
+  // coseno corre en Node. On-prem: la biometría nunca sale del server.
+  faceSearch: (input, opts) =>
+    faceSearch1N(
+      input,
+      {
+        gallery: (tenantId, excludeSessionId) =>
+          repos.identities.listGallery(tenantId, { excludeSessionId }),
+      },
+      { threshold: opts?.threshold }
+    ),
 };
 
 /** Dependencias reales listas para inyectar en processSession(). */

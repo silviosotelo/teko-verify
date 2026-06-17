@@ -103,7 +103,13 @@ function inBand(v: number | undefined, min?: number, max?: number): boolean {
  */
 export function shouldRouteToReview(
   def: WorkflowDefinition | null | undefined,
-  scores: { match?: number; liveness?: number; amlDecision?: "clear" | "potential_match" }
+  scores: {
+    match?: number;
+    liveness?: number;
+    amlDecision?: "clear" | "potential_match";
+    /** Búsqueda 1:N (P1 #2): la cara matcheó una identidad con CI distinto. */
+    faceSearchDuplicate?: boolean;
+  }
 ): boolean {
   if (!def) return false;
   // Ruteo por AML: un potential_match con onMatch:'review' va a revisión SIEMPRE,
@@ -112,6 +118,17 @@ export function shouldRouteToReview(
     def.aml?.required &&
     def.aml.onMatch === "review" &&
     scores.amlDecision === "potential_match"
+  ) {
+    return true;
+  }
+  // Ruteo por FACE SEARCH (P1 #2): un duplicado (cara conocida con CI distinto) con
+  // onDuplicate:'review' va a revisión SIEMPRE (posible misma persona con otra
+  // identidad). Con 'flag' (default) sólo se persiste el hallazgo. El returning user
+  // (mismo CI) NO rutea: no es duplicado, es el mismo titular re-verificándose.
+  if (
+    def.faceSearch?.required &&
+    def.faceSearch.onDuplicate === "review" &&
+    scores.faceSearchDuplicate === true
   ) {
     return true;
   }

@@ -18,7 +18,13 @@ export type SessionState =
 export type LoA = 'L0' | 'L1' | 'L2' | 'L3' | 'L4'
 export type TenantStatus = 'active' | 'suspended' | 'disabled'
 export type ApiKeyStatus = 'active' | 'revoked'
-export type CheckType = 'quality' | 'liveness' | 'document' | 'match' | 'aml'
+export type CheckType =
+    | 'quality'
+    | 'liveness'
+    | 'document'
+    | 'match'
+    | 'aml'
+    | 'face_search'
 
 // ---- AML / Sanciones / PEP (P1 #1) ----
 export type AmlDecision = 'clear' | 'potential_match'
@@ -50,6 +56,29 @@ export interface AmlResult {
     passed: boolean
     error?: string
 }
+// ---- Face Search 1:N — dedup/anti-fraude + KYC reusable (P1 #2) ----
+export interface FaceSearchMatch {
+    identityId: string
+    sessionId: string
+    ci: string
+    name: string
+    cosine: number
+    // true = CI distinto al de la sesión (duplicado/fraude); false = mismo CI (returning user).
+    ciMismatch: boolean
+}
+
+export interface FaceSearchResult {
+    matches: FaceSearchMatch[]
+    topCosine: number
+    threshold: number
+    gallerySize: number
+    duplicateSuspected: boolean
+    returningUser: boolean
+    queryCi: string
+    passed: boolean
+    error?: string
+}
+
 export type EvidenceType =
     | 'selfie'
     | 'doc_front'
