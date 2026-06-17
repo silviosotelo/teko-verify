@@ -44,11 +44,17 @@ export const SAMPLE_H = 202 // ~1.586:1, el mismo aspecto del recuadro guía
 const GUIDE_INSET = 0.08
 
 // --- Umbrales de gating (calibrables) --------------------------------------
-const AREA_FILL_MIN = 0.55
-const CORNER_TOL = 0.22
+// AFLOJADO (2026-06-17): el documento SÍ pasaba el pipeline (0.946) pero al
+// usuario le costaba mucho llegar al "good" (mano temblorosa, ángulo, márgenes).
+// Bajamos el fill mínimo y ampliamos la tolerancia de esquinas y de proporción
+// para que encuadre más fácil. El anti-"no-documento" se mantiene INTACTO: sigue
+// exigiendo un cuadrilátero CONVEXO, que NO toca los bordes (EDGE_INSET_MIN) y con
+// área de contorno significativa (MIN_CONTOUR_AREA) — un teclado/pared no dispara.
+const AREA_FILL_MIN = 0.42
+const CORNER_TOL = 0.32
 const EDGE_INSET_MIN = 0.035
 const ASPECT_TARGET = 1.585
-const ASPECT_TOL = 0.45
+const ASPECT_TOL = 0.55
 const BLUR_VAR = 55
 const DARK_MEAN = 55
 const GLARE_HOT = 0.16

@@ -7,6 +7,7 @@
  */
 import { describe, it, expect } from "vitest";
 import { softmax, ensembleRealProb } from "./liveness";
+import { LIVENESS_THRESHOLD } from "../config";
 
 describe("softmax", () => {
   it("normaliza a una distribución que suma 1", () => {
@@ -51,5 +52,35 @@ describe("ensembleRealProb", () => {
     // distribuciones de distinta longitud: una de 2 (escalar mapeado) y otra de 3.
     const r = ensembleRealProb([[0.2, 0.8], [0.1, 0.6, 0.3]]);
     expect(r).toBeCloseTo((0.8 + 0.6) / 2, 6);
+  });
+});
+
+/**
+ * Calibración del umbral (ver docs/liveness-calibration.md). Estos tests fijan la
+ * decisión de separación basada en los scores REALES medidos del ensemble:
+ *   - piso genuino (rostro vivo) = 0.6867
+ *   - cúmulo de spoofs realistas (cédula/print como selfie) ≤ 0.3166
+ * El umbral 0.60 pasa el piso genuino y rechaza el cúmulo de spoofs. Si alguien
+ * sube el umbral por encima de 0.6867, este test FALLA avisando que se vuelve a
+ * falso-rechazar al usuario genuino de la sesión 5c9b4817.
+ */
+describe("calibración LIVENESS_THRESHOLD (interina, datos en docs/)", () => {
+  const GENUINE_FLOOR = 0.6867; // sesión 5c9b4817 (rostro vivo confirmado)
+  const SPOOF_CLUSTER_MAX = 0.3166; // peor spoof realista medido (cédula como selfie)
+  const pass = (score: number) => score >= LIVENESS_THRESHOLD;
+
+  it("el default no falso-rechaza el piso genuino (0.6867)", () => {
+    expect(pass(GENUINE_FLOOR)).toBe(true);
+    expect(LIVENESS_THRESHOLD).toBeLessThanOrEqual(GENUINE_FLOOR);
+  });
+
+  it("rechaza el cúmulo de spoofs realistas (≤ 0.3166)", () => {
+    expect(pass(SPOOF_CLUSTER_MAX)).toBe(false);
+    expect(LIVENESS_THRESHOLD).toBeGreaterThan(SPOOF_CLUSTER_MAX);
+  });
+
+  it("el umbral cae en la banda segura (0.3166, 0.6867]", () => {
+    expect(LIVENESS_THRESHOLD).toBeGreaterThan(SPOOF_CLUSTER_MAX);
+    expect(LIVENESS_THRESHOLD).toBeLessThanOrEqual(GENUINE_FLOOR);
   });
 });

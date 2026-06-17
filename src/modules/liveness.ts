@@ -215,6 +215,11 @@ export class LivenessModule {
    * un set etiquetado de spoofs reales (no lo tenemos; un escaneo limpio de cédula
    * lo clasifican "real" hasta el ensemble de referencia, porque MiniFASNet detecta
    * TEXTURA de pantalla/impresión, ausente en una foto de documento nítida). Ver §13.
+   *
+   * CALIBRACIÓN INTERINA (2026-06-17): se midió el ensemble real sobre la evidencia
+   * disponible y se bajó LIVENESS_THRESHOLD 0.70 → 0.60 para no falso-rechazar
+   * genuinos (piso genuino 0.6867 vs cúmulo de spoofs ≤0.3166). Detalle y datos en
+   * docs/liveness-calibration.md.
    */
   private async padScore(selfie: Buffer, face: Face): Promise<number | null> {
     if (!this.padLoaded || this.padModels.length === 0) return null;

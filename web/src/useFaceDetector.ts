@@ -27,6 +27,70 @@ import {
 const WASM_PATH = `${import.meta.env.BASE_URL}mediapipe/wasm`
 const MODEL_PATH = `${import.meta.env.BASE_URL}mediapipe/blaze_face_short_range.tflite`
 
+/**
+ * Singleton del FaceDetector COMPARTIDO por toda la sesión del wizard.
+ *
+ * El arranque (wasm + tflite + delegate GPU/CPU) es lo que hacía que la selfie
+ * "tardara mucho en iniciar". Lo cacheamos en un promise a nivel de módulo para:
+ *   1) PRECARGARLO antes (warmupFaceDetector(), invocado en "Preparate para la
+ *      cámara") en paralelo, de modo que al llegar a la selfie ya esté listo.
+ *   2) Reusarlo entre montajes del hook sin recrearlo.
+ * Devuelve null si MediaPipe no carga (offline/sin WebGL): el hook degrada a botón
+ * manual. NO se cierra al desmontar (la sesión es corta y de un solo uso); así un
+ * remount de la selfie no paga de nuevo el arranque. detectForVideo exige
+ * timestamps crecientes y performance.now() es monotónico global → reuso seguro.
+ */
+let sharedDetectorPromise: Promise<FaceDetector | null> | null = null
+
+async function createDetector(): Promise<FaceDetector | null> {
+  const fileset = await FilesetResolver.forVisionTasks(WASM_PATH).catch((e) => {
+    console.warn("[teko] FilesetResolver falló:", e)
+    return null
+  })
+  if (!fileset) return null
+  // Intentamos GPU (rápido) y si el delegate no inicializa (WebGL ausente en
+  // headless / algunos teléfonos), reintentamos con CPU antes de degradar a
+  // modo manual. Así el gating facial sigue activo aunque no haya GPU.
+  const make = (delegate: "GPU" | "CPU") =>
+    FaceDetector.createFromOptions(fileset, {
+      baseOptions: { modelAssetPath: MODEL_PATH, delegate },
+      runningMode: "VIDEO",
+      minDetectionConfidence: 0.45,
+    })
+  try {
+    return await make("GPU")
+  } catch (e) {
+    console.warn("[teko] FaceDetector GPU falló, reintento CPU:", e)
+    try {
+      return await make("CPU")
+    } catch (e2) {
+      console.warn("[teko] FaceDetector no disponible (CPU también):", e2)
+      return null
+    }
+  }
+}
+
+/** Devuelve (creando una sola vez) el FaceDetector compartido de la sesión. */
+function getSharedDetector(): Promise<FaceDetector | null> {
+  if (!sharedDetectorPromise) {
+    sharedDetectorPromise = createDetector().catch((e) => {
+      console.warn("[teko] getSharedDetector falló:", e)
+      return null
+    })
+  }
+  return sharedDetectorPromise
+}
+
+/**
+ * Precarga el FaceDetector EN PARALELO (idempotente). Llamala en la pantalla
+ * previa a la selfie ("Preparate para la cámara") para que el arranque del modelo
+ * (wasm + tflite + delegate) ocurra mientras el usuario lee los tips, y la selfie
+ * inicie sin la espera fría. Fire-and-forget: ignora el resultado.
+ */
+export function warmupFaceDetector(): void {
+  void getSharedDetector()
+}
+
 export type FrameVerdict =
   | "loading" // cargando modelo
   | "no-camera" // el video aún no tiene frames
@@ -160,65 +224,30 @@ export function useFaceDetector(
   // Canvas chico para medir luma media del frame (brillo).
   const lumaCanvasRef = useRef<HTMLCanvasElement | null>(null)
 
-  // Carga perezosa del modelo (una vez).
+  // Toma el detector COMPARTIDO (ya precargado por warmupFaceDetector() en la
+  // pantalla previa, idealmente). Si ya está listo, status pasa a "ready" casi
+  // de inmediato — la selfie no paga el arranque frío. NO cerramos el detector al
+  // desmontar: es un singleton de sesión reusable (ver getSharedDetector).
   useEffect(() => {
     aliveRef.current = true
     let cancelled = false
-    async function load() {
-      const fileset = await FilesetResolver.forVisionTasks(WASM_PATH).catch(
-        (e) => {
-          console.warn("[teko] FilesetResolver falló:", e)
-          return null
-        },
-      )
-      if (!fileset) {
-        if (!cancelled) setStatus("unavailable")
-        return
-      }
-      // Intentamos GPU (rápido) y si el delegate no inicializa (WebGL ausente en
-      // headless / algunos teléfonos), reintentamos con CPU antes de degradar a
-      // modo manual. Así el gating facial sigue activo aunque no haya GPU.
-      const make = (delegate: "GPU" | "CPU") =>
-        FaceDetector.createFromOptions(fileset, {
-          baseOptions: { modelAssetPath: MODEL_PATH, delegate },
-          runningMode: "VIDEO",
-          minDetectionConfidence: 0.45,
-        })
-      let det: FaceDetector | null = null
-      try {
-        det = await make("GPU")
-      } catch (e) {
-        console.warn("[teko] FaceDetector GPU falló, reintento CPU:", e)
-        try {
-          det = await make("CPU")
-        } catch (e2) {
-          console.warn("[teko] FaceDetector no disponible (CPU también):", e2)
-        }
-      }
+    void getSharedDetector().then((det) => {
+      if (cancelled) return
       if (!det) {
-        if (!cancelled) setStatus("unavailable")
-        return
-      }
-      if (cancelled) {
-        det.close()
+        setStatus("unavailable")
         return
       }
       detectorRef.current = det
       setStatus("ready")
-    }
-    void load()
+    })
     return () => {
       cancelled = true
       aliveRef.current = false
       if (rafRef.current != null) cancelAnimationFrame(rafRef.current)
       rafRef.current = null
-      const d = detectorRef.current
+      // El detector es compartido: sólo soltamos la referencia local, no lo
+      // cerramos (otro montaje de la selfie lo reusa sin re-arranque).
       detectorRef.current = null
-      try {
-        d?.close()
-      } catch {
-        /* noop */
-      }
     }
   }, [])
 

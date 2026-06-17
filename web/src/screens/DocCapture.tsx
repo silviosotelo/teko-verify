@@ -9,8 +9,11 @@ import { Prepare } from "./Prepare"
 import { DocSubmitted } from "./DocSubmitted"
 import { DocHero, IconFrame, IconSun, IconNoGlare } from "../Icons"
 
-// El documento debe quedar VÁLIDO y estable ~1.5s antes de la cuenta regresiva.
-const STABLE_MS = 1500
+// El documento debe quedar VÁLIDO y estable antes de la cuenta regresiva.
+// AFLOJADO (2026-06-17): 1500 → 800 ms. Con el gating de docAnalyze ya relajado,
+// pedir menos estabilidad hace que el encuadre "agarre" más rápido sin sacrificar
+// el anti-falso-positivo (el quad debe ser válido, no sólo presente, esos 800 ms).
+const STABLE_MS = 800
 const COUNTDOWN = [3, 2, 1]
 // Enfriamiento tras una captura RECHAZADA: nunca re-disparamos antes de esto.
 const COOLDOWN_MS = 1200

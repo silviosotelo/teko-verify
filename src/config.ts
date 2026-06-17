@@ -90,9 +90,30 @@ export const TOKEN_TTL_MIN = parseInt(process.env.TOKEN_TTL_MIN || "15", 10);
  */
 export const MATCH_THRESHOLD = parseFloat(process.env.MATCH_THRESHOLD || "0.40");
 
-/** Umbral de score de liveness/PAD para considerar "persona viva". */
+/**
+ * Umbral de score de liveness/PAD para considerar "persona viva".
+ *
+ * CALIBRACIÓN INTERINA (2026-06-17): el default baja de 0.70 → 0.60 para frenar
+ * el FALSO RECHAZO de usuarios genuinos en vivo. Se midió el ENSEMBLE PAD real de
+ * producción sobre la evidencia disponible (ver docs/liveness-calibration.md):
+ *   - Selfies GENUINAS (rostro vivo, confirmadas visualmente): piso 0.6867, resto ≥0.89.
+ *   - Proxies de SPOOF realistas (cédula impresa/foto de documento como selfie):
+ *     ≤0.3166, la mayoría <0.05.
+ * Un umbral de 0.60 separa con margen el piso genuino (0.6867) del cúmulo de
+ * spoofs (≤0.3166). A 0.70 una verificación REAL (sesión 5c9b4817, score 0.686)
+ * salía rechazada. El valor operativo se fija por env LIVENESS_THRESHOLD en el
+ * compose del 34 (no hardcode); este default sólo evita revertir al 0.70 que
+ * falso-rechaza si la env faltara.
+ *
+ * PENDIENTE: la calibración FINA definitiva requiere un eval set ETIQUETADO de
+ * spoofs reales (print/replay/máscara). Existe un outlier conocido —una foto de
+ * cédula limpia y completa puntúa ~0.696— que NINGÚN umbral en (0.60, 0.69)
+ * separa del piso genuino (0.686): es la debilidad documentada de MiniFASNet con
+ * documentos nítidos, mitigada por las defensas en capas (gating facial MediaPipe
+ * de la selfie, match 1:1 selfie↔documento, y el desafío activo opcional). Ver §13.
+ */
 export const LIVENESS_THRESHOLD = parseFloat(
-  process.env.LIVENESS_THRESHOLD || "0.70"
+  process.env.LIVENESS_THRESHOLD || "0.60"
 );
 
 /** Máximo porcentaje de anteojos tolerado en la selfie (gating de calidad). */
