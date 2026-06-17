@@ -6,6 +6,7 @@ import { Spinner, CameraHero, IconSun, IconFace, IconNoGlasses } from "./Icons"
 import { Intro } from "./screens/Intro"
 import { ChooseDocument } from "./screens/ChooseDocument"
 import { DocCapture } from "./screens/DocCapture"
+import { ProofOfAddress } from "./screens/ProofOfAddress"
 import { Prepare } from "./screens/Prepare"
 import { Selfie } from "./screens/Selfie"
 import { Processing } from "./screens/Processing"
@@ -30,6 +31,7 @@ type Step =
   | "intro"
   | "choose-doc"
   | "doc"
+  | "proof-of-address"
   | "prep-selfie"
   | "selfie"
   | "processing"
@@ -43,6 +45,7 @@ const STEP_PHASE: Record<Step, number> = {
   intro: 0,
   "choose-doc": 1,
   doc: 1,
+  "proof-of-address": 1,
   "prep-selfie": 2,
   selfie: 2,
   processing: 3,
@@ -140,6 +143,9 @@ export function App() {
   // el sub-flujo de captura (pasaporte = una sola página) y viaja en POST /document.
   // Default "ci_py" (cédula PY) → comportamiento idéntico al previo.
   const [documentType, setDocumentType] = useState<DocumentType>("ci_py")
+  // ¿El workflow exige comprobante de domicilio (P1 #4)? Lo trae GET /status. Cuando
+  // es true se inserta el paso "Comprobante de domicilio" tras la captura del documento.
+  const [requiresPoa, setRequiresPoa] = useState(false)
 
   // Rehidratación al montar (#3/#6).
   useEffect(() => {
@@ -153,6 +159,7 @@ export function App() {
       try {
         const s = await getStatus()
         if (!alive) return
+        setRequiresPoa(s.requiresProofOfAddress === true)
         const target = stepForState(s.state)
         // Estados terminales/tip rehidratan directo al resultado con su payload.
         if (target === "result") setStatus(s)
@@ -221,8 +228,14 @@ export function App() {
       {step === "doc" && (
         <DocCapture
           documentType={documentType}
-          onDone={() => setStep("prep-selfie")}
+          onDone={() => setStep(requiresPoa ? "proof-of-address" : "prep-selfie")}
           onBack={() => setStep("choose-doc")}
+        />
+      )}
+      {step === "proof-of-address" && (
+        <ProofOfAddress
+          onDone={() => setStep("prep-selfie")}
+          onBack={() => setStep("doc")}
         />
       )}
       {step === "prep-selfie" && (

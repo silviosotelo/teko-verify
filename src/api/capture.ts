@@ -20,6 +20,7 @@ import multer from "multer";
 import { repos } from "../db/repos";
 import { evidenceStore } from "../lib/evidenceStore";
 import { decodeBase64Image, assertFrameCount } from "../lib/images";
+import { ensureRasterImage } from "../lib/raster";
 import { processSession, computeChecks, finalizeFromChecks } from "../pipeline";
 import { realPipelineDeps } from "../pipelineDeps";
 import { webhookDispatcher } from "../webhooks/dispatcher";
@@ -476,6 +477,29 @@ captureRouter.post("/:token/document", async (req: Request, res: Response) => {
   }
 });
 
+// POST /verify/:token/proof-of-address  → sube el comprobante de domicilio (P1 #4)
+// Reusa el patrón de subida de documento (admite imagen y PDF). El PDF se RASTERIZA a
+// imagen ANTES de persistir (evidenceStore.save pasa por sharp, que no decodifica PDF).
+// El check `proof_of_address` lo computa el pipeline en /preview /submit usando esta
+// evidencia + la identidad extraída del documento. NO consume el token ni cambia de
+// estado (es una subida más de la fase de captura). Fail-closed (4xx ante error).
+captureRouter.post("/:token/proof-of-address", async (req: Request, res: Response) => {
+  const session = await loadSession(req, res);
+  if (!session) return;
+  if (!requireCapturable(session, res)) return;
+  try {
+    const raw = decodeBase64Image(req.body?.image, { allowPdf: true });
+    // Rasteriza PDF→PNG si hace falta (passthrough para JPEG/PNG) antes de guardar.
+    const image = await ensureRasterImage(raw);
+    await evidenceStore.save(session.tenantId, session.id, "proof_of_address", image);
+    await recordEvent(req, session, "proof_of_address.captured", { bytes: raw.length });
+    const resp: UploadResponse = { ok: true, state: "capturing" };
+    res.json(resp);
+  } catch (e) {
+    res.status(400).json({ error: "proof_of_address_upload_failed", detail: (e as Error).message });
+  }
+});
+
 // POST /verify/:token/doc-check  → pre-check INFORMATIVO de la cédula (UX)
 // Espejo del pre-check de la selfie: NO persiste, NO cambia estado, NO consume el
 // token. Verifica nitidez (Laplaciano), rostro en el frente y MRZ legible en el
@@ -585,6 +609,10 @@ captureRouter.post("/:token/submit", async (req: Request, res: Response) => {
     const activeLiveness =
       (await evidenceStore.readJson<ActiveLiveness>(session.tenantId, session.id, "liveness_active")) ??
       undefined;
+    // Comprobante de domicilio (P1 #4): opcional; el pipeline corre el check sólo si el
+    // workflow lo exige (y fail-closed si falta). Falsy → undefined (igual que frames).
+    const proofOfAddress =
+      (await evidenceStore.read(session.tenantId, session.id, "proof_of_address")) || undefined;
 
     await repos.sessions.update(session.tenantId, session.id, { state: "processing" });
 
@@ -592,7 +620,7 @@ captureRouter.post("/:token/submit", async (req: Request, res: Response) => {
     const out = await processSession(
       { ...session, state: "processing" },
       tenant.policies,
-      { selfie, docFront, docBack, frames, activeLiveness },
+      { selfie, docFront, docBack, frames, activeLiveness, proofOfAddress },
       realPipelineDeps
     );
 
@@ -656,13 +684,15 @@ captureRouter.post("/:token/preview", async (req: Request, res: Response) => {
     const activeLiveness =
       (await evidenceStore.readJson<ActiveLiveness>(session.tenantId, session.id, "liveness_active")) ??
       undefined;
+    const proofOfAddress =
+      (await evidenceStore.read(session.tenantId, session.id, "proof_of_address")) || undefined;
 
     await repos.sessions.update(session.tenantId, session.id, { state: "processing" });
 
     const out = await computeChecks(
       { ...session, state: "processing" },
       tenant.policies,
-      { selfie, docFront, docBack, frames, activeLiveness },
+      { selfie, docFront, docBack, frames, activeLiveness, proofOfAddress },
       realPipelineDeps
     );
 
@@ -824,6 +854,8 @@ captureRouter.get("/:token/status", async (req: Request, res: Response) => {
     recaptureCount: session.recaptureCount,
     maxRecaptureAttempts: tenant?.policies.maxRecaptureAttempts,
     redirectUrl: session.redirectUrl,
+    // P1 #4: la SPA inserta el paso "Comprobante de domicilio" sólo si el workflow lo pide.
+    requiresProofOfAddress: session.workflowSnapshot?.proofOfAddress?.required === true,
   };
   res.json(resp);
 });

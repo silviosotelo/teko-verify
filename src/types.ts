@@ -60,7 +60,15 @@ export type CheckType =
   | "document"
   | "match"
   | "aml"
-  | "face_search";
+  | "face_search"
+  /**
+   * Comprobante de domicilio (proof of address — P1 #4). Check CONFIGURABLE: el
+   * titular sube una factura de servicio / extracto bancario; el OCR extrae titular
+   * + domicilio + fecha y se valida que el nombre coincida con la identidad
+   * verificada, que el documento sea reciente y que haya domicilio. Señal/score (NO
+   * rechazo duro): el ruteo a revisión humana lo decide el workflow.
+   */
+  | "proof_of_address";
 
 /**
  * Tipo de evidencia almacenada — §5 (evidence.tipo).
@@ -83,7 +91,14 @@ export type EvidenceType =
    * pasa por sharp (no es imagen): se guarda crudo vía evidenceStore.saveVideo y se
    * sirve con su content-type real. Cierra el print-attack que el PAD pasivo no cubre.
    */
-  | "liveness_video";
+  | "liveness_video"
+  /**
+   * Comprobante de domicilio subido por el titular (P1 #4): factura de servicio,
+   * extracto bancario, etc. Imagen o PDF (el PDF se rasteriza a imagen ANTES de
+   * persistir, igual que el documento). Se OCR-ea para extraer titular/domicilio/
+   * fecha en el check `proof_of_address`.
+   */
+  | "proof_of_address";
 
 /** Estado de un tenant. */
 export type TenantStatus = "active" | "suspended" | "disabled";
@@ -405,6 +420,13 @@ export interface PipelineChecks {
    * workflow vía `faceSearch.onDuplicate`. Sólo corre con `faceSearch.required`.
    */
   faceSearch?: FaceSearchResult;
+  /**
+   * Comprobante de domicilio (P1 #4). NO lo consume `decision()` (no es rechazo
+   * duro): es señal/score. El ruteo a revisión humana ante un comprobante dudoso
+   * (nombre que no coincide / no reciente / sin domicilio) lo decide el workflow vía
+   * `proofOfAddress.onFail`. Sólo corre con `proofOfAddress.required`.
+   */
+  proofOfAddress?: ProofOfAddressResult;
 }
 
 // ============================================================================ //
@@ -542,6 +564,54 @@ export interface AmlResult {
 }
 
 // ============================================================================ //
+// 2.quater MÓDULO PROOF OF ADDRESS — comprobante de domicilio (P1 #4)
+// ============================================================================ //
+
+/**
+ * Resultado del módulo `proofOfAddress` — se persiste como check `proof_of_address`
+ * (detail JSONB). El titular sube una factura de servicio / extracto bancario (imagen
+ * o PDF); el OCR extrae el TITULAR, las LÍNEAS DE DOMICILIO, la FECHA del documento y
+ * el EMISOR (best-effort). Validaciones heurísticas (los comprobantes son de formato
+ * libre): `nameMatch` (fuzzy contra el nombre de la identidad/documento — reusa la
+ * similitud de aml.ts), `recent` (fecha dentro de `maxAgeMonths`) y `hasAddress`.
+ *
+ * NO es rechazo duro: es señal/score (igual que aml/face_search). `decision()` no lo
+ * consume; el ruteo a revisión humana lo decide el workflow vía `proofOfAddress.onFail`.
+ * FAIL-CLOSED: si el OCR no corre o lanza, `passed=false` + `error` (un comprobante
+ * ilegible NUNCA pasa en silencio).
+ */
+export interface ProofOfAddressResult {
+  /** Nombre del titular extraído del comprobante ("" si no se pudo). */
+  holderName: string;
+  /** Líneas de texto OCR clasificadas como domicilio (calle/número/ciudad/CP). */
+  addressLines: string[];
+  /** Domicilio consolidado (addressLines unidas) — vacío si no se detectó. */
+  address: string;
+  /** Fecha del documento en ISO YYYY-MM-DD (la más reciente plausible) o "". */
+  documentDate: string;
+  /** Emisor detectado (ANDE/ESSAP/banco/…) o "". Best-effort. */
+  issuer: string;
+  /** Nombre verificado contra el que se cruzó (identidad/documento), normalizado. */
+  identityName: string;
+  /** Similitud 0..1 del nombre del comprobante vs la identidad (Jaro-Winkler). */
+  nameSimilarity: number;
+  /** ¿El nombre coincide con la identidad verificada (≥ umbral)? */
+  nameMatch: boolean;
+  /** ¿La fecha del documento cae dentro de `maxAgeMonths`? */
+  recent: boolean;
+  /** Antigüedad máxima admitida (meses) aplicada para `recent` (auditable). */
+  maxAgeMonths: number;
+  /** ¿Se detectó un domicilio? */
+  hasAddress: boolean;
+  /** Veredicto del check: nameMatch (si se exige) + recent + hasAddress. */
+  passed: boolean;
+  /** Confianza media del OCR (0..1) — informativo. */
+  ocrConfidence?: number;
+  /** Si el OCR no pudo correr / lanzó (fail-closed → passed=false). */
+  error?: string;
+}
+
+// ============================================================================ //
 // 3. MODELO DE DATOS (§5) — PostgreSQL propio, multi-tenant
 // ============================================================================ //
 
@@ -613,6 +683,21 @@ export interface WorkflowDefinition {
     required: boolean;
     threshold?: number;
     onDuplicate?: "review" | "flag";
+  };
+  /**
+   * Comprobante de domicilio (proof of address — P1 #4). `required` = el titular debe
+   * subir un comprobante y el check corre. `maxAgeMonths` = antigüedad máxima admitida
+   * de la fecha del documento (default 3). `requireNameMatch` = exigir que el nombre del
+   * comprobante coincida con la identidad verificada para que el check pase (default
+   * true). `onFail` = qué hacer si el check NO pasa: 'review' rutea a la cola de revisión
+   * humana; 'flag' (default) sólo persiste el hallazgo. NO es rechazo duro.
+   */
+  proofOfAddress?: {
+    required: boolean;
+    maxAgeMonths?: number;
+    requireNameMatch?: boolean;
+    nameThreshold?: number;
+    onFail?: "review" | "flag";
   };
   review?: {
     mode: ReviewMode;
@@ -737,7 +822,8 @@ export type CheckDetail =
   | DocumentResult
   | MatchResult
   | AmlResult
-  | FaceSearchResult;
+  | FaceSearchResult
+  | ProofOfAddressResult;
 
 /** verification_checks — resultado granular por módulo, auditable (§5). */
 export interface VerificationCheck {
@@ -1124,6 +1210,12 @@ export interface CaptureStatusResponse {
   maxRecaptureAttempts?: number;
   /** URL de redirect final cuando se completa (verified/rejected). */
   redirectUrl?: string | null;
+  /**
+   * ¿El workflow de la sesión exige comprobante de domicilio (P1 #4)? Lo deriva del
+   * `workflowSnapshot.proofOfAddress.required`. La SPA de captura usa este flag para
+   * insertar (o no) el paso "Comprobante de domicilio" — adaptativo por workflow.
+   */
+  requiresProofOfAddress?: boolean;
 }
 
 /** Evento SSE empujado al cliente de captura (patrón events.ts). */

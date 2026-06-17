@@ -109,6 +109,8 @@ export function shouldRouteToReview(
     amlDecision?: "clear" | "potential_match";
     /** Búsqueda 1:N (P1 #2): la cara matcheó una identidad con CI distinto. */
     faceSearchDuplicate?: boolean;
+    /** Comprobante de domicilio (P1 #4): el check NO pasó (nombre/fecha/domicilio). */
+    proofOfAddressFailed?: boolean;
   }
 ): boolean {
   if (!def) return false;
@@ -129,6 +131,16 @@ export function shouldRouteToReview(
     def.faceSearch?.required &&
     def.faceSearch.onDuplicate === "review" &&
     scores.faceSearchDuplicate === true
+  ) {
+    return true;
+  }
+  // Ruteo por COMPROBANTE DE DOMICILIO (P1 #4): un check fallido (nombre que no
+  // coincide / no reciente / sin domicilio) con onFail:'review' va a revisión SIEMPRE.
+  // Con 'flag' (default) sólo se persiste el hallazgo. NO es rechazo duro.
+  if (
+    def.proofOfAddress?.required &&
+    def.proofOfAddress.onFail === "review" &&
+    scores.proofOfAddressFailed === true
   ) {
     return true;
   }

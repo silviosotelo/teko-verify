@@ -25,6 +25,25 @@ export type CheckType =
     | 'match'
     | 'aml'
     | 'face_search'
+    | 'proof_of_address'
+
+// ---- Proof of Address — comprobante de domicilio (P1 #4) ----
+export interface ProofOfAddressResult {
+    holderName: string
+    addressLines: string[]
+    address: string
+    documentDate: string
+    issuer: string
+    identityName: string
+    nameSimilarity: number
+    nameMatch: boolean
+    recent: boolean
+    maxAgeMonths: number
+    hasAddress: boolean
+    passed: boolean
+    ocrConfidence?: number
+    error?: string
+}
 
 // ---- AML / Sanciones / PEP (P1 #1) ----
 export type AmlDecision = 'clear' | 'potential_match'
@@ -87,6 +106,7 @@ export type EvidenceType =
     | 'doc_front_raw'
     | 'doc_back_raw'
     | 'liveness_video'
+    | 'proof_of_address'
 
 export interface Operator {
     id: string

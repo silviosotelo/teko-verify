@@ -40,6 +40,11 @@ export interface StatusResult {
   state: VerifyState
   reasons?: string[]
   redirectUrl?: string
+  /**
+   * ¿El workflow exige comprobante de domicilio (P1 #4)? La SPA inserta el paso
+   * "Comprobante de domicilio" sólo cuando es true (adaptativo por workflow).
+   */
+  requiresProofOfAddress?: boolean
 }
 
 /**
@@ -182,6 +187,16 @@ export async function apiUploadVideo(blob: Blob): Promise<boolean> {
   } catch {
     return false
   }
+}
+
+/**
+ * POST /verify/:token/proof-of-address — sube el comprobante de domicilio (P1 #4).
+ * `image` es un data-URL base64 (imagen JPEG/PNG o PDF). El backend lo persiste como
+ * evidencia y el pipeline corre el check en /preview /submit. Reusa apiPost (mismo
+ * envelope de error que el resto de la captura).
+ */
+export async function uploadProofOfAddress(image: string): Promise<void> {
+  await apiPost("/proof-of-address", { image })
 }
 
 /**

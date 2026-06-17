@@ -59,6 +59,7 @@ import type {
     ExtractedDocument,
     FaceSearchResult,
     ParsedDevice,
+    ProofOfAddressResult,
     RiskSeverity,
     SessionDetail,
     SessionEvent,
@@ -230,6 +231,7 @@ const EVIDENCE_LABEL: Record<string, string> = {
     doc_back: 'Documento · dorso',
     selfie: 'Selfie',
     frames: 'Frames',
+    proof_of_address: 'Comprobante de domicilio',
 }
 
 function EvidenceThumb({
@@ -373,7 +375,13 @@ function LivenessVideoCard({
 
 // Pestañas navegables del detalle (P0 #3 añade Eventos + Device & IP funcionales;
 // P1 #1 añade AML / Sanciones).
-type TabKey = 'overview' | 'events' | 'device' | 'aml' | 'face_search'
+type TabKey =
+    | 'overview'
+    | 'events'
+    | 'device'
+    | 'aml'
+    | 'face_search'
+    | 'proof_of_address'
 
 type ModuleDef = {
     key: string
@@ -397,6 +405,12 @@ const MODULE_ROW: ModuleDef[] = [
         label: 'Coincidencias faciales',
         type: null,
         tab: 'face_search',
+    },
+    {
+        key: 'proof_of_address',
+        label: 'Comprobante de domicilio',
+        type: null,
+        tab: 'proof_of_address',
     },
     { key: 'events', label: 'Eventos', type: null, tab: 'events' },
     { key: 'device', label: 'Device & IP', type: null, tab: 'device' },
@@ -954,6 +968,150 @@ function AmlPanel({ aml }: { aml: AmlResult | undefined }) {
 }
 
 // ----------------------------------------------------------------------------
+// Panel Comprobante de domicilio (P1 #4)
+// ----------------------------------------------------------------------------
+
+/** Badge verde/rojo de una validación del comprobante (nombre/reciente/domicilio). */
+function PoaCheck({ ok, label }: { ok: boolean; label: string }) {
+    return (
+        <span
+            className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-bold uppercase tracking-wide ring-1 ${
+                ok
+                    ? 'bg-emerald-50 text-emerald-700 ring-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-300 dark:ring-emerald-500/30'
+                    : 'bg-red-50 text-red-700 ring-red-200 dark:bg-red-500/10 dark:text-red-300 dark:ring-red-500/30'
+            }`}
+        >
+            {ok ? (
+                <TbCircleCheck className="text-sm" />
+            ) : (
+                <TbAlertTriangle className="text-sm" />
+            )}
+            {label}
+        </span>
+    )
+}
+
+/**
+ * Panel del comprobante de domicilio: miniatura del comprobante, domicilio extraído,
+ * fecha, emisor y los badges de validación (nombre coincide / reciente / dirección).
+ */
+function ProofOfAddressPanel({
+    poa,
+    tenantId,
+    sessionId,
+    hasEvidence,
+    onOpen,
+}: {
+    poa: ProofOfAddressResult | undefined
+    tenantId: string
+    sessionId: string
+    hasEvidence: boolean
+    onOpen: (url: string, label: string) => void
+}) {
+    if (!poa) {
+        return (
+            <Card>
+                <p className="text-sm text-gray-400">
+                    El comprobante de domicilio no corrió en esta sesión (el workflow
+                    no tiene el check{' '}
+                    <span className="font-mono">proof_of_address</span> activo).
+                </p>
+            </Card>
+        )
+    }
+    return (
+        <div className="space-y-4">
+            <Card>
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                        <h6 className="text-sm font-semibold heading-text">
+                            Comprobante de domicilio
+                        </h6>
+                        <p className="mt-1 text-xs text-gray-400">
+                            Extracción heurística por OCR (on-prem). Validado contra
+                            la identidad verificada del documento.
+                        </p>
+                    </div>
+                    <PassPill passed={poa.passed} />
+                </div>
+
+                <div className="mt-4 flex flex-wrap gap-2">
+                    <PoaCheck ok={poa.nameMatch} label="Nombre coincide" />
+                    <PoaCheck ok={poa.recent} label="Reciente" />
+                    <PoaCheck ok={poa.hasAddress} label="Dirección" />
+                </div>
+
+                <dl className="mt-4 grid grid-cols-2 gap-x-8 gap-y-3 text-sm sm:grid-cols-3">
+                    <div className="col-span-2 sm:col-span-3">
+                        <dt className="text-gray-400">Domicilio extraído</dt>
+                        <dd className="font-medium heading-text">
+                            {poa.address || '—'}
+                        </dd>
+                    </div>
+                    <div>
+                        <dt className="text-gray-400">Titular del comprobante</dt>
+                        <dd className="font-medium heading-text">
+                            {poa.holderName || '—'}
+                        </dd>
+                    </div>
+                    <div>
+                        <dt className="text-gray-400">Fecha del documento</dt>
+                        <dd className="font-mono font-semibold heading-text">
+                            {poa.documentDate || '—'}
+                        </dd>
+                    </div>
+                    <div>
+                        <dt className="text-gray-400">Emisor</dt>
+                        <dd className="font-medium heading-text">
+                            {poa.issuer || '—'}
+                        </dd>
+                    </div>
+                    <div>
+                        <dt className="text-gray-400">Similitud de nombre</dt>
+                        <dd className="font-mono font-semibold heading-text">
+                            {poa.nameSimilarity.toFixed(3)}
+                        </dd>
+                    </div>
+                    <div>
+                        <dt className="text-gray-400">Antigüedad máx.</dt>
+                        <dd className="font-semibold heading-text">
+                            {poa.maxAgeMonths} meses
+                        </dd>
+                    </div>
+                    <div>
+                        <dt className="text-gray-400">Identidad esperada</dt>
+                        <dd className="font-medium heading-text">
+                            {poa.identityName || '—'}
+                        </dd>
+                    </div>
+                </dl>
+
+                {poa.error && (
+                    <div className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-700 dark:bg-red-500/10 dark:text-red-300">
+                        Comprobante no procesado ({poa.error}). Por seguridad
+                        (fail-closed) el check no pasó.
+                    </div>
+                )}
+            </Card>
+
+            {hasEvidence && (
+                <Card>
+                    <h6 className="mb-3 text-sm font-semibold heading-text">
+                        Comprobante subido
+                    </h6>
+                    <EvidenceThumb
+                        tenantId={tenantId}
+                        sessionId={sessionId}
+                        type={'proof_of_address' as EvidenceType}
+                        onOpen={onOpen}
+                    />
+                </Card>
+            )}
+        </div>
+    )
+}
+
+// ----------------------------------------------------------------------------
 // Panel Coincidencias faciales 1:N (P1 #2)
 // ----------------------------------------------------------------------------
 
@@ -1348,6 +1506,9 @@ const SessionDetailView = () => {
     const faceSearchResult = checkByType('face_search')?.detail as
         | FaceSearchResult
         | undefined
+    const proofOfAddressResult = checkByType('proof_of_address')?.detail as
+        | ProofOfAddressResult
+        | undefined
     const reasons = data.result?.reasons ?? []
     const fullName =
         [form.firstName, form.lastName].filter(Boolean).join(' ').trim() ||
@@ -1584,6 +1745,19 @@ const SessionDetailView = () => {
                 <FaceMatchesPanel
                     fs={faceSearchResult}
                     tenantId={data.tenantId}
+                />
+            )}
+
+            {/* ---------- Pestaña Comprobante de domicilio (P1 #4) ---------- */}
+            {activeTab === 'proof_of_address' && (
+                <ProofOfAddressPanel
+                    poa={proofOfAddressResult}
+                    tenantId={data.tenantId}
+                    sessionId={data.sessionId}
+                    hasEvidence={data.evidence.some(
+                        (e) => e.type === 'proof_of_address',
+                    )}
+                    onOpen={(url, label) => setLightbox({ url, label })}
                 />
             )}
 

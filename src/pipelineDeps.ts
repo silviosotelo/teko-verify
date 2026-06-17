@@ -17,6 +17,7 @@ import { OCR_SIDECAR_URL } from "./config";
 import { screen as amlScreen } from "./modules/aml";
 import { createLocalAmlProvider } from "./modules/amlProvider";
 import { runFaceSearch as faceSearch1N } from "./modules/faceSearch";
+import { runProofOfAddress } from "./modules/proofOfAddress";
 import type { DocCropper, PipelineDeps, PipelineModules } from "./pipeline";
 
 /**
@@ -104,6 +105,9 @@ const modules: PipelineModules = {
       },
       { threshold: opts?.threshold }
     ),
+  // Comprobante de domicilio (P1 #4): OCR (PaddleOCR sidecar por default) → extracción
+  // heurística → validación nombre/fecha/domicilio contra la identidad. On-prem.
+  proofOfAddress: (image, opts) => runProofOfAddress(image, opts),
 };
 
 /** Dependencias reales listas para inyectar en processSession(). */

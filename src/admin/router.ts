@@ -455,6 +455,7 @@ const EVIDENCE_TYPES: EvidenceType[] = [
   "doc_front_raw",
   "doc_back_raw",
   "liveness_video",
+  "proof_of_address",
 ];
 
 adminRouter.get(

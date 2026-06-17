@@ -41,6 +41,7 @@ import type {
   LivenessResult,
   MatchResult,
   PipelineChecks,
+  ProofOfAddressResult,
   QualityResult,
   SessionResult,
   SessionState,
@@ -92,6 +93,12 @@ export interface CapturedImages {
    * (fail-closed). El video completo se persiste aparte como evidencia `liveness_video`.
    */
   activeLiveness?: { challenges: string[]; passed: boolean };
+  /**
+   * Comprobante de domicilio subido por el titular (P1 #4). Imagen o PDF; el módulo
+   * `proofOfAddress` lo rasteriza/OCR-ea. Sólo se setea cuando el workflow lo exige y
+   * el titular lo subió. Si falta y el workflow lo pide, el check queda fail-closed.
+   */
+  proofOfAddress?: Buffer;
 }
 
 /** Módulos del pipeline, inyectables (las firmas calzan con los módulos reales). */
@@ -134,6 +141,20 @@ export interface PipelineModules {
     },
     opts?: { threshold?: number }
   ): Promise<FaceSearchResult>;
+  /**
+   * Comprobante de domicilio (P1 #4). Opcional: sólo se invoca si el workflow tiene
+   * `proofOfAddress.required` y hay imagen subida. OCR-ea el comprobante y valida
+   * nombre/fecha/domicilio contra la identidad verificada. Fail-closed.
+   */
+  proofOfAddress?(
+    image: Buffer,
+    opts: {
+      identityName: string;
+      maxAgeMonths?: number;
+      requireNameMatch?: boolean;
+      nameThreshold?: number;
+    }
+  ): Promise<ProofOfAddressResult>;
 }
 
 /**
@@ -164,7 +185,14 @@ export interface PipelineRepos {
       input: {
         tenantId: string;
         sessionId: string;
-        type: "quality" | "liveness" | "document" | "match" | "aml" | "face_search";
+        type:
+          | "quality"
+          | "liveness"
+          | "document"
+          | "match"
+          | "aml"
+          | "face_search"
+          | "proof_of_address";
         score?: number | null;
         passed: boolean;
         detail:
@@ -173,7 +201,8 @@ export interface PipelineRepos {
           | DocumentResult
           | MatchResult
           | AmlResult
-          | FaceSearchResult;
+          | FaceSearchResult
+          | ProofOfAddressResult;
       },
       exec: Executor
     ): Promise<unknown>;
@@ -184,7 +213,14 @@ export interface PipelineRepos {
       exec?: Executor
     ): Promise<
       Array<{
-        type: "quality" | "liveness" | "document" | "match" | "aml" | "face_search";
+        type:
+          | "quality"
+          | "liveness"
+          | "document"
+          | "match"
+          | "aml"
+          | "face_search"
+          | "proof_of_address";
         passed: boolean;
         detail:
           | QualityResult
@@ -192,7 +228,8 @@ export interface PipelineRepos {
           | DocumentResult
           | MatchResult
           | AmlResult
-          | FaceSearchResult;
+          | FaceSearchResult
+          | ProofOfAddressResult;
       }>
     >;
     /** Borra los checks de una sesión (idempotencia de /preview). */
@@ -410,6 +447,61 @@ async function runFaceSearch(
   }
 }
 
+/** Nombre completo de la identidad para el cruce del comprobante (OCR frente → MRZ). */
+function identityNameFrom(document: DocumentResult): string {
+  const t = document.extracted?.titular;
+  const m = document.mrz;
+  const fromOcr = `${t?.nombres ?? ""} ${t?.apellidos ?? ""}`.trim();
+  if (fromOcr) return fromOcr;
+  return `${m?.givenNames ?? ""} ${m?.surname ?? ""}`.trim();
+}
+
+/**
+ * Corre el check de COMPROBANTE DE DOMICILIO (P1 #4) SI el workflow lo exige
+ * (`proofOfAddress.required`) y hay imagen subida. Devuelve undefined cuando no aplica.
+ * FAIL-CLOSED: si el módulo no está cableado, no hay imagen o lanza, NO se silencia como
+ * "pasó" — devuelve un resultado `passed:false` + `error`, de modo que un workflow con
+ * onFail:'review' igualmente rutee a revisión humana. NO es rechazo duro.
+ */
+async function runProofOfAddress(
+  deps: PipelineDeps,
+  session: VerificationSession,
+  document: DocumentResult,
+  image: Buffer | undefined
+): Promise<ProofOfAddressResult | undefined> {
+  const cfg = session.workflowSnapshot?.proofOfAddress;
+  if (!cfg?.required) return undefined;
+  const identityName = identityNameFrom(document);
+  const maxAgeMonths = cfg.maxAgeMonths ?? 3;
+  const failClosed = (error: string): ProofOfAddressResult => ({
+    holderName: "",
+    addressLines: [],
+    address: "",
+    documentDate: "",
+    issuer: "",
+    identityName,
+    nameSimilarity: 0,
+    nameMatch: false,
+    recent: false,
+    maxAgeMonths,
+    hasAddress: false,
+    passed: false,
+    error,
+  });
+  if (!deps.modules.proofOfAddress) return failClosed("proof_of_address_unavailable");
+  if (!image) return failClosed("proof_of_address_missing");
+  try {
+    return await deps.modules.proofOfAddress(image, {
+      identityName,
+      maxAgeMonths: cfg.maxAgeMonths,
+      requireNameMatch: cfg.requireNameMatch,
+      nameThreshold: cfg.nameThreshold,
+    });
+  } catch (e) {
+    return failClosed(e instanceof Error ? e.message : String(e));
+  }
+}
+
 function nowIso(): string {
   return new Date().toISOString();
 }
@@ -597,8 +689,20 @@ export async function processSession(
       );
     }
 
+    // COMPROBANTE DE DOMICILIO (señal/score, NO rechazo duro) — P1 #4. Corre si el
+    // workflow lo exige y el titular subió el comprobante. Ver runProofOfAddress.
+    const proofOfAddress = await runProofOfAddress(deps, session, document, images.proofOfAddress);
+
     // === 5) DECISION (fusión + LoA) ======================================= //
-    const checks: PipelineChecks = { quality, document, match: matchRes, liveness, aml, faceSearch };
+    const checks: PipelineChecks = {
+      quality,
+      document,
+      match: matchRes,
+      liveness,
+      aml,
+      faceSearch,
+      proofOfAddress,
+    };
     const verdict = decideVerdict(checks, policy);
 
     // Persistencia atómica de checks + (si verified) identity + evidence + audit.
@@ -626,6 +730,7 @@ export async function processSession(
         liveness: liveness?.score,
         amlDecision: aml?.decision,
         faceSearchDuplicate: faceSearch?.duplicateSuspected,
+        proofOfAddressFailed: proofOfAddress ? !proofOfAddress.passed : undefined,
       })
     ) {
       return await goToReview(deps, session, result, { checks, images });
@@ -932,7 +1037,19 @@ export async function computeChecks(
       );
     }
 
-    const checks: PipelineChecks = { quality, document, match: matchRes, liveness, aml, faceSearch };
+    // COMPROBANTE DE DOMICILIO (señal/score, NO rechazo duro) — P1 #4. Corre si el
+    // workflow lo exige y el titular subió el comprobante. Ver runProofOfAddress.
+    const proofOfAddress = await runProofOfAddress(deps, session, document, images.proofOfAddress);
+
+    const checks: PipelineChecks = {
+      quality,
+      document,
+      match: matchRes,
+      liveness,
+      aml,
+      faceSearch,
+      proofOfAddress,
+    };
 
     // Persistencia: checks (reemplazando previos) + evidencia + recortes → estado 'review'.
     await deps.withTransaction(async (tx) => {
@@ -994,6 +1111,9 @@ export async function finalizeFromChecks(
     const liveness = byType.get("liveness")?.detail as LivenessResult | undefined;
     const aml = byType.get("aml")?.detail as AmlResult | undefined;
     const faceSearch = byType.get("face_search")?.detail as FaceSearchResult | undefined;
+    const proofOfAddress = byType.get("proof_of_address")?.detail as
+      | ProofOfAddressResult
+      | undefined;
     if (!quality || !document) {
       // Sin checks base no se puede decidir → fail-closed (rechazo).
       const result: SessionResult = { decision: "rejected", loa: "L0", reasons: ["missing_checks"] };
@@ -1013,7 +1133,15 @@ export async function finalizeFromChecks(
       return { state: "rejected", result, reasons: result.reasons };
     }
 
-    const checks: PipelineChecks = { quality, document, match, liveness, aml, faceSearch };
+    const checks: PipelineChecks = {
+      quality,
+      document,
+      match,
+      liveness,
+      aml,
+      faceSearch,
+      proofOfAddress,
+    };
     const verdict = decideVerdict(checks, policy);
     const result: SessionResult = {
       decision: verdict.verdict,
@@ -1031,6 +1159,7 @@ export async function finalizeFromChecks(
         liveness: liveness?.score,
         amlDecision: aml?.decision,
         faceSearchDuplicate: faceSearch?.duplicateSuspected,
+        proofOfAddressFailed: proofOfAddress ? !proofOfAddress.passed : undefined,
       })
     ) {
       return await goToReview(deps, session, result, {});
@@ -1173,6 +1302,19 @@ async function persistAllChecks(
         score: checks.faceSearch.topCosine,
         passed: checks.faceSearch.passed,
         detail: checks.faceSearch,
+      },
+      tx
+    );
+  }
+  if (checks.proofOfAddress) {
+    await deps.repos.checks.create(
+      {
+        tenantId,
+        sessionId,
+        type: "proof_of_address",
+        score: checks.proofOfAddress.nameSimilarity,
+        passed: checks.proofOfAddress.passed,
+        detail: checks.proofOfAddress,
       },
       tx
     );
