@@ -1564,14 +1564,22 @@ async function rejectAt(
   return { state: "rejected", result, reasons };
 }
 
-/** Webhook tras commit; no-throw: una falla de webhook NO cambia el veredicto. */
+/**
+ * Webhook tras commit; no-throw: una falla de webhook NO cambia el veredicto.
+ *
+ * NO se gatea por `session.callbackUrl`: el subsistema de webhooks (P0 #2) entrega a
+ * los ENDPOINTS SUSCRITOS del tenant (webhook_endpoints), que son independientes del
+ * callbackUrl legacy por sesión. El dispatcher resuelve ambos destinos y es fail-open
+ * (no crea entregas si no hay destinos). Gatear por callbackUrl aquí SUPRIMÍA todos
+ * los webhooks de suscripción cuando la sesión no traía callbackUrl propio (bug de
+ * integración entre el pipeline y P0 #2). El WebhookSender real maneja el caso vacío.
+ */
 async function safeWebhook(
   deps: PipelineDeps,
   session: VerificationSession,
   event: WebhookEventType,
   result: SessionResult
 ): Promise<void> {
-  if (!session.callbackUrl) return;
   try {
     await deps.webhook.send(session, event, result);
   } catch (e) {
