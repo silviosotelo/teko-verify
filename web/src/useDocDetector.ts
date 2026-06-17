@@ -36,13 +36,35 @@ export type { Quad, QuadPt, CV } from "./docAnalyze"
 // importa classifyFrame desde acá. La impl vive en el módulo puro docAnalyze.
 export { classifyFrame } from "./docAnalyze"
 
+const BASE = import.meta.env.BASE_URL
 // Ruta self-hosted del runtime OpenCV (misma base "/app/" de Vite). Se la pasamos
 // al worker por postMessage (no confiamos en import.meta.env dentro del worker).
-const OPENCV_URL = `${import.meta.env.BASE_URL}opencv.js`
-// Worker clásico servido same-origin desde public/ (base "/app/").
-const WORKER_URL = `${import.meta.env.BASE_URL}docWorker.js`
-// Si en ~7s el detector no está listo, degradamos a manual (no bloquear al
-// usuario). opencv.js (~11MB) puede tardar por el túnel/celu: que NO trabe.
+const OPENCV_URL = `${BASE}opencv.js`
+// Worker clásico (geométrico OpenCV) servido same-origin desde public/.
+const WORKER_URL = `${BASE}docWorker.js`
+
+// --- Detector ML (DocAligner / onnxruntime-web) — detrás del flag ?detector=ml.
+// Self-host TODO same-origin (sin CDN): worker clásico + ort wasm + onnx.
+const ML_WORKER_URL = `${BASE}docWorkerMl.js`
+const ML_MODEL_URL = `${BASE}docaligner_lcnet050_fp32.onnx`
+// URLs ABSOLUTAS: importScripts/wasmPaths dentro del worker no resuelven contra
+// import.meta.env; las absolutizamos contra location.href en el hilo principal.
+const abs = (p: string) =>
+  typeof location !== "undefined" ? new URL(p, location.href).href : p
+const ORT_URL = abs(`${BASE}ort/ort.wasm.min.js`)
+const ORT_WASM_BASE = abs(`${BASE}ort/`)
+
+/** ¿Pidió el usuario el detector ML por query string? (?detector=ml) */
+function wantMlDetector(): boolean {
+  try {
+    return new URLSearchParams(location.search).get("detector") === "ml"
+  } catch {
+    return false
+  }
+}
+
+// Si en ~7s el detector no está listo, degradamos (ML→OpenCV→manual) sin bloquear
+// al usuario. opencv.js (~11MB) / ort+onnx (~16MB) pueden tardar por el túnel.
 const READY_TIMEOUT_MS = 7000
 // Throttle del envío de frames al worker (~6fps). El worker procesa de a uno.
 const FRAME_INTERVAL_MS = 160
@@ -64,9 +86,13 @@ export function useDocDetector(
   const inFlightRef = useRef(false)
   const frameIdRef = useRef(0)
 
-  // --- Arranque del worker + carga de OpenCV (una vez, al entrar a la pantalla)
+  // --- Arranque del worker (una vez). Cadena de degradación que NUNCA bloquea la
+  // captura manual: ML (DocAligner) → OpenCV (geométrico) → manual.
+  //   - default: arranca en OpenCV (el ML queda detrás de ?detector=ml).
+  //   - ?detector=ml: arranca en ML; si falla/timeout, FALLBACK a OpenCV; si ese
+  //     también falla, manual ("unavailable"). Una vez en manual, NO volvemos
+  //     atrás aunque un worker cargue tarde (sería peor yankear la UI).
   useEffect(() => {
-    let timedOut = false
     setStatus("loading")
     readyRef.current = false
 
@@ -76,59 +102,101 @@ export function useDocDetector(
       return
     }
 
-    let worker: Worker
-    try {
-      worker = new Worker(WORKER_URL) // CLÁSICO (no { type:"module" }): usa importScripts
-    } catch {
-      setStatus("unavailable")
-      return
-    }
-    workerRef.current = worker
-
-    // Timeout de arranque: si no llegó "ready", caemos a manual. El worker sigue
-    // vivo y cargando por si termina tarde, pero la UI NO espera más.
-    const timer = setTimeout(() => {
-      if (readyRef.current) return
-      timedOut = true
-      setStatus("unavailable")
-    }, READY_TIMEOUT_MS)
-
-    worker.onmessage = (ev: MessageEvent) => {
-      const msg = ev.data
-      if (!msg) return
-      if (msg.type === "ready") {
-        readyRef.current = true
+    let worker: Worker | null = null
+    let timer: ReturnType<typeof setTimeout> | null = null
+    let disposed = false
+    let triedFallback = false
+    let gaveUp = false
+    const clearTimer = () => {
+      if (timer) {
         clearTimeout(timer)
-        // Si ya habíamos caído a manual por timeout, NO volvemos atrás: el
-        // usuario ya tiene la captura manual operativa; cambiar de UI ahora sería
-        // peor. (El worker queda disponible pero ocioso.)
-        if (!timedOut) setStatus("ready")
-        return
+        timer = null
       }
-      if (msg.type === "error") {
-        clearTimeout(timer)
-        if (!readyRef.current) setStatus("unavailable")
-        return
-      }
-      if (msg.type === "result") {
-        inFlightRef.current = false
-        // Descartamos resultados viejos si llegan fuera de orden.
-        if (msg.id !== frameIdRef.current) return
-        setVerdict(msg.verdict as DocLiveVerdict)
-        setQuad((msg.quad as Quad | null) ?? null)
-        return
-      }
-    }
-    worker.onerror = () => {
-      clearTimeout(timer)
-      if (!readyRef.current) setStatus("unavailable")
     }
 
-    worker.postMessage({ type: "init", url: new URL(OPENCV_URL, location.href).href })
+    const onFail = (mode: "ml" | "opencv") => {
+      if (disposed || gaveUp) return
+      clearTimer()
+      if (mode === "ml" && !triedFallback) {
+        // FALLBACK ML → OpenCV: nunca degradamos la captura por culpa del ML.
+        triedFallback = true
+        if (worker) worker.terminate()
+        worker = null
+        workerRef.current = null
+        readyRef.current = false
+        start("opencv")
+        return
+      }
+      gaveUp = true
+      setStatus("unavailable")
+    }
+
+    const start = (mode: "ml" | "opencv") => {
+      if (disposed) return
+      readyRef.current = false
+      let w: Worker
+      try {
+        // CLÁSICO (no { type:"module" }): ambos usan importScripts.
+        w = new Worker(mode === "ml" ? ML_WORKER_URL : WORKER_URL)
+      } catch {
+        onFail(mode)
+        return
+      }
+      worker = w
+      workerRef.current = w
+
+      timer = setTimeout(() => {
+        if (readyRef.current) return
+        onFail(mode)
+      }, READY_TIMEOUT_MS)
+
+      w.onmessage = (ev: MessageEvent) => {
+        const msg = ev.data
+        if (!msg) return
+        if (msg.type === "ready") {
+          readyRef.current = true
+          clearTimer()
+          // Si ya caímos a manual, NO volvemos atrás.
+          if (!disposed && !gaveUp) setStatus("ready")
+          return
+        }
+        if (msg.type === "error") {
+          clearTimer()
+          if (!readyRef.current) onFail(mode)
+          return
+        }
+        if (msg.type === "result") {
+          inFlightRef.current = false
+          // Descartamos resultados viejos si llegan fuera de orden.
+          if (msg.id !== frameIdRef.current) return
+          setVerdict(msg.verdict as DocLiveVerdict)
+          setQuad((msg.quad as Quad | null) ?? null)
+          return
+        }
+      }
+      w.onerror = () => {
+        clearTimer()
+        if (!readyRef.current) onFail(mode)
+      }
+
+      if (mode === "ml") {
+        w.postMessage({
+          type: "init",
+          ortUrl: ORT_URL,
+          modelUrl: new URL(ML_MODEL_URL, location.href).href,
+          wasmBase: ORT_WASM_BASE,
+        })
+      } else {
+        w.postMessage({ type: "init", url: new URL(OPENCV_URL, location.href).href })
+      }
+    }
+
+    start(wantMlDetector() ? "ml" : "opencv")
 
     return () => {
-      clearTimeout(timer)
-      worker.terminate()
+      disposed = true
+      clearTimer()
+      if (worker) worker.terminate()
       workerRef.current = null
       readyRef.current = false
     }
