@@ -11,6 +11,7 @@ import type { WebhookEndpoint, WebhookEvent } from "../../types";
 interface EndpointRow {
   id: string;
   tenant_id: string;
+  app_id: string | null;
   url: string;
   secret: string;
   events: WebhookEvent[];
@@ -24,6 +25,7 @@ function mapEndpoint(row: EndpointRow): WebhookEndpoint {
   return {
     id: row.id,
     tenantId: row.tenant_id,
+    appId: row.app_id ?? null,
     url: row.url,
     secret: row.secret,
     events: row.events ?? [],
@@ -36,6 +38,8 @@ function mapEndpoint(row: EndpointRow): WebhookEndpoint {
 
 export interface CreateEndpointInput {
   tenantId: string;
+  /** App dueña del destino (App-scoping). null/ausente = se resuelve a la app Default. */
+  appId?: string | null;
   url: string;
   secret: string;
   events: WebhookEvent[];
@@ -48,8 +52,12 @@ export async function create(
   exec: Executor = pool
 ): Promise<WebhookEndpoint> {
   const res = await exec.query<EndpointRow>(
-    `INSERT INTO webhook_endpoints (tenant_id, url, secret, events, description, enabled)
-     VALUES ($1, $2, $3, $4::text[], $5, COALESCE($6, true))
+    `INSERT INTO webhook_endpoints (tenant_id, app_id, url, secret, events, description, enabled)
+     VALUES (
+       $1,
+       COALESCE($7, (SELECT id FROM apps WHERE tenant_id = $1 ORDER BY is_default DESC, created_at ASC LIMIT 1)),
+       $2, $3, $4::text[], $5, COALESCE($6, true)
+     )
      RETURNING *`,
     [
       input.tenantId,
@@ -58,6 +66,7 @@ export async function create(
       input.events,
       input.description ?? null,
       input.enabled ?? null,
+      input.appId ?? null,
     ]
   );
   return mapEndpoint(res.rows[0]);

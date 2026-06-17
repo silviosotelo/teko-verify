@@ -305,6 +305,9 @@ adminRouter.post("/tenants", requirePermission("manage_tenants"), async (req: Re
       // White-label opcional al crear (P1 #5): saneado, fail-closed. Ausente = '{}'.
       branding: branding !== undefined ? sanitizeBranding(branding) : undefined,
     });
+    // Pieza 2: garantiza la app Default del tenant nuevo (fallback de App-scoping)
+    // ANTES de sembrar workflows, para que éstos queden scopeados a esa app.
+    await repos.apps.getDefault(tenant.id);
     // P0 #1: siembra los 3 workflows default (default-l1/-l2/-l3) del tenant nuevo.
     await repos.workflows.ensureDefaults(tenant.id);
     await repos.auditLog.record({
@@ -405,6 +408,120 @@ adminRouter.post(
   }
 );
 
+// ---- Apps (CRUD por org) — Pieza 2 App-scoping --------------------------- //
+// Una app es un proyecto bajo la org (tenant). La app Default es el fallback y NO
+// se puede borrar. Permiso: manage_apps (owner/admin). Lectura: cualquier rol.
+
+function toAppResponse(a: import("../types").App): import("../types").AppResponse {
+  return {
+    id: a.id,
+    tenantId: a.tenantId,
+    name: a.name,
+    isDefault: a.isDefault,
+    createdAt: a.createdAt,
+    updatedAt: a.updatedAt,
+  };
+}
+
+// GET /admin/tenants/:id/apps → apps de la org (garantiza la Default).
+adminRouter.get("/tenants/:id/apps", async (req: Request, res: Response) => {
+  const tenant = await repos.tenants.getById(req.params.id);
+  if (!tenant) {
+    res.status(404).json({ error: "tenant_not_found" });
+    return;
+  }
+  await repos.apps.getDefault(tenant.id); // siembra Default si faltara (compat)
+  const apps = await repos.apps.listByTenant(tenant.id);
+  res.json({ apps: apps.map(toAppResponse) });
+});
+
+// POST /admin/tenants/:id/apps {name} → crea una app bajo la org.
+adminRouter.post("/tenants/:id/apps", requirePermission("manage_apps"), async (req: Request, res: Response) => {
+  const tenant = await repos.tenants.getById(req.params.id);
+  if (!tenant) {
+    res.status(404).json({ error: "tenant_not_found" });
+    return;
+  }
+  const name = typeof req.body?.name === "string" ? req.body.name.trim() : "";
+  if (!name) {
+    res.status(400).json({ error: "name_required" });
+    return;
+  }
+  try {
+    const app = await repos.apps.create({ tenantId: tenant.id, name });
+    await repos.auditLog.record({
+      tenantId: tenant.id,
+      actor: `admin:${req.adminOperator?.operatorId ?? "?"}`,
+      event: "app.created",
+      detail: { appId: app.id, name },
+      ip: req.ip ?? null,
+    });
+    res.status(201).json(toAppResponse(app));
+  } catch (e) {
+    // 23505 = unique_violation (nombre duplicado en la org).
+    if ((e as { code?: string }).code === "23505") {
+      res.status(409).json({ error: "app_name_exists" });
+      return;
+    }
+    res.status(400).json({ error: "create_app_failed", detail: (e as Error).message });
+  }
+});
+
+// PUT /admin/tenants/:id/apps/:appId {name} → renombra una app.
+adminRouter.put("/tenants/:id/apps/:appId", requirePermission("manage_apps"), async (req: Request, res: Response) => {
+  const name = typeof req.body?.name === "string" ? req.body.name.trim() : "";
+  if (!name) {
+    res.status(400).json({ error: "name_required" });
+    return;
+  }
+  try {
+    const updated = await repos.apps.update(req.params.id, req.params.appId, { name });
+    if (!updated) {
+      res.status(404).json({ error: "app_not_found" });
+      return;
+    }
+    await repos.auditLog.record({
+      tenantId: req.params.id,
+      actor: `admin:${req.adminOperator?.operatorId ?? "?"}`,
+      event: "app.updated",
+      detail: { appId: updated.id, name },
+      ip: req.ip ?? null,
+    });
+    res.json(toAppResponse(updated));
+  } catch (e) {
+    if ((e as { code?: string }).code === "23505") {
+      res.status(409).json({ error: "app_name_exists" });
+      return;
+    }
+    res.status(400).json({ error: "update_app_failed", detail: (e as Error).message });
+  }
+});
+
+// DELETE /admin/tenants/:id/apps/:appId → borra una app (no la Default, no si está en uso).
+adminRouter.delete("/tenants/:id/apps/:appId", requirePermission("manage_apps"), async (req: Request, res: Response) => {
+  const outcome = await repos.apps.remove(req.params.id, req.params.appId);
+  if (outcome === "not_found") {
+    res.status(404).json({ error: "app_not_found" });
+    return;
+  }
+  if (outcome === "is_default") {
+    res.status(409).json({ error: "cannot_delete_default_app" });
+    return;
+  }
+  if (outcome === "in_use") {
+    res.status(409).json({ error: "app_in_use", detail: "Reasigná o eliminá keys/workflows/webhooks/sesiones de la app antes de borrarla." });
+    return;
+  }
+  await repos.auditLog.record({
+    tenantId: req.params.id,
+    actor: `admin:${req.adminOperator?.operatorId ?? "?"}`,
+    event: "app.deleted",
+    detail: { appId: req.params.appId },
+    ip: req.ip ?? null,
+  });
+  res.json({ id: req.params.appId, deleted: true });
+});
+
 // ---- API keys ------------------------------------------------------------- //
 
 adminRouter.post("/tenants/:id/api-keys", requirePermission("manage_api_keys"), async (req: Request, res: Response) => {
@@ -414,9 +531,18 @@ adminRouter.post("/tenants/:id/api-keys", requirePermission("manage_api_keys"), 
     return;
   }
   const { label, scopes } = req.body ?? {};
+  // App-scoping (Pieza 2): la key pertenece a una app; sin appId → app Default.
+  let appId: string;
+  try {
+    appId = await repos.apps.resolveAppId(tenant.id, req.body?.appId);
+  } catch {
+    res.status(400).json({ error: "app_not_found" });
+    return;
+  }
   const gen = generateApiKey();
   const created = await repos.apiKeys.create({
     tenantId: tenant.id,
+    appId,
     keyHash: gen.hash,
     prefix: gen.prefix,
     label: label ?? "default",
@@ -449,6 +575,7 @@ adminRouter.get("/tenants/:id/api-keys", async (req: Request, res: Response) => 
     label: k.label,
     scopes: k.scopes,
     status: k.status,
+    appId: k.appId,
     lastUsedAt: k.lastUsedAt,
     createdAt: k.createdAt,
   }));
@@ -627,6 +754,7 @@ function toWorkflowResponse(w: Workflow): WorkflowResponse {
   return {
     id: w.id,
     tenantId: w.tenantId,
+    appId: w.appId,
     name: w.name,
     version: w.version,
     definition: w.definition,
@@ -672,7 +800,15 @@ adminRouter.post("/tenants/:id/workflows", requirePermission("manage_workflows")
     res.status(409).json({ error: "workflow_name_exists", detail: "Usá PUT para crear una nueva versión." });
     return;
   }
-  const created = await repos.workflows.createVersion({ tenantId: tenant.id, name, definition });
+  // App-scoping (Pieza 2): el workflow pertenece a una app; sin appId → app Default.
+  let appId: string;
+  try {
+    appId = await repos.apps.resolveAppId(tenant.id, req.body?.appId);
+  } catch {
+    res.status(400).json({ error: "app_not_found" });
+    return;
+  }
+  const created = await repos.workflows.createVersion({ tenantId: tenant.id, appId, name, definition });
   await repos.auditLog.record({
     tenantId: tenant.id,
     actor: `admin:${req.adminOperator?.operatorId ?? "?"}`,
@@ -706,6 +842,7 @@ adminRouter.put("/tenants/:id/workflows/:name", requirePermission("manage_workfl
     name,
     definition,
     isDefault: current.isDefault,
+    appId: current.appId, // la nueva versión hereda la app de la versión vigente
   });
   await repos.auditLog.record({
     tenantId: tenant.id,
@@ -722,6 +859,7 @@ adminRouter.put("/tenants/:id/workflows/:name", requirePermission("manage_workfl
 function toWebhookResponse(e: WebhookEndpoint): WebhookEndpointResponse {
   return {
     id: e.id,
+    appId: e.appId,
     url: e.url,
     events: e.events,
     description: e.description,
@@ -782,9 +920,18 @@ adminRouter.post("/tenants/:id/webhooks", requirePermission("manage_webhooks"), 
     res.status(400).json({ error: "invalid_events", allowed: WEBHOOK_EVENTS });
     return;
   }
+  // App-scoping (Pieza 2): el destino pertenece a una app; sin appId → app Default.
+  let appId: string;
+  try {
+    appId = await repos.apps.resolveAppId(tenant.id, req.body?.appId);
+  } catch {
+    res.status(400).json({ error: "app_not_found" });
+    return;
+  }
   const secret = generateWebhookSecret();
   const created = await repos.webhookEndpoints.create({
     tenantId: tenant.id,
+    appId,
     url,
     secret,
     events,
@@ -1078,8 +1225,17 @@ adminRouter.post("/test-verify", requireReview, async (req: Request, res: Respon
     // elegido: computeChecks persiste checks+evidencia+recortes y la deja en 'review'.
     const externalRef = `admin-test:${Date.now()}`;
     const ttlSec = tenant.policies.linkTokenTtlSeconds || 900;
+    // App-scoping (Pieza 2): la sesión de prueba pertenece a una app; sin appId → Default.
+    let appId: string;
+    try {
+      appId = await repos.apps.resolveAppId(tenant.id, req.body?.appId);
+    } catch {
+      res.status(400).json({ error: "app_not_found" });
+      return;
+    }
     const created = await repos.sessions.create({
       tenantId: tenant.id,
+      appId,
       externalRef,
       linkToken: generateLinkToken(),
       callbackUrl: null,
@@ -1198,8 +1354,17 @@ adminRouter.post(
       // público /v1/sessions y el default global quedan intactos.
       const defaultTtlSec = tenant.policies.linkTokenTtlSeconds || 900;
       const ttlSec = resolveTestSessionTtlSec(req.body?.ttlMinutes, defaultTtlSec);
+      // App-scoping (Pieza 2): sin appId → app Default del tenant.
+      let appId: string;
+      try {
+        appId = await repos.apps.resolveAppId(tenant.id, req.body?.appId);
+      } catch {
+        res.status(400).json({ error: "app_not_found" });
+        return;
+      }
       const created = await repos.sessions.create({
         tenantId: tenant.id,
+        appId,
         externalRef: `admin-test-live:${Date.now()}`,
         linkToken,
         callbackUrl: null,

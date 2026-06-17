@@ -7,6 +7,7 @@
  * tenantId como primer parámetro y aceptan un Executor opcional (pool o PoolClient).
  */
 export * as tenants from "./tenants";
+export * as apps from "./apps";
 export * as apiKeys from "./apiKeys";
 export * as sessions from "./sessions";
 export * as checks from "./checks";
@@ -21,6 +22,7 @@ export * as sessionEvents from "./sessionEvents";
 export * as amlEntities from "./amlEntities";
 
 import * as tenants from "./tenants";
+import * as apps from "./apps";
 import * as apiKeys from "./apiKeys";
 import * as sessions from "./sessions";
 import * as checks from "./checks";
@@ -37,6 +39,7 @@ import * as amlEntities from "./amlEntities";
 /** Agrupador único para inyección/uso conveniente. */
 export const repos = {
   tenants,
+  apps,
   apiKeys,
   sessions,
   checks,

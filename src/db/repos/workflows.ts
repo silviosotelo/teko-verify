@@ -20,6 +20,7 @@ import type { LoA, Workflow, WorkflowDefinition } from "../../types";
 interface WorkflowRow {
   id: string;
   tenant_id: string;
+  app_id: string | null;
   name: string;
   version: number;
   definition: WorkflowDefinition;
@@ -32,6 +33,7 @@ function mapWorkflow(row: WorkflowRow): Workflow {
   return {
     id: row.id,
     tenantId: row.tenant_id,
+    appId: row.app_id ?? null,
     name: row.name,
     version: row.version,
     definition: row.definition,
@@ -52,8 +54,12 @@ export async function ensureDefaults(
 ): Promise<void> {
   for (const w of defaultWorkflows()) {
     await exec.query(
-      `INSERT INTO workflows (tenant_id, name, version, definition, is_default)
-       VALUES ($1, $2, 1, $3::jsonb, true)
+      `INSERT INTO workflows (tenant_id, app_id, name, version, definition, is_default)
+       VALUES (
+         $1,
+         (SELECT id FROM apps WHERE tenant_id = $1 ORDER BY is_default DESC, created_at ASC LIMIT 1),
+         $2, 1, $3::jsonb, true
+       )
        ON CONFLICT (tenant_id, name, version) DO NOTHING`,
       [tenantId, w.name, JSON.stringify(w.definition)]
     );
@@ -104,7 +110,14 @@ export async function getCurrentByName(
  * nuevo. Devuelve la fila creada. `isDefault` se conserva si ya existía el nombre.
  */
 export async function createVersion(
-  input: { tenantId: string; name: string; definition: WorkflowDefinition; isDefault?: boolean },
+  input: {
+    tenantId: string;
+    name: string;
+    definition: WorkflowDefinition;
+    isDefault?: boolean;
+    /** App dueña (App-scoping). null/ausente = se resuelve a la app Default del tenant. */
+    appId?: string | null;
+  },
   exec: Executor = pool
 ): Promise<Workflow> {
   const maxRes = await exec.query<{ v: number | null }>(
@@ -113,8 +126,12 @@ export async function createVersion(
   );
   const nextVersion = (maxRes.rows[0]?.v ?? 0) + 1;
   const res = await exec.query<WorkflowRow>(
-    `INSERT INTO workflows (tenant_id, name, version, definition, is_default)
-     VALUES ($1, $2, $3, $4::jsonb, $5)
+    `INSERT INTO workflows (tenant_id, app_id, name, version, definition, is_default)
+     VALUES (
+       $1,
+       COALESCE($6, (SELECT id FROM apps WHERE tenant_id = $1 ORDER BY is_default DESC, created_at ASC LIMIT 1)),
+       $2, $3, $4::jsonb, $5
+     )
      RETURNING *`,
     [
       input.tenantId,
@@ -122,6 +139,7 @@ export async function createVersion(
       nextVersion,
       JSON.stringify(input.definition),
       input.isDefault ?? false,
+      input.appId ?? null,
     ]
   );
   return mapWorkflow(res.rows[0]);

@@ -701,6 +701,17 @@ export interface App {
   name: string;
   isDefault: boolean;
   createdAt: string; // ISO 8601
+  updatedAt: string; // ISO 8601
+}
+
+/** Respuesta de App para el admin (alias 1:1, contrato estable hacia la UI). */
+export interface AppResponse {
+  id: string;
+  tenantId: string;
+  name: string;
+  isDefault: boolean;
+  createdAt: string;
+  updatedAt: string;
 }
 
 // ---- Workflows (configurables + versionados) — P0 #1 --------------------- //
@@ -777,6 +788,8 @@ export interface WorkflowDefinition {
 export interface Workflow {
   id: string;
   tenantId: string;
+  /** App a la que pertenece el workflow (App-scoping aditivo). null = tenant-wide (compat). */
+  appId: string | null;
   name: string;
   version: number;
   definition: WorkflowDefinition;
@@ -807,6 +820,8 @@ export interface Tenant {
 export interface ApiKey {
   id: string;
   tenantId: string;
+  /** App a la que pertenece la key (App-scoping aditivo). null = app Default del tenant. */
+  appId: string | null;
   /** Hash del secreto (p.ej. sha256). Nunca el secreto plano. */
   keyHash: string;
   /** Prefijo público mostrable para identificar la key sin revelarla. */
@@ -845,6 +860,8 @@ export interface VerificationSession {
   tenantId: string;
   /** Referencia externa del tenant (idempotencia de creación, §9). */
   externalRef: string | null;
+  /** App a la que pertenece la sesión (App-scoping aditivo). null = sesión tenant-wide (compat). */
+  appId: string | null;
   /**
    * Tipo de documento elegido para esta sesión (multi-documento — P1 #3). Snapshot
    * persistido: lo fija el tenant al crear la sesión o el titular en la pantalla
@@ -1351,6 +1368,7 @@ export interface ApiKeyResponse {
   label: string;
   scopes: string[];
   status: ApiKeyStatus;
+  appId: string | null;
   lastUsedAt: string | null;
   createdAt: string;
 }
@@ -1394,6 +1412,7 @@ export interface AdminMetricsResponse {
 export interface WorkflowResponse {
   id: string;
   tenantId: string;
+  appId: string | null;
   name: string;
   version: number;
   definition: WorkflowDefinition;
@@ -1503,6 +1522,8 @@ export const WEBHOOK_EVENTS: WebhookEvent[] = [
 export interface WebhookEndpoint {
   id: string;
   tenantId: string;
+  /** App a la que pertenece el destino (App-scoping aditivo). null = tenant-wide (compat). */
+  appId: string | null;
   url: string;
   /** Secreto HMAC del destino. NUNCA se devuelve en listados (solo al crear). */
   secret: string;
@@ -1516,6 +1537,7 @@ export interface WebhookEndpoint {
 /** Vista del destino para el admin (SIN el secreto). */
 export interface WebhookEndpointResponse {
   id: string;
+  appId: string | null;
   url: string;
   events: WebhookEvent[];
   description: string | null;

@@ -23,6 +23,7 @@ import type {
 interface SessionRow {
   id: string;
   tenant_id: string;
+  app_id: string | null;
   external_ref: string | null;
   document_type: DocumentType;
   state: SessionState;
@@ -49,6 +50,7 @@ function mapSession(row: SessionRow): VerificationSession {
   return {
     id: row.id,
     tenantId: row.tenant_id,
+    appId: row.app_id ?? null,
     externalRef: row.external_ref,
     documentType: row.document_type,
     state: row.state,
@@ -74,6 +76,8 @@ function mapSession(row: SessionRow): VerificationSession {
 
 export interface CreateSessionInput {
   tenantId: string;
+  /** App dueña de la sesión (App-scoping). null/ausente = la app Default del tenant. */
+  appId?: string | null;
   externalRef?: string | null;
   /** Tipo de documento elegido (P1 #3). Default 'ci_py' (lo aplica la columna). */
   documentType?: DocumentType | null;
@@ -96,10 +100,14 @@ export async function create(
 ): Promise<VerificationSession> {
   const res = await exec.query<SessionRow>(
     `INSERT INTO verification_sessions
-       (tenant_id, external_ref, document_type, link_token, callback_url,
+       (tenant_id, app_id, external_ref, document_type, link_token, callback_url,
         assurance_required, workflow_id, workflow_version, workflow_snapshot,
         redirect_url, locale, expires_at)
-     VALUES ($1, $2, COALESCE($3, 'ci_py'), $4, $5, $6, $7, $8, $9::jsonb, $10, COALESCE($11, 'es'), $12)
+     VALUES (
+       $1,
+       COALESCE($13, (SELECT id FROM apps WHERE tenant_id = $1 ORDER BY is_default DESC, created_at ASC LIMIT 1)),
+       $2, COALESCE($3, 'ci_py'), $4, $5, $6, $7, $8, $9::jsonb, $10, COALESCE($11, 'es'), $12
+     )
      RETURNING *`,
     [
       input.tenantId,
@@ -116,6 +124,7 @@ export async function create(
       input.redirectUrl ?? null,
       input.locale ?? null,
       input.expiresAt,
+      input.appId ?? null,
     ]
   );
   return mapSession(res.rows[0]);

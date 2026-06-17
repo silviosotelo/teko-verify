@@ -118,8 +118,22 @@ tenantRouter.post("/sessions", async (req: Request, res: Response) => {
       return;
     }
 
+    // App-scoping (Pieza 2): la sesión pertenece a una app. Precedencia: appId del
+    // body → app de la API key usada → app Default del tenant (fallback compat).
+    let appId: string;
+    try {
+      appId = await repos.apps.resolveAppId(
+        tenant.id,
+        body.appId ?? req.tenantCtx!.apiKey.appId ?? null
+      );
+    } catch {
+      res.status(400).json({ error: "app_not_found" });
+      return;
+    }
+
     const session = await repos.sessions.create({
       tenantId: tenant.id,
+      appId,
       externalRef: externalRef ?? null,
       documentType,
       linkToken,

@@ -13,6 +13,7 @@ import type { ApiKey, ApiKeyStatus } from "../../types";
 interface ApiKeyRow {
   id: string;
   tenant_id: string;
+  app_id: string | null;
   key_hash: string;
   prefix: string;
   label: string;
@@ -26,6 +27,7 @@ function mapApiKey(row: ApiKeyRow): ApiKey {
   return {
     id: row.id,
     tenantId: row.tenant_id,
+    appId: row.app_id ?? null,
     keyHash: row.key_hash,
     prefix: row.prefix,
     label: row.label,
@@ -38,6 +40,8 @@ function mapApiKey(row: ApiKeyRow): ApiKey {
 
 export interface CreateApiKeyInput {
   tenantId: string;
+  /** App dueña de la key (App-scoping). null/ausente = se resuelve a la app Default. */
+  appId?: string | null;
   keyHash: string;
   prefix: string;
   label: string;
@@ -49,10 +53,17 @@ export async function create(
   exec: Executor = pool
 ): Promise<ApiKey> {
   const res = await exec.query<ApiKeyRow>(
-    `INSERT INTO api_keys (tenant_id, key_hash, prefix, label, scopes)
-     VALUES ($1, $2, $3, $4, $5::jsonb)
+    `INSERT INTO api_keys (tenant_id, app_id, key_hash, prefix, label, scopes)
+     VALUES ($1, $2, $3, $4, $5, $6::jsonb)
      RETURNING *`,
-    [input.tenantId, input.keyHash, input.prefix, input.label, JSON.stringify(input.scopes)]
+    [
+      input.tenantId,
+      input.appId ?? null,
+      input.keyHash,
+      input.prefix,
+      input.label,
+      JSON.stringify(input.scopes),
+    ]
   );
   return mapApiKey(res.rows[0]);
 }
