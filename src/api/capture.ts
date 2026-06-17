@@ -35,6 +35,7 @@ import { PaddleOcrClient } from "../modules/document";
 // Timeline forense (P0 #3): contexto de red/dispositivo por request + registro
 // FAIL-OPEN de eventos del ciclo de vida en session_events.
 import { requestContext } from "../lib/requestContext";
+import { isDocumentType } from "../types";
 import type {
   CaptureStatusResponse,
   ConfirmResponse,
@@ -455,6 +456,15 @@ captureRouter.post("/:token/document", async (req: Request, res: Response) => {
     // del OCR. La selfie/frames siguen JPEG/PNG-only (sin allowPdf).
     const front = decodeBase64Image(req.body?.front, { allowPdf: true });
     const back = decodeBase64Image(req.body?.back, { allowPdf: true });
+    // Tipo de documento elegido por el titular en "Elegir documento" (multi-documento
+    // P1 #3). Si viene un literal soportado y difiere del snapshot, se persiste en la
+    // sesión para que el pipeline rutee la extracción por él. Si se omite o es inválido,
+    // se conserva el documentType ya snapshoteado (default 'ci_py'). Fail-closed/no-op.
+    if (isDocumentType(req.body?.documentType) && req.body.documentType !== session.documentType) {
+      await repos.sessions.update(session.tenantId, session.id, {
+        documentType: req.body.documentType,
+      });
+    }
     await evidenceStore.save(session.tenantId, session.id, "doc_front", front);
     await evidenceStore.save(session.tenantId, session.id, "doc_back", back);
     await recordEvent(req, session, "document.front.captured", { bytes: front.length });

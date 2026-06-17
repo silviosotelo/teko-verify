@@ -91,8 +91,26 @@ export type TenantStatus = "active" | "suspended" | "disabled";
 /** Estado de una API key. */
 export type ApiKeyStatus = "active" | "revoked";
 
-/** Tipo de documento soportado. Hoy: cédula PY. */
-export type DocumentType = "ci_py";
+/**
+ * Tipo de documento soportado (multi-documento / multi-país — P1 #3). Unión
+ * EXTENSIBLE: hoy
+ *   - "ci_py"    = cédula de identidad paraguaya (frente impreso + dorso MRZ TD1).
+ *                  Camino más completo y DEFAULT (no rompe nada existente).
+ *   - "passport" = pasaporte ICAO (página de datos con MRZ TD3 2×44). Un solo lado,
+ *                  parser MRZ estandarizado → sirve para CUALQUIER país emisor.
+ * Para sumar más tipos (dni_ar, cedula_xx, ...) basta agregar el literal acá, un
+ * `DocumentExtractor` en modules/document.ts y, si aplica, el ruteo de UI. El resto
+ * del pipeline razona contra esta unión.
+ */
+export type DocumentType = "ci_py" | "passport";
+
+/** Literales válidos de DocumentType (whitelist runtime para validar input del API). */
+export const DOCUMENT_TYPES: readonly DocumentType[] = ["ci_py", "passport"] as const;
+
+/** Type-guard runtime: ¿`x` es un DocumentType soportado? (fail-closed en el API). */
+export function isDocumentType(x: unknown): x is DocumentType {
+  return typeof x === "string" && (DOCUMENT_TYPES as readonly string[]).includes(x);
+}
 
 /**
  * Tipo de ataque detectado por el PAD pasivo (anti-spoof) — §6.
@@ -678,6 +696,13 @@ export interface VerificationSession {
   tenantId: string;
   /** Referencia externa del tenant (idempotencia de creación, §9). */
   externalRef: string | null;
+  /**
+   * Tipo de documento elegido para esta sesión (multi-documento — P1 #3). Snapshot
+   * persistido: lo fija el tenant al crear la sesión o el titular en la pantalla
+   * "Elegir documento" (POST /document). El módulo `document` rutea la extracción
+   * según este valor. Default "ci_py" (la columna es NOT NULL DEFAULT 'ci_py').
+   */
+  documentType: DocumentType;
   state: SessionState;
   /** Token de un solo uso, expirable e inadivinable para la captura (§8). */
   linkToken: string;
@@ -880,6 +905,12 @@ export interface CreateSessionRequest {
   /** LoA requerido; si se omite usa el de la policy del tenant. */
   assuranceRequired?: LoA;
   /**
+   * Tipo de documento esperado (multi-documento — P1 #3). Si se omite, default
+   * "ci_py"; el titular igual puede fijarlo/cambiarlo en la pantalla "Elegir
+   * documento" al subir el documento (POST /document).
+   */
+  documentType?: DocumentType;
+  /**
    * Workflow a usar (id de una versión concreta). Si se omite, se snapshotea el
    * workflow default que corresponde al `assuranceRequired` (compatibilidad).
    */
@@ -970,12 +1001,23 @@ export interface SelfieUploadRequest {
   };
 }
 
-/** POST /verify/:token/document — cédula frente + dorso. */
+/** POST /verify/:token/document — documento frente + dorso. */
 export interface DocumentUploadRequest {
-  /** Frente (base64). */
+  /** Frente / página de datos (base64). */
   front: string;
-  /** Dorso (base64) — MRZ TD1 + barcode 1D. */
+  /**
+   * Dorso (base64) — MRZ TD1 + barcode 1D para la cédula PY. En PASAPORTE no hay
+   * dorso (documento de un solo lado): el cliente reenvía la misma página de datos
+   * aquí para no romper el flujo de subida/submit, y el extractor de pasaporte lo
+   * ignora.
+   */
   back: string;
+  /**
+   * Tipo de documento elegido por el titular en "Elegir documento" (multi-documento
+   * — P1 #3). Si viene, se persiste en la sesión y el módulo `document` rutea por él.
+   * Si se omite, se conserva el documentType ya snapshoteado en la sesión.
+   */
+  documentType?: DocumentType;
 }
 
 /** Respuesta común de uploads. */

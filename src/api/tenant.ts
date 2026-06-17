@@ -18,6 +18,7 @@ import { requestContext } from "../lib/requestContext";
 import { webhookDispatcher } from "../webhooks/dispatcher";
 import { evidenceStore } from "../lib/evidenceStore";
 import { isMailerConfigured, isValidEmail, sendVerificationEmail } from "../lib/mailer";
+import { isDocumentType } from "../types";
 import type {
   CreateSessionResponse,
   DeleteSessionResponse,
@@ -72,6 +73,15 @@ tenantRouter.post("/sessions", async (req: Request, res: Response) => {
       return;
     }
 
+    // Tipo de documento esperado (multi-documento P1 #3). Opcional; si viene debe ser
+    // un literal soportado (whitelist runtime, fail-closed). Si se omite, la columna
+    // aplica el default 'ci_py' → comportamiento idéntico al actual.
+    if (body.documentType !== undefined && !isDocumentType(body.documentType)) {
+      res.status(400).json({ error: "invalid_document_type" });
+      return;
+    }
+    const documentType = isDocumentType(body.documentType) ? body.documentType : undefined;
+
     // Idempotencia (§9): si ya existe (tenant, external_ref) devolvemos la misma sesión.
     if (externalRef) {
       const existing = await repos.sessions.findByExternalRef(tenant.id, externalRef);
@@ -111,6 +121,7 @@ tenantRouter.post("/sessions", async (req: Request, res: Response) => {
     const session = await repos.sessions.create({
       tenantId: tenant.id,
       externalRef: externalRef ?? null,
+      documentType,
       linkToken,
       callbackUrl: body.callbackUrl ?? null,
       assuranceRequired: wf.assuranceRequired,

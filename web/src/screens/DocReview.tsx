@@ -13,19 +13,21 @@ export function DocReview({
   image,
   onConfirm,
   onRetake,
+  label,
 }: {
   side: "front" | "back"
   image: string
   onConfirm: () => void
   onRetake: () => void
+  /** Override del rótulo del lado (p.ej. pasaporte: "la página de datos"). */
+  label?: string
 }) {
   const isFront = side === "front"
+  const sideLabel = label ?? (isFront ? "el frente" : "el dorso")
   return (
     <Card>
       <div className="teko-slide-in flex flex-col">
-        <h1 className="text-xl font-bold text-gray-900">
-          {isFront ? "Revisá el frente" : "Revisá el dorso"}
-        </h1>
+        <h1 className="text-xl font-bold text-gray-900">Revisá {sideLabel}</h1>
         <p className="mt-1 text-sm leading-relaxed text-gray-500">
           ¿Se ve nítido y completo, sin reflejos? Si está bien, confirmá.
         </p>
@@ -33,7 +35,7 @@ export function DocReview({
         <div className="my-5 overflow-hidden rounded-3xl bg-gray-900 ring-1 ring-gray-200">
           <img
             src={image}
-            alt={`Cédula ${isFront ? "frente" : "dorso"}`}
+            alt={`Documento ${sideLabel}`}
             className="aspect-[1.586/1] w-full object-cover"
           />
         </div>

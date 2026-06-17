@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react"
-import { apiPost, type DocCheckResult } from "../api"
+import { apiPost, type DocCheckResult, type DocumentType } from "../api"
 import { docMsg, DOC_LIVE_MSG, errorMessage } from "../messages"
 import { useCamera } from "../useCamera"
 import { useDocDetector, type Quad } from "../useDocDetector"
@@ -24,10 +24,17 @@ const COOLDOWN_MS = 1200
 const REACQUIRE_ABSENT_FRAMES = 4
 
 /**
- * Captura de cédula con REVISIÓN/RETAKE POR LADO (estilo Didit) — orquestador:
+ * Captura de documento con REVISIÓN/RETAKE POR LADO (estilo Didit) — orquestador
+ * ADAPTATIVO al tipo de documento (multi-documento P1 #3):
  *
- *   prep-front → capture-front → review-front → prep-back → capture-back →
- *   review-back → submitted (POST /document {front,back}) → onDone()
+ *   - CÉDULA PY ("ci_py", default): frente + dorso (camino histórico INTACTO)
+ *       prep-front → capture-front → review-front → prep-back → capture-back →
+ *       review-back → submitted (POST /document {front,back,documentType})
+ *   - PASAPORTE ("passport"): UNA sola página de datos (sin dorso)
+ *       prep-front → capture-front → review-front → submitted
+ *       (POST /document {front, back: front, documentType}). El backend ignora
+ *       `back` en el camino de pasaporte; reenviamos la página de datos para no
+ *       romper el contrato de subida.
  *
  * La cámara real por lado (DocSideCamera) conserva INTACTA la lógica anti-loop
  * del detector geométrico (OpenCV.js) del commit 8b27e42: cooldown, re-adquisición
@@ -35,7 +42,6 @@ const REACQUIRE_ABSENT_FRAMES = 4
  * 3·2·1. La diferencia: en vez de auto-avanzar/subir, devuelve el dataURL al
  * orquestador, que muestra la revisión y permite retomar el lado.
  *
- * Backend SIN cambios: las dos imágenes viajan juntas en /document al final;
  * /doc-check sigue siendo informativo por lado.
  */
 type Phase =
@@ -48,35 +54,41 @@ type Phase =
   | "submitted"
 
 export function DocCapture({
+  documentType = "ci_py",
   onDone,
   onBack,
 }: {
+  /** Tipo de documento elegido; rige si hay dorso (cédula) o no (pasaporte). */
+  documentType?: DocumentType
   onDone: () => void
   onBack?: () => void
 }) {
+  const isPassport = documentType === "passport"
   const [phase, setPhase] = useState<Phase>("prep-front")
   const [front, setFront] = useState<string | null>(null)
   const [back, setBack] = useState<string | null>(null)
   const [uploadErr, setUploadErr] = useState<string | null>(null)
   const [uploading, setUploading] = useState(false)
 
-  // Sube ambos lados al confirmar el dorso. Fail-closed: si falla, dejamos
-  // reintentar el dorso (no perdemos el frente).
-  const submitBoth = useCallback(
+  // Sube el documento. Para cédula viajan los dos lados; para pasaporte se reenvía
+  // la página de datos como `back` (el backend la ignora en ese camino). El
+  // `documentType` viaja para que el backend rutee la extracción. Fail-closed: si
+  // falla, volvemos a la revisión del último lado (no perdemos lo capturado).
+  const submitDoc = useCallback(
     async (frontImg: string, backImg: string) => {
       setUploading(true)
       setUploadErr(null)
       try {
-        await apiPost("/document", { front: frontImg, back: backImg })
+        await apiPost("/document", { front: frontImg, back: backImg, documentType })
         setUploading(false)
         setPhase("submitted")
       } catch (e) {
         setUploading(false)
         setUploadErr(errorMessage(e))
-        setPhase("review-back")
+        setPhase(isPassport ? "review-front" : "review-back")
       }
     },
-    [],
+    [documentType, isPassport],
   )
 
   switch (phase) {
@@ -85,12 +97,24 @@ export function DocCapture({
         <Prepare
           hero={<DocHero className="h-24 w-32" />}
           title="Preparemos tu documento"
-          subtitle="Vamos a sacar una foto del frente de tu cédula."
-          tips={[
-            { icon: <IconFrame className="size-6" />, title: "Frente del documento", desc: "Empezamos por el lado de la foto y los datos." },
-            { icon: <IconSun className="size-6" />, title: "Buena luz", desc: "Buscá un lugar bien iluminado, sin sombras." },
-            { icon: <IconNoGlare className="size-6" />, title: "Que entre completo, sin reflejos", desc: "Las 4 esquinas dentro del marco." },
-          ]}
+          subtitle={
+            isPassport
+              ? "Vamos a sacar una foto de la página de datos de tu pasaporte."
+              : "Vamos a sacar una foto del frente de tu cédula."
+          }
+          tips={
+            isPassport
+              ? [
+                  { icon: <IconFrame className="size-6" />, title: "Página de datos", desc: "La página con tu foto y tus datos, abierta y plana." },
+                  { icon: <IconNoGlare className="size-6" />, title: "Franja MRZ visible", desc: "Las dos líneas de símbolos del pie deben verse completas." },
+                  { icon: <IconSun className="size-6" />, title: "Buena luz, sin reflejos", desc: "Lugar iluminado; que entre completa dentro del marco." },
+                ]
+              : [
+                  { icon: <IconFrame className="size-6" />, title: "Frente del documento", desc: "Empezamos por el lado de la foto y los datos." },
+                  { icon: <IconSun className="size-6" />, title: "Buena luz", desc: "Buscá un lugar bien iluminado, sin sombras." },
+                  { icon: <IconNoGlare className="size-6" />, title: "Que entre completo, sin reflejos", desc: "Las 4 esquinas dentro del marco." },
+                ]
+          }
           cta="Estoy listo"
           onDone={() => setPhase("capture-front")}
           onBack={onBack}
@@ -101,6 +125,7 @@ export function DocCapture({
       return (
         <DocSideCamera
           side="front"
+          isPassport={isPassport}
           onCaptured={(img) => {
             setFront(img)
             setPhase("review-front")
@@ -109,13 +134,32 @@ export function DocCapture({
       )
 
     case "review-front":
+      // Pasaporte: la página de datos es el único lado → confirmar SUBE el documento.
+      // Cédula: confirmar avanza al dorso (camino histórico).
       return (
-        <DocReview
-          side="front"
-          image={front!}
-          onConfirm={() => setPhase("prep-back")}
-          onRetake={() => setPhase("capture-front")}
-        />
+        <>
+          {isPassport && uploadErr && (
+            <Card>
+              <p className="text-sm text-error" role="alert">
+                {uploadErr}
+              </p>
+            </Card>
+          )}
+          <DocReview
+            side="front"
+            label={isPassport ? "la página de datos" : undefined}
+            image={front!}
+            onConfirm={() =>
+              isPassport ? void submitDoc(front!, front!) : setPhase("prep-back")
+            }
+            onRetake={() => setPhase("capture-front")}
+          />
+          {isPassport && uploading && (
+            <p className="mt-2 text-center text-xs text-gray-400">
+              Subiendo tu pasaporte…
+            </p>
+          )}
+        </>
       )
 
     case "prep-back":
@@ -158,7 +202,7 @@ export function DocCapture({
           <DocReview
             side="back"
             image={back!}
-            onConfirm={() => void submitBoth(front!, back!)}
+            onConfirm={() => void submitDoc(front!, back!)}
             onRetake={() => setPhase("capture-back")}
           />
           {uploading && (
@@ -183,9 +227,12 @@ export function DocCapture({
  */
 function DocSideCamera({
   side,
+  isPassport = false,
   onCaptured,
 }: {
   side: "front" | "back"
+  /** Pasaporte: el "frente" es la página de datos; coaching apunta a la franja MRZ. */
+  isPassport?: boolean
   onCaptured: (image: string) => void
 }) {
   const cam = useCamera("environment")
@@ -386,24 +433,41 @@ function DocSideCamera({
     return () => cancelAnimationFrame(raf)
   }, [manualMode, count, cam.videoRef])
 
+  // Etiqueta del documento/lado para la guía (adaptativa al tipo).
+  const docNoun = isPassport ? "el documento" : "la cédula"
+  const inFrameMsg = `Poné ${docNoun} dentro del marco`
+
   const liveMsg = detLoading
     ? "Preparando el detector…"
     : det.verdict === "loading" || det.verdict === "no-camera"
       ? "Iniciando cámara…"
-      : (DOC_LIVE_MSG[det.verdict] ?? "Poné la cédula dentro del marco")
+      : (DOC_LIVE_MSG[det.verdict] ?? inFrameMsg)
 
   const frameColor = isGood ? "border-primary" : "border-white/60"
 
+  // Título/subtítulo: pasaporte = página de datos (con la franja MRZ); cédula =
+  // frente/dorso (camino histórico).
+  const title = isPassport
+    ? "Capturá la página de datos"
+    : isFront
+      ? "Capturá el frente"
+      : "Capturá el dorso"
+  const subtitle = isPassport
+    ? "Encuadrá la página de datos de tu pasaporte, con la franja MRZ del pie visible. La foto se saca sola."
+    : isFront
+      ? "Encuadrá el frente de tu cédula dentro del marco. La foto se saca sola."
+      : "Encuadrá el dorso dentro del marco. La foto se saca sola."
+  // Incluye la preposición para que la frase del botón quede natural en ambos casos.
+  const captureNoun = isPassport
+    ? "de la página de datos"
+    : isFront
+      ? "del frente"
+      : "del dorso"
+
   return (
     <Card>
-      <h1 className="text-xl font-bold text-gray-900">
-        {isFront ? "Capturá el frente" : "Capturá el dorso"}
-      </h1>
-      <p className="mt-1 text-sm leading-relaxed text-gray-500">
-        {isFront
-          ? "Encuadrá el frente de tu cédula dentro del marco. La foto se saca sola."
-          : "Encuadrá el dorso dentro del marco. La foto se saca sola."}
-      </p>
+      <h1 className="text-xl font-bold text-gray-900">{title}</h1>
+      <p className="mt-1 text-sm leading-relaxed text-gray-500">{subtitle}</p>
 
       {notice && <Notice>{notice}</Notice>}
 
@@ -465,7 +529,7 @@ function DocSideCamera({
                   isGood ? "bg-white" : "bg-mint"
                 }`}
               />
-              {manualMode ? "Poné la cédula dentro del marco" : liveMsg}
+              {manualMode ? inFrameMsg : liveMsg}
             </span>
           </div>
         )}
@@ -477,7 +541,7 @@ function DocSideCamera({
 
       {manualMode && (
         <Notice>
-          No pudimos preparar el detector automático. Encuadrá la cédula
+          No pudimos preparar el detector automático. Encuadrá {docNoun}{" "}
           llenando el marco y tocá el botón para sacar la foto.
         </Notice>
       )}
@@ -487,13 +551,11 @@ function DocSideCamera({
         onClick={() => void doCapture()}
         variant={manualMode ? "primary" : "ghost"}
       >
-        {busy
-          ? "Revisando la foto…"
-          : `Sacar foto del ${isFront ? "frente" : "dorso"} ahora`}
+        {busy ? "Revisando la foto…" : `Sacar foto ${captureNoun} ahora`}
       </Button>
       <p className="mt-2 text-center text-xs text-gray-400">
         {manualMode
-          ? "Sacá la foto cuando la cédula llene el marco"
+          ? `Sacá la foto cuando ${docNoun} llene el marco`
           : "La captura es automática · o tocá el botón cuando quieras"}
       </p>
     </Card>

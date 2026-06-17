@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react"
-import { TOKEN, getStatus, ApiError, type StatusResult } from "./api"
+import { TOKEN, getStatus, ApiError, type StatusResult, type DocumentType } from "./api"
 import { errorMessage } from "./messages"
 import { Brand, Card, Stepper } from "./ui"
 import { Spinner, CameraHero, IconSun, IconFace, IconNoGlasses } from "./Icons"
@@ -136,6 +136,10 @@ export function App() {
   const [step, setStep] = useState<Step>("loading")
   const [status, setStatus] = useState<StatusResult | null>(null)
   const [linkError, setLinkError] = useState<string | null>(null)
+  // Tipo de documento elegido en "Elegir documento" (multi-documento P1 #3). Rige
+  // el sub-flujo de captura (pasaporte = una sola página) y viaja en POST /document.
+  // Default "ci_py" (cédula PY) → comportamiento idéntico al previo.
+  const [documentType, setDocumentType] = useState<DocumentType>("ci_py")
 
   // Rehidratación al montar (#3/#6).
   useEffect(() => {
@@ -207,10 +211,16 @@ export function App() {
     <Shell step={step}>
       {step === "intro" && <Intro onDone={() => setStep("choose-doc")} />}
       {step === "choose-doc" && (
-        <ChooseDocument onDone={() => setStep("doc")} />
+        <ChooseDocument
+          onDone={(dt) => {
+            setDocumentType(dt)
+            setStep("doc")
+          }}
+        />
       )}
       {step === "doc" && (
         <DocCapture
+          documentType={documentType}
           onDone={() => setStep("prep-selfie")}
           onBack={() => setStep("choose-doc")}
         />

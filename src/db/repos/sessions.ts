@@ -12,6 +12,7 @@ import { pool } from "../pool";
 import type { Executor } from "../executor";
 import { iso, isoOrNull } from "./mapping";
 import type {
+  DocumentType,
   LoA,
   SessionResult,
   SessionState,
@@ -23,6 +24,7 @@ interface SessionRow {
   id: string;
   tenant_id: string;
   external_ref: string | null;
+  document_type: DocumentType;
   state: SessionState;
   link_token: string;
   callback_url: string | null;
@@ -48,6 +50,7 @@ function mapSession(row: SessionRow): VerificationSession {
     id: row.id,
     tenantId: row.tenant_id,
     externalRef: row.external_ref,
+    documentType: row.document_type,
     state: row.state,
     linkToken: row.link_token,
     callbackUrl: row.callback_url,
@@ -72,6 +75,8 @@ function mapSession(row: SessionRow): VerificationSession {
 export interface CreateSessionInput {
   tenantId: string;
   externalRef?: string | null;
+  /** Tipo de documento elegido (P1 #3). Default 'ci_py' (lo aplica la columna). */
+  documentType?: DocumentType | null;
   linkToken: string;
   callbackUrl?: string | null;
   assuranceRequired: LoA;
@@ -91,14 +96,15 @@ export async function create(
 ): Promise<VerificationSession> {
   const res = await exec.query<SessionRow>(
     `INSERT INTO verification_sessions
-       (tenant_id, external_ref, link_token, callback_url,
+       (tenant_id, external_ref, document_type, link_token, callback_url,
         assurance_required, workflow_id, workflow_version, workflow_snapshot,
         redirect_url, locale, expires_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, COALESCE($10, 'es'), $11)
+     VALUES ($1, $2, COALESCE($3, 'ci_py'), $4, $5, $6, $7, $8, $9::jsonb, $10, COALESCE($11, 'es'), $12)
      RETURNING *`,
     [
       input.tenantId,
       input.externalRef ?? null,
+      input.documentType ?? null,
       input.linkToken,
       input.callbackUrl ?? null,
       input.assuranceRequired,
@@ -256,6 +262,8 @@ export async function listByTenant(
 
 export interface UpdateSessionInput {
   state?: SessionState;
+  /** Tipo de documento elegido por el titular al subir el documento (P1 #3). */
+  documentType?: DocumentType;
   recaptureCount?: number;
   result?: SessionResult | null;
   /** ISO 8601; usar para marcar la finalización. */
@@ -290,6 +298,7 @@ export async function update(
        used_at         = CASE WHEN $9::boolean THEN $10::timestamptz ELSE used_at END,
        reviewed_by     = CASE WHEN $11::boolean THEN $12::text ELSE reviewed_by END,
        reviewed_at     = CASE WHEN $13::boolean THEN $14::timestamptz ELSE reviewed_at END,
+       document_type   = COALESCE($15, document_type),
        updated_at      = now()
      WHERE id = $1 AND tenant_id = $2
      RETURNING *`,
@@ -309,6 +318,7 @@ export async function update(
       patch.reviewedBy !== undefined ? patch.reviewedBy : null,
       patch.reviewedAt !== undefined,
       patch.reviewedAt !== undefined ? patch.reviewedAt : null,
+      patch.documentType ?? null,
     ]
   );
   return res.rows[0] ? mapSession(res.rows[0]) : null;

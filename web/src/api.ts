@@ -7,6 +7,15 @@
 export const TOKEN: string =
   location.pathname.split("/").filter(Boolean).pop() ?? ""
 
+/**
+ * Tipo de documento elegido por el titular (multi-documento P1 #3). Espejo del
+ * literal del backend (src/types.ts DocumentType). Viaja en POST /sessions y en
+ * POST /document; el backend rutea la extracción por él.
+ *   - "ci_py"    cédula de identidad paraguaya (frente + dorso MRZ TD1).
+ *   - "passport" pasaporte ICAO (página de datos, MRZ TD3; un solo lado).
+ */
+export type DocumentType = "ci_py" | "passport"
+
 export interface QualityResult {
   passed?: boolean
   reasons?: string[]

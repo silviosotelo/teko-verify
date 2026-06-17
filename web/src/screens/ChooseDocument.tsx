@@ -2,16 +2,26 @@ import { useState } from "react"
 import { Button, Card, OptionRow, BackBar } from "../ui"
 import { IconIdCard } from "../Icons"
 
+import type { DocumentType } from "../api"
+
 /**
  * Pantalla 2 — Elegir documento (estilo Didit).
- * Cédula de Identidad funcional (default). Pasaporte / Licencia / Carnet de
- * residente se muestran como "Próximamente" (deshabilitados): el backend hoy
- * solo procesa cédula PY. Selector de país: Paraguay por default (el resto
- * deshabilitado, mismo motivo). No toca el backend.
+ * Cédula de Identidad (default, cédula PY) y Pasaporte (ICAO, cualquier país
+ * emisor) funcionales: el `documentType` elegido viaja al backend, que rutea la
+ * extracción por él (multi-documento P1 #3). Licencia / Carnet de residente
+ * siguen como "Próximamente" (sin extractor todavía). Selector de país: Paraguay
+ * por default (para pasaporte el país sale del MRZ, no de este selector).
  */
-const DOC_TYPES = [
-  { id: "cedula", label: "Cédula de Identidad", hint: "Documento nacional", enabled: true },
-  { id: "pasaporte", label: "Pasaporte", hint: "Internacional", enabled: false },
+const DOC_TYPES: Array<{
+  id: string
+  label: string
+  hint: string
+  enabled: boolean
+  /** Mapeo al literal que entiende el backend (DocumentType). */
+  documentType?: DocumentType
+}> = [
+  { id: "cedula", label: "Cédula de Identidad", hint: "Documento nacional", enabled: true, documentType: "ci_py" },
+  { id: "pasaporte", label: "Pasaporte", hint: "Internacional", enabled: true, documentType: "passport" },
   { id: "licencia", label: "Licencia de conducir", hint: "", enabled: false },
   { id: "residente", label: "Carnet de residente", hint: "", enabled: false },
 ]
@@ -20,7 +30,8 @@ export function ChooseDocument({
   onDone,
   onBack,
 }: {
-  onDone: () => void
+  /** Recibe el tipo de documento elegido para que el sub-flujo de captura rutee. */
+  onDone: (documentType: DocumentType) => void
   onBack?: () => void
 }) {
   const [docType, setDocType] = useState("cedula")
@@ -79,7 +90,14 @@ export function ChooseDocument({
         </div>
 
         <div className="mt-7">
-          <Button onClick={onDone}>Continuar</Button>
+          <Button
+            onClick={() => {
+              const chosen = DOC_TYPES.find((d) => d.id === docType)
+              onDone(chosen?.documentType ?? "ci_py")
+            }}
+          >
+            Continuar
+          </Button>
         </div>
       </div>
     </Card>

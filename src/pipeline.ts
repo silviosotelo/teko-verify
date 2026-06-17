@@ -33,6 +33,7 @@ import type {
   AmlInput,
   AmlResult,
   DocumentResult,
+  DocumentType,
   EvidenceCropType,
   EvidenceType,
   FaceSearchResult,
@@ -106,7 +107,12 @@ export interface PipelineModules {
       activeLiveness?: { challenges: string[]; passed: boolean };
     }
   ): Promise<LivenessResult>;
-  document(front: Buffer, back: Buffer): Promise<DocumentResult>;
+  /**
+   * Extrae el documento. `documentType` rutea el extractor (multi-documento P1 #3):
+   * "ci_py" (default, cédula PY frente+dorso) | "passport" (pasaporte ICAO, MRZ TD3,
+   * un solo lado). Si se omite → "ci_py" (no-regresión).
+   */
+  document(front: Buffer, back: Buffer, documentType?: DocumentType): Promise<DocumentResult>;
   /** Embedding 512D de una imagen, o null si no hay cara. (engine.embedBestFace) */
   embed(image: Buffer): Promise<Float32Array | null>;
   /**
@@ -541,7 +547,7 @@ export async function processSession(
     }
 
     // === 3) DOCUMENT (rechazo duro) ======================================= //
-    const document = await deps.modules.document(images.docFront, images.docBack);
+    const document = await deps.modules.document(images.docFront, images.docBack, session.documentType);
     if (!document.passed) {
       return await rejectAt(deps, session, images, "document", documentReasons(document), { quality, liveness, document });
     }
@@ -886,7 +892,7 @@ export async function computeChecks(
     }
 
     // === 3) DOCUMENT (NO cortocircuita) =================================== //
-    const document = await deps.modules.document(images.docFront, images.docBack);
+    const document = await deps.modules.document(images.docFront, images.docBack, session.documentType);
 
     // === 4) MATCH (NO cortocircuita) — sólo si el LoA lo exige ============= //
     let matchRes: MatchResult | undefined;

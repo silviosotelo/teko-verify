@@ -32,6 +32,7 @@ import type {
   BarcodeData,
   DocFaceCrop,
   DocumentResult,
+  DocumentType,
   ExtractedDocument,
   MrzData,
   OcrData,
@@ -198,6 +199,36 @@ export function detectTd1Lines(input: string | string[]): string[] {
   return orderTd1(top3);
 }
 
+/** Ordena 2 líneas MRZ TD3 (pasaporte) por estructura: línea de NOMBRES primero. */
+function orderTd3(lines: string[]): string[] {
+  if (lines.length < 2) return lines;
+  // TD3 línea 1 = `P<ISS APELLIDO<<NOMBRES` (letra-pesada: tipo+país+nombres);
+  // línea 2 = nº + nacionalidad + fechas + check digits (dígito-pesada). El parser
+  // `mrz` espera [línea1, línea2]; ordenar por proporción de letras desc lo garantiza
+  // (mismo criterio que orderTd1 usa para la línea de nombres).
+  const letterRatio = (s: string) => s.replace(/[^A-Z]/g, "").length / Math.max(1, s.length);
+  return [...lines].sort((a, b) => letterRatio(b) - letterRatio(a)).slice(0, 2);
+}
+
+/**
+ * Detecta las 2 líneas MRZ TD3 (pasaporte ICAO 9303) de la página de datos a partir
+ * del texto OCR crudo y las ordena por estructura. TD3 = 2 líneas de 44 chars del
+ * alfabeto MRZ (A-Z0-9<); aceptamos ≥30 para tolerar recortes/ruido del OCR. EXPORTADO
+ * para el extractor de pasaporte y los tests.
+ *
+ * Acepta texto multilínea o un arreglo de textos (uno por caja OCR).
+ */
+export function detectTd3Lines(input: string | string[]): string[] {
+  const rawLines = Array.isArray(input) ? input : input.split(/\r?\n/);
+  const candidates = rawLines
+    .map((l) => l.replace(/\s+/g, "").toUpperCase())
+    .filter((l) => /^[A-Z0-9<]{30,}$/.test(l))
+    // Excluí rótulos puras-letras cortos (igual que TD1).
+    .filter((l) => !(/^[A-Z]+$/.test(l) && l.length < 28));
+  const top2 = candidates.sort((a, b) => b.length - a.length).slice(0, 2);
+  return orderTd3(top2);
+}
+
 export class OcrMrzReader implements MrzReader {
   async readLines(back: Buffer, ocr: OcrClient, pre?: OcrResult): Promise<string[]> {
     const { rawText } = pre ?? (await ocr.recognize(back));
@@ -318,7 +349,10 @@ function detailValid(details: MrzParseResult["details"], field: string): boolean
 }
 
 export async function parseMrz(lines: string[]): Promise<MrzData> {
-  if (lines.length < 3) return { ...EMPTY_MRZ, rawLines: lines };
+  // ≥2 líneas: TD3 (pasaporte ICAO) son 2×44; TD1 (cédula PY) son 3×30. La librería
+  // `mrz` autodetecta el formato por cantidad/longitud de líneas; sólo necesitamos no
+  // cortar antes con el guard. <2 → vacío (fail-closed: no se inventa).
+  if (lines.length < 2) return { ...EMPTY_MRZ, rawLines: lines };
   try {
     const mod = (await import("mrz")) as unknown as {
       parse: (input: string[] | string) => MrzParseResult;
@@ -328,7 +362,13 @@ export async function parseMrz(lines: string[]): Promise<MrzData> {
     const dn = detailValid(r.details, "documentNumberCheckDigit");
     const dob = detailValid(r.details, "birthDateCheckDigit");
     const exp = detailValid(r.details, "expirationDateCheckDigit");
-    const comp = detailValid(r.details, "compositeCheckDigit");
+    // Dígito verificador COMPUESTO: en TD1 la librería lo nombra `compositeCheckDigit`;
+    // en TD3 (pasaporte) es `finalCheckDigit`. Aceptamos cualquiera de los dos para que
+    // el composite quede honesto en ambos formatos (TD1 nunca trae finalCheckDigit, así
+    // que la cédula PY no regresiona).
+    const comp =
+      detailValid(r.details, "compositeCheckDigit") ||
+      detailValid(r.details, "finalCheckDigit");
     return {
       rawLines: lines,
       documentType: f.documentCode ?? "",
@@ -1988,6 +2028,54 @@ function backfillMrzFromExtracted(mrz: MrzData, extracted: ExtractedDocument): M
 }
 
 // ---------------------------------------------------------------------------
+// Extracción de PASAPORTE (ICAO 9303, MRZ TD3) — multi-documento P1 #3.
+// ---------------------------------------------------------------------------
+
+/**
+ * Construye un `ExtractedDocument` para PASAPORTE desde el MRZ TD3 ya parseado.
+ *
+ * En el pasaporte el MRZ ES la fuente AUTORITATIVA (al revés que la cédula PY, donde
+ * manda el frente impreso anclado por etiqueta y el MRZ es best-effort): un pasaporte
+ * no tiene un layout de campos impresos estandarizado para anclar, así que todos los
+ * datos salen del MRZ — que en el camino de pasaporte SÍ se valida por check digits
+ * ICAO (ver `runPassport`). Campos ausentes quedan vacíos (fail-closed; nunca se
+ * inventan valores).
+ *
+ * Mapeo TD3 → ExtractedDocument:
+ *   documento.numeroCedula           ← documentNumber (nº de pasaporte; reusa el campo)
+ *   documento.pais / mrz.paisCodigo  ← issuingCountry (ISO-3 país emisor)
+ *   documento.tipo                   ← "PASAPORTE"
+ *   titular.apellidos / nombres      ← surname / givenNames
+ *   titular.fechaNacimiento / sexo   ← dateOfBirth / sex
+ *   titular.nacionalidad             ← nationality DEL MRZ (NO el default "PARAGUAYA")
+ *   documentoFisico.fechaVencimiento ← expirationDate
+ *   mrz.linea1/linea2                ← rawLines (TD3 = 2 líneas; linea3 vacía)
+ *
+ * Exportado para test.
+ */
+export function extractPassport(mrz: MrzData): ExtractedDocument {
+  const e = emptyExtracted();
+  e.documento.tipo = "PASAPORTE";
+  e.documento.pais = mrz.issuingCountry || "";
+  e.documento.numeroCedula = mrz.documentNumber || "";
+  e.titular.apellidos = mrz.surname || "";
+  e.titular.nombres = mrz.givenNames || "";
+  e.titular.fechaNacimiento = mrz.dateOfBirth || "";
+  e.titular.sexo = mrz.sex || "";
+  // Nacionalidad SIEMPRE del MRZ (no asumir PY): si el MRZ no la trae, queda vacía.
+  e.titular.nacionalidad = mrz.nationality || "";
+  e.documentoFisico.fechaVencimiento = mrz.expirationDate || "";
+  // El pasaporte no aporta señal de chip/barcode por este camino: honestos en false.
+  e.documentoFisico.chip = false;
+  e.documentoFisico.codigoBarras = false;
+  e.mrz.linea1 = mrz.rawLines[0] ?? "";
+  e.mrz.linea2 = mrz.rawLines[1] ?? "";
+  e.mrz.linea3 = "";
+  e.mrz.paisCodigo = mrz.issuingCountry || "";
+  return e;
+}
+
+// ---------------------------------------------------------------------------
 // Parser legacy del texto OCR del frente (compat: pipeline.ts lee ocr.fields).
 // ---------------------------------------------------------------------------
 
@@ -2203,10 +2291,150 @@ export async function upscaleForOcr(image: Buffer, minWidth = 1600): Promise<Buf
 
 export class DocumentModule {
   /**
-   * Ejecuta el módulo. Fail-closed: cualquier error de OCR/sidecar/parse deja
-   * passed=false. No lanza: convierte el fallo en un DocumentResult no-aprobado.
+   * Ejecuta el módulo ruteando por TIPO DE DOCUMENTO (multi-documento — P1 #3).
+   * Fail-closed: cualquier error de OCR/sidecar/parse deja passed=false. No lanza.
+   *
+   *   - "passport" → extractor de pasaporte (página de datos, MRZ TD3, un solo lado).
+   *   - "ci_py" (default) → extractor de cédula PY (frente impreso + dorso MRZ TD1).
+   *     Camino histórico INTACTO (sigue siendo el más completo y el default).
    */
-  async run(front: Buffer, back: Buffer, deps: DocumentDeps): Promise<DocumentResult> {
+  async run(
+    front: Buffer,
+    back: Buffer,
+    deps: DocumentDeps,
+    documentType: DocumentType = "ci_py"
+  ): Promise<DocumentResult> {
+    if (documentType === "passport") return this.runPassport(front, deps);
+    return this.runCedulaPy(front, back, deps);
+  }
+
+  /**
+   * Extractor de PASAPORTE (ICAO 9303, MRZ TD3) — un solo lado (página de datos).
+   * Lee la franja MRZ TD3 (2×44) por OCR, la parsea (nombres/apellidos/nº/nacionalidad/
+   * país emisor/fechas/sexo + check digits) y recorta la foto del titular para el match.
+   * No hay dorso ni barcode. Fail-closed: ante OCR/parse fallido, passed=false.
+   *
+   * `passed` exige: campos requeridos presentes (apellidos, nombres, nº, fecha nac,
+   * vencimiento) + check digits MRZ válidos (documentNumber, dateOfBirth, expirationDate,
+   * composite) + documento NO vencido + foto recortable. El MRZ ES la fuente autoritativa
+   * del pasaporte (a diferencia de la cédula PY, donde es best-effort), por eso acá los
+   * check digits SÍ gatean el resultado (validación ICAO).
+   */
+  private async runPassport(front: Buffer, deps: DocumentDeps): Promise<DocumentResult> {
+    let mrz: MrzData = { ...EMPTY_MRZ };
+    let docFaceCrop: DocFaceCrop | null = null;
+    let rawText = "";
+    let confidence = 0;
+
+    // 1) OCR de la página de datos → líneas MRZ TD3 crudas. Fallback ampliado si no
+    //    aparecieron 2 líneas TD3 (capturas chicas/comprimidas), igual que la cédula.
+    let td3: string[] = [];
+    try {
+      const ocr = await deps.ocr.recognize(front);
+      rawText = ocr.rawText;
+      confidence = ocr.confidence;
+      td3 = detectTd3Lines(ocr.lines.map((l) => l.text));
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.warn(`[document] OCR pasaporte falló: ${(e as Error).message}`);
+    }
+    if (td3.length < 2 && deps.preprocessFront) {
+      try {
+        const upscaled = await deps.preprocessFront(front);
+        const ocr = await deps.ocr.recognize(upscaled);
+        const found = detectTd3Lines(ocr.lines.map((l) => l.text));
+        if (found.length >= 2) {
+          td3 = found;
+          if (!rawText) {
+            rawText = ocr.rawText;
+            confidence = ocr.confidence;
+          }
+        }
+      } catch (e) {
+        // eslint-disable-next-line no-console
+        console.warn(`[document] fallback OCR pasaporte falló: ${(e as Error).message}`);
+      }
+    }
+    if (td3.length >= 2) {
+      try {
+        mrz = await parseMrz(td3);
+      } catch (e) {
+        // eslint-disable-next-line no-console
+        console.warn(`[document] parseo MRZ TD3 falló: ${(e as Error).message}`);
+      }
+    }
+
+    // 2) Foto del titular (página de datos) → alimenta el match facial.
+    try {
+      docFaceCrop = await cropDocFace(front, deps.engine);
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.warn(`[document] recorte de foto (pasaporte) falló: ${(e as Error).message}`);
+    }
+
+    const extracted = extractPassport(mrz);
+
+    // Autenticidad: presencia de campos + check digits ICAO + no vencido. DUROS.
+    const checks: AuthenticityCheck[] = [];
+    const requiredPresent =
+      !!extracted.titular.apellidos &&
+      !!extracted.titular.nombres &&
+      !!extracted.documento.numeroCedula &&
+      !!extracted.titular.fechaNacimiento &&
+      !!extracted.documentoFisico.fechaVencimiento;
+    checks.push({
+      name: "mrz_fields_present",
+      passed: requiredPresent,
+      detail: requiredPresent ? "campos MRZ OK" : "faltan campos MRZ requeridos",
+    });
+    const checkDigitsOk =
+      mrz.checkDigits.documentNumber &&
+      mrz.checkDigits.dateOfBirth &&
+      mrz.checkDigits.expirationDate &&
+      mrz.checkDigits.composite;
+    checks.push({
+      name: "mrz_check_digits",
+      passed: checkDigitsOk,
+      detail: checkDigitsOk ? "check digits ICAO OK" : "check digits MRZ inválidos",
+    });
+    const live = notExpired(extracted.documentoFisico.fechaVencimiento);
+    checks.push({
+      name: "not_expired",
+      passed: live,
+      detail: `vence=${extracted.documentoFisico.fechaVencimiento || "?"}`,
+    });
+    checks.push({
+      name: "doc_face_present",
+      passed: docFaceCrop !== null,
+      detail: docFaceCrop ? "foto recortada" : "sin foto del titular",
+    });
+
+    const passed = requiredPresent && checkDigitsOk && live && docFaceCrop !== null;
+
+    const ocr: OcrData = {
+      rawText,
+      fields: parseOcrFields(extracted),
+      confidence,
+    };
+
+    return {
+      documentType: "passport",
+      mrz,
+      barcode: { format: "", text: "" },
+      ocr,
+      docFaceCrop,
+      extracted,
+      authenticity: { consistent: requiredPresent && live, checks },
+      passed,
+    };
+  }
+
+  /**
+   * Extractor de CÉDULA PY (frente impreso anclado por etiqueta + dorso MRZ TD1).
+   * Cuerpo HISTÓRICO sin cambios funcionales (sólo renombrado de `run`→`runCedulaPy`
+   * para el ruteo por tipo). Fail-closed: cualquier error deja passed=false.
+   */
+  private async runCedulaPy(front: Buffer, back: Buffer, deps: DocumentDeps): Promise<DocumentResult> {
     let mrz: MrzData = { ...EMPTY_MRZ };
     let barcode: BarcodeData = { format: "", text: "" };
     let docFaceCrop: DocFaceCrop | null = null;

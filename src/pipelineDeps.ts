@@ -73,11 +73,16 @@ const localAmlProvider = createLocalAmlProvider({
 const modules: PipelineModules = {
   quality: (image, eng, glassesMax) => qualityModule.run(image, eng, glassesMax),
   liveness: (selfie, eng, opts) => livenessModule.run(selfie, eng, opts),
-  document: (front, back) =>
-    documentModule.run(front, back, {
-      ...defaultDocumentDeps(engine),
-      preprocessFront: preprocessFrontForOcr,
-    }),
+  document: (front, back, documentType) =>
+    documentModule.run(
+      front,
+      back,
+      {
+        ...defaultDocumentDeps(engine),
+        preprocessFront: preprocessFrontForOcr,
+      },
+      documentType
+    ),
   embed: async (image) => {
     const r = await engine.embedBestFace(image);
     return r ? r.embedding : null;
