@@ -7,8 +7,18 @@ Loop autopaceado: trabajar de arriba a abajo; el deploy del subdominio es el pas
 2. **[✓ LIVE: teko.rohekawebservices.online]** Deploy durable: subdominio en **rohekawebservices.online** vía **Cloudflare named tunnel** (cloudflared en el 34 + DNS CNAME por API) → reemplaza el trycloudflare efímero. `PUBLIC_BASE_URL` fijo. **(paso final)**
 3. **[✓ diferido bb01a75 — informe+plan]** Fase 2: detector **ML** de documento (ID-card) en navegador (onnxruntime-web) — el objetivo final es ML, OpenCV fue puente.
 4. **[pendiente]** Polish visual trust-driven del flujo cliente (refinar copys/jerarquía tras feedback real).
-5. **[en curso]** Calibrar umbrales match/liveness; ensemble PAD anti-spoof; persistir imagen cruda; PDF multipágina (dorso pág2); orientación 180; split apellidos pegados; purgar PII de prueba.
-   - Sub: split apellidos + persistir cruda → agente en curso. Calibración/PAD = esfuerzos grandes (eval set/GPU), diferir. Purga PII = al cerrar el loop.
+5. **[parcial]** Robustez/limpieza:
+   - **[✓ 0ab5367]** Split apellidos pegados desde MRZ (CI-gated, reconstruye `<`→C/K).
+   - **[✓ 0ab5367]** Persistir imagen cruda (`doc_front_raw`/`doc_back_raw`, migración 0005).
+   - **[diferido]** Calibrar umbrales match/liveness + ensemble PAD anti-spoof → necesitan eval set + GPU (esfuerzo grande).
+   - **[diferido]** Orientación 180 (no apareció en datos) · PDF pág2=dorso (no hay forma byte-segura de distinguir 2-págs vs dorso-propio).
+   - **[gated]** Purga PII de prueba (`/tmp/batch` = 57 cédulas reales de clientes) → recomendado; decisión del usuario (¿se usan para entrenar el ML?).
+
+## Decisiones pendientes del usuario (gates)
+- **ML Fase 2 (YOLO26):** mejor candidato técnico (n=2.4M params, NMS-free, Pose=4 esquinas/OBB, ONNX). Bloqueante = licencia **AGPL vs Enterprise**. Decisión (a) Enterprise/AGPL → entrenar YOLO26n-pose, o (b) sin-AGPL → U-Net MobileNetV3. + entrenar sobre MIDV+cédula PY (~1 sem GPU 34).
+- **Polish visual del flujo cliente:** gated por tu prueba real en el celu.
+
+## Loop CERRADO: núcleo (terminar pendiente + montar subdominio) ✓. Resto = gated por decisiones del usuario.
 
 ## Stop
 Loop termina cuando 1 y 2 estén hechos (núcleo "terminar + montar"); 3–5 best-effort hasta limpiar backlog o hasta que el usuario vuelva. Avisar por PushNotification al cerrar.
