@@ -55,8 +55,20 @@ export type DecisionVerdict = "verified" | "rejected" | "needs_recapture";
 /** Tipo de check granular auditable — §5 (verification_checks.tipo). */
 export type CheckType = "quality" | "liveness" | "document" | "match";
 
-/** Tipo de evidencia almacenada — §5 (evidence.tipo). */
-export type EvidenceType = "selfie" | "doc_front" | "doc_back" | "frames";
+/**
+ * Tipo de evidencia almacenada — §5 (evidence.tipo).
+ *
+ * `doc_front_raw`/`doc_back_raw` son la imagen CRUDA original del documento (tal cual
+ * la OCR-ea el pipeline), persistida ADEMÁS de `doc_front`/`doc_back` para poder
+ * debuggear la extracción real (lo que el OCR ve), no la versión recortada/enderezada.
+ */
+export type EvidenceType =
+  | "selfie"
+  | "doc_front"
+  | "doc_back"
+  | "frames"
+  | "doc_front_raw"
+  | "doc_back_raw";
 
 /** Estado de un tenant. */
 export type TenantStatus = "active" | "suspended" | "disabled";

@@ -1785,7 +1785,105 @@ function mrzCiMatchesFront(extracted: ExtractedDocument, mrz: MrzData): boolean 
   const mrzNum = norm(mrz.documentNumber);
   const mrzOpt = norm(mrz.optionalData ?? "");
   const matchIn = (hay: string) => !!hay && (hay.includes(ocrNum) || ocrNum.includes(hay));
-  return matchIn(mrzNum) || matchIn(mrzOpt);
+  if (matchIn(mrzNum) || matchIn(mrzOpt)) return true;
+  // FALLBACK sobre las LÍNEAS CRUDAS del MRZ: en la cédula PY el CI real va en el campo
+  // de DATO OPCIONAL de la línea 1 (p.ej. "...4895448<0207..."), pero el parser `mrz`
+  // a veces deja `optionalData` vacío (línea no-válida por ruido de check-digits del
+  // OCR). El CI impreso del frente igual aparece VERBATIM en el texto crudo del MRZ.
+  // Exigimos un CI de ≥6 dígitos presente como subcadena EXACTA del MRZ crudo: es un
+  // vínculo de identidad fuerte (no bidireccional, no se infla con números cortos).
+  if (ocrNum.length >= 6) {
+    const mrzRaw = norm((mrz.rawLines ?? []).join(""));
+    if (mrzRaw.includes(ocrNum)) return true;
+  }
+  return false;
+}
+
+/**
+ * ¿El apellido del MRZ es la forma ESPACIADA (correcta) del apellido del frente que
+ * llegó PEGADO? El MRZ TD1 separa los apellidos con `<` (→ espacio); el OCR del frente
+ * comprimido a veces los pega sin espacio ("SOTELOMACHUCA" vs MRZ "SOTELO MACHUCA").
+ * Devolvemos true SÓLO si:
+ *   - ambos tienen EXACTAMENTE las mismas letras (norm igual → MISMA identidad; no
+ *     mezclamos personas, sólo arreglamos espaciado), y
+ *   - el MRZ trae MÁS tokens (más espacios) que el frente → el MRZ está mejor separado.
+ * Si el frente ya está bien espaciado e idéntico (mismos tokens) NO devolvemos true
+ * (no lo pisamos), y NUNCA degradamos un frente espaciado a la forma pegada del MRZ.
+ */
+function mrzSurnameBetterSpaced(frontApellidos: string, mrzSurname: string): boolean {
+  if (!frontApellidos || !mrzSurname) return false;
+  if (norm(frontApellidos) !== norm(mrzSurname)) return false; // distinta identidad textual
+  const fTokens = frontApellidos.trim().split(/\s+/).filter(Boolean).length;
+  const mTokens = mrzSurname.trim().split(/\s+/).filter(Boolean).length;
+  return mTokens > fTokens; // el MRZ separa más apellidos → preferí su forma espaciada
+}
+
+/**
+ * Confusiones de FILLER del MRZ: el OCR del dorso lee el separador `<` de la zona MRZ
+ * como `C` o `K` (documentado en `detectTd1Lines`). Las usamos SÓLO para reconstruir el
+ * espaciado de apellidos desde la línea 3 cruda cuando el parser ya no pudo separarlos.
+ */
+const MRZ_FILLER_CONFUSIONS = new Set(["<", "C", "K"]);
+
+/**
+ * Recupera la forma ESPACIADA del apellido a partir de la LÍNEA 3 CRUDA del MRZ TD1,
+ * usando las letras del apellido del FRENTE como ancla. Resuelve el caso REAL en que el
+ * OCR del dorso leyó los separadores `<` como `C`/`K` (línea 3
+ * "SOTELOCMACHUCASK..." en vez de "SOTELO<MACHUCA<<..."): ahí `mrz.surname` sale PEGADO
+ * igual que el frente y `mrzSurnameBetterSpaced` no alcanza.
+ *
+ * Estrategia (FAIL-CLOSED): alinea las letras del apellido del frente (SIN espacios)
+ * contra el inicio de la línea 3; cada carácter EXTRA del MRZ entre dos letras del frente
+ * es el separador `<` (leído C/K) → ahí va un espacio. Sólo se trata como separador si el
+ * carácter es una confusión-de-filler CONOCIDA (`<`/C/K); cualquier otro desajuste es
+ * ruido OCR real → devuelve null (no se arregla nada).
+ *
+ * GARANTÍAS:
+ *   - El resultado tiene EXACTAMENTE las mismas letras que el apellido del frente (misma
+ *     identidad; sólo reinserta espacios), verificado al final.
+ *   - Devuelve null si: el frente ya trae espacio, no hay línea 3, la alineación se
+ *     rompe, o no resulta en EXACTAMENTE 1 espacio (PY: 2 apellidos = 1 espacio; ≠1 es
+ *     sospechoso → conservador).
+ *
+ * LIMITACIÓN conocida (cosmética, misma identidad): si el 2º apellido empieza en C/K, el
+ * separador coincide con la 1ª letra real y el espacio puede caer una posición corrida.
+ * No es un error de identidad (mismas letras) y está acotado por el match de CI.
+ */
+function recoverSpacedSurnameFromMrzLine3(
+  frontApellidos: string,
+  mrzLine3: string | undefined
+): string | null {
+  if (!frontApellidos || !mrzLine3) return null;
+  if (/\s/.test(frontApellidos.trim())) return null; // ya espaciado → no aplica
+  const S = frontApellidos
+    .toUpperCase()
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .replace(/[^A-Z]/g, "");
+  if (S.length < 4) return null;
+  const raw = mrzLine3.toUpperCase().replace(/[^A-Z<]/g, "");
+  if (raw.length < S.length + 1) return null; // sin char extra no hay separador que recuperar
+  const out: string[] = [];
+  let j = 0;
+  let spaces = 0;
+  for (let i = 0; i < S.length; i++) {
+    if (j < raw.length && raw[j] !== S[i]) {
+      // Char EXTRA en el MRZ = separador `<` (posiblemente leído C/K). Sólo si es una
+      // confusión-de-filler conocida; cualquier otro desajuste es ruido OCR → fail-closed.
+      if (!MRZ_FILLER_CONFUSIONS.has(raw[j])) return null;
+      out.push(" ");
+      spaces++;
+      j++;
+    }
+    if (j >= raw.length || raw[j] !== S[i]) return null; // no alinea → fail-closed
+    out.push(S[i]);
+    j++;
+  }
+  if (spaces !== 1) return null;
+  const recovered = out.join("").replace(/\s+/g, " ").trim();
+  if (recovered.replace(/ /g, "") !== S) return null; // identidad intacta
+  if (recovered.split(" ").some((t) => t.length < 2)) return null; // sin fragmentos
+  return recovered;
 }
 
 /**
@@ -1823,6 +1921,23 @@ export function crossFillFromMrz(extracted: ExtractedDocument, mrz: MrzData): Ex
   if (!extracted.titular.apellidos && mrz.surname) {
     extracted.titular.apellidos = mrz.surname;
     mark("apellidos");
+  } else if (extracted.titular.apellidos) {
+    // Frente PRESENTE pero quizá PEGADO ("SOTELOMACHUCA"). El MRZ del dorso separa los
+    // apellidos con `<`. Recuperamos la forma espaciada por DOS vías (CI ya cruzado):
+    //   (a) el parser MRZ ya trae el apellido espaciado (dorso OCR-limpio) → preferilo.
+    //   (b) el dorso leyó los `<` como C/K y `mrz.surname` salió pegado → reconstruí el
+    //       espacio desde la LÍNEA 3 cruda anclando en las letras del frente.
+    // NUNCA mezcla identidades (mismas letras) ni degrada un frente ya bien espaciado.
+    let spaced: string | null = null;
+    if (mrzSurnameBetterSpaced(extracted.titular.apellidos, mrz.surname)) {
+      spaced = mrz.surname;
+    } else {
+      spaced = recoverSpacedSurnameFromMrzLine3(extracted.titular.apellidos, mrz.rawLines[2]);
+    }
+    if (spaced && spaced !== extracted.titular.apellidos) {
+      extracted.titular.apellidos = spaced;
+      mark("apellidos");
+    }
   }
   if (!extracted.titular.nombres && mrz.givenNames) {
     extracted.titular.nombres = mrz.givenNames;

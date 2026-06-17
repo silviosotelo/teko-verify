@@ -540,6 +540,121 @@ describe("document — cross-fill MRZ→frente (crossFillFromMrz)", () => {
     const ex = crossFillFromMrz(front, emptyMrz());
     expect(ex.titular.fechaNacimiento).toBe("");
   });
+
+  // --- Split de apellidos PEGADOS usando el MRZ (SOTELO MACHUCA real) ---------
+  // El OCR del frente comprimido pega los apellidos ("SOTELOMACHUCA"); el MRZ TD1
+  // del dorso los trae separados ("SOTELO MACHUCA"). Con CI cruzado preferimos la
+  // forma espaciada del MRZ; sin CI cruzado NO tocamos (no mezclamos identidades).
+  function macFront(apellidos: string): ExtractedDocument {
+    const e = cayoFrontMissingDates();
+    e.documento.numeroCedula = "4895448";
+    e.titular.apellidos = apellidos;
+    e.titular.nombres = "SILVIO ANDRES";
+    return e;
+  }
+  function macMrz(surname: string): MrzData {
+    return {
+      ...emptyMrz(),
+      documentNumber: "AA0000000",
+      optionalData: "4895448 0001",
+      surname,
+      givenNames: "SILVIO ANDRES",
+    };
+  }
+
+  it("CI coincidente + apellido PEGADO en el frente: usa la forma espaciada del MRZ", () => {
+    const ex = crossFillFromMrz(macFront("SOTELOMACHUCA"), macMrz("SOTELO MACHUCA"));
+    expect(ex.titular.apellidos).toBe("SOTELO MACHUCA");
+    expect(ex.fieldSources?.apellidos).toBe("mrz");
+  });
+
+  it("CI NO coincidente: NO arregla el espaciado (fail-closed, no mezcla identidades)", () => {
+    const front = macFront("SOTELOMACHUCA");
+    const mrz = { ...macMrz("SOTELO MACHUCA"), optionalData: "9999999 0000", documentNumber: "ZZ0000000" };
+    const ex = crossFillFromMrz(front, mrz);
+    expect(ex.titular.apellidos).toBe("SOTELOMACHUCA"); // intacto
+    expect(ex.fieldSources?.apellidos).toBeUndefined();
+  });
+
+  it("frente YA bien espaciado e idéntico: NO lo pisa (monotónico)", () => {
+    const ex = crossFillFromMrz(macFront("SOTELO MACHUCA"), macMrz("SOTELO MACHUCA"));
+    expect(ex.titular.apellidos).toBe("SOTELO MACHUCA");
+    expect(ex.fieldSources?.apellidos).toBeUndefined(); // no marcado: no hubo cambio
+  });
+
+  it("NUNCA degrada un frente espaciado a la forma PEGADA del MRZ", () => {
+    const ex = crossFillFromMrz(macFront("SOTELO MACHUCA"), macMrz("SOTELOMACHUCA"));
+    expect(ex.titular.apellidos).toBe("SOTELO MACHUCA"); // se conserva el frente
+    expect(ex.fieldSources?.apellidos).toBeUndefined();
+  });
+
+  it("apellido simple (CAYO): MRZ de 1 token no altera nada (sin regresión)", () => {
+    const ex = crossFillFromMrz(cayoFrontMissingDates(), cayoMrz());
+    expect(ex.titular.apellidos).toBe("SOTELO"); // CAYO_FRONT usa apellido SOTELO
+    expect(ex.fieldSources?.apellidos).toBeUndefined();
+  });
+
+  // --- Recuperación del espaciado desde la LÍNEA 3 CRUDA (separadores `<` leídos C/K).
+  // Caso REAL: el dorso de SOTELO MACHUCA OCR-eó la línea 3 como
+  // "SOTELOCMACHUCASKSILVIOCANDRES" (los `<` salieron C/K), así que el parser MRZ dejó
+  // el apellido PEGADO igual que el frente. Reconstruimos "SOTELO MACHUCA" anclando en
+  // las letras del frente. CI cruzado obligatorio.
+  function macMrzRaw(line3: string): MrzData {
+    return {
+      ...emptyMrz(),
+      documentNumber: "4895448",
+      surname: "SOTELOMACHUCA", // pegado (backfill/parse degradado)
+      givenNames: "SILVIO ANDRES",
+      rawLines: ["INPRYAA001411414895448<0207<2<", "9711138M3307124PRY<<5", line3],
+    };
+  }
+
+  it("línea 3 con `<` leídos C/K + CI coincidente: reconstruye 'SOTELO MACHUCA'", () => {
+    const ex = crossFillFromMrz(macFront("SOTELOMACHUCA"), macMrzRaw("SOTELOCMACHUCASKSILVIOCANDRES"));
+    expect(ex.titular.apellidos).toBe("SOTELO MACHUCA");
+    expect(ex.fieldSources?.apellidos).toBe("mrz");
+  });
+
+  it("línea 3 con `<` literales (dorso OCR-limpio): también reconstruye el espacio", () => {
+    const ex = crossFillFromMrz(macFront("SOTELOMACHUCA"), macMrzRaw("SOTELO<MACHUCA<<SILVIO<ANDRES<"));
+    expect(ex.titular.apellidos).toBe("SOTELO MACHUCA");
+    expect(ex.fieldSources?.apellidos).toBe("mrz");
+  });
+
+  it("línea 3 con `<` leídos C/K pero CI NO coincidente: NO reconstruye (fail-closed)", () => {
+    const front = macFront("SOTELOMACHUCA");
+    front.documento.numeroCedula = "1111111"; // CI ausente del MRZ (docnum/optional/raw)
+    const mrz = { ...macMrzRaw("SOTELOCMACHUCASKSILVIOCANDRES"), documentNumber: "9999999" };
+    const ex = crossFillFromMrz(front, mrz);
+    expect(ex.titular.apellidos).toBe("SOTELOMACHUCA"); // intacto
+    expect(ex.fieldSources?.apellidos).toBeUndefined();
+  });
+
+  it("CI sólo en las LÍNEAS CRUDAS del MRZ (optionalData vacío): cruza y reconstruye", () => {
+    // Caso REAL SOTELO MACHUCA: el parser dejó optionalData vacío y documentNumber = el
+    // nº MRZ (no el CI); el CI 4895448 sólo aparece en la línea 1 cruda. Igual cruza.
+    const mrz: MrzData = {
+      ...macMrzRaw("SOTELOCMACHUCASKSILVIOCANDRES"),
+      documentNumber: "AA0014114", // nº MRZ, NO el CI
+      optionalData: "", // el parser lo dejó vacío
+    };
+    const ex = crossFillFromMrz(macFront("SOTELOMACHUCA"), mrz);
+    expect(ex.titular.apellidos).toBe("SOTELO MACHUCA");
+    expect(ex.fieldSources?.apellidos).toBe("mrz");
+  });
+
+  it("línea 3 cuyas letras NO alinean con el frente: fail-closed (null), no toca nada", () => {
+    // Front "SOTELOMACHUCA" vs línea 3 de otra persona → alineación rota → no cambia.
+    const ex = crossFillFromMrz(macFront("SOTELOMACHUCA"), macMrzRaw("FRANCOCMORELSKJUANCCESAR"));
+    expect(ex.titular.apellidos).toBe("SOTELOMACHUCA");
+    expect(ex.fieldSources?.apellidos).toBeUndefined();
+  });
+
+  it("apellido simple sin separador en línea 3: no inventa espacios", () => {
+    const ex = crossFillFromMrz(macFront("GONZALEZ"), macMrzRaw("GONZALEZ<<SILVIO<ANDRES<<<<<<"));
+    expect(ex.titular.apellidos).toBe("GONZALEZ");
+    expect(ex.fieldSources?.apellidos).toBeUndefined();
+  });
 });
 
 // ===========================================================================

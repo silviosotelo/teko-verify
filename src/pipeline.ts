@@ -58,6 +58,12 @@ import { ensureRasterImage } from "./lib/raster";
  * error y el caller (processSession/computeChecks) lo convierte en estado 'error'.
  */
 async function rasterizeDocImages(images: CapturedImages): Promise<CapturedImages> {
+  // NOTA (PDF pág2 = dorso, NO implementado): si un PDF combinado trae frente+dorso
+  // en 2 páginas, el dorso podría sacarse con `rasterizePdfPage(images.docBack, 2)`.
+  // Se deja ANOTADO y no se cambia el comportamiento: no hay forma byte-segura de
+  // distinguir "PDF combinado de 2 páginas" de "dorso propio en 1 página" sin contar
+  // páginas (pdfinfo), y forzar la pág 2 ROMPERÍA el caso 1-página (pdftoppm exit≠0 →
+  // fail-closed error) cuando front y back son el mismo escaneo de una sola página.
   const [docFront, docBack] = await Promise.all([
     ensureRasterImage(images.docFront),
     ensureRasterImage(images.docBack),
@@ -925,6 +931,11 @@ async function persistEvidence(
     ["selfie", images.selfie],
     ["doc_front", images.docFront],
     ["doc_back", images.docBack],
+    // Imagen CRUDA del documento (exactamente lo que el módulo `document` OCR-ea, ya
+    // rasterizada si vino PDF). ADITIVO: se persiste ADEMÁS de doc_front/doc_back para
+    // poder debuggear el OCR real a partir de la imagen que lo produjo, no del recorte.
+    ["doc_front_raw", images.docFront],
+    ["doc_back_raw", images.docBack],
   ];
   for (const [type, buf] of items) {
     const saved = await deps.evidenceStore.save(tenantId, sessionId, type, buf);

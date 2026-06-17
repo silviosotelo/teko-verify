@@ -242,8 +242,14 @@ describe("processSession — camino verified (L3)", () => {
     expect(spy.checks.every((c) => c.passed)).toBe(true);
     // identidad creada con el CI del MRZ.
     expect(spy.identities).toEqual([{ tenantId: TENANT_ID, ci: "1234567" }]);
-    // evidencia: selfie + doc_front + doc_back.
-    expect(spy.evidence.map((e) => e.type).sort()).toEqual(["doc_back", "doc_front", "selfie"]);
+    // evidencia: selfie + doc_front + doc_back + las crudas doc_front_raw/doc_back_raw.
+    expect(spy.evidence.map((e) => e.type).sort()).toEqual([
+      "doc_back",
+      "doc_back_raw",
+      "doc_front",
+      "doc_front_raw",
+      "selfie",
+    ]);
     // webhook verified, exactamente uno.
     expect(spy.webhooks).toEqual([{ event: "session.verified", state: "verified" }]);
     // aislamiento: todas las escrituras con el tenant de la sesión.

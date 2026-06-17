@@ -402,7 +402,14 @@ adminRouter.get("/tenants/:id/sessions/:sessionId", async (req: Request, res: Re
 // por ruta cruda (anti path-traversal): re-resuelve vía evidenceStore.read con
 // (tenantId, sessionId, type). Queda detrás de adminGuard (auth Bearer). El front
 // la consume con fetch + Authorization → Blob (un <img src> no manda el header).
-const EVIDENCE_TYPES: EvidenceType[] = ["selfie", "doc_front", "doc_back", "frames"];
+const EVIDENCE_TYPES: EvidenceType[] = [
+  "selfie",
+  "doc_front",
+  "doc_back",
+  "frames",
+  "doc_front_raw",
+  "doc_back_raw",
+];
 
 adminRouter.get(
   "/tenants/:id/sessions/:sessionId/evidence/:type",
