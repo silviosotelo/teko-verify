@@ -14,6 +14,7 @@ export * as identities from "./identities";
 export * as evidence from "./evidence";
 export * as auditLog from "./auditLog";
 export * as consents from "./consents";
+export * as workflows from "./workflows";
 
 import * as tenants from "./tenants";
 import * as apiKeys from "./apiKeys";
@@ -23,6 +24,7 @@ import * as identities from "./identities";
 import * as evidence from "./evidence";
 import * as auditLog from "./auditLog";
 import * as consents from "./consents";
+import * as workflows from "./workflows";
 
 /** Agrupador único para inyección/uso conveniente. */
 export const repos = {
@@ -34,4 +36,5 @@ export const repos = {
   evidence,
   auditLog,
   consents,
+  workflows,
 } as const;

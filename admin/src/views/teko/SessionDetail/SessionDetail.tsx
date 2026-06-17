@@ -70,6 +70,11 @@ const STATUS_META: Record<
         cls: 'bg-amber-50 text-amber-700 ring-amber-200 dark:bg-amber-500/10 dark:text-amber-300 dark:ring-amber-500/30',
         dot: 'bg-amber-500',
     },
+    in_review: {
+        label: 'REVISIÓN MANUAL',
+        cls: 'bg-amber-50 text-amber-700 ring-amber-200 dark:bg-amber-500/10 dark:text-amber-300 dark:ring-amber-500/30',
+        dot: 'bg-amber-500',
+    },
     needs_recapture: {
         label: 'RECAPTURA',
         cls: 'bg-amber-50 text-amber-700 ring-amber-200 dark:bg-amber-500/10 dark:text-amber-300 dark:ring-amber-500/30',
@@ -480,8 +485,13 @@ const SessionDetailView = () => {
         label: string
     } | null>(null)
     const [form, setForm] = useState<FormState | null>(null)
+    // Revisión manual (cola in_review) — P0 #1.
+    const [reviewReason, setReviewReason] = useState('')
+    const [reviewBusy, setReviewBusy] = useState<null | 'approve' | 'decline'>(
+        null,
+    )
 
-    useEffect(() => {
+    const loadSession = () => {
         if (!currentId || !sessionId) return
         setLoading(true)
         setError(null)
@@ -490,7 +500,35 @@ const SessionDetailView = () => {
             .then(setData)
             .catch((e) => setError((e as Error).message))
             .finally(() => setLoading(false))
+    }
+
+    useEffect(() => {
+        loadSession()
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [currentId, sessionId])
+
+    async function decideReview(decision: 'approve' | 'decline') {
+        if (!sessionId) return
+        setReviewBusy(decision)
+        try {
+            await tekoApi.decideReview(
+                sessionId,
+                decision,
+                reviewReason.trim() || undefined,
+            )
+            notify(
+                decision === 'approve'
+                    ? 'Sesión aprobada.'
+                    : 'Sesión rechazada.',
+            )
+            setReviewReason('')
+            loadSession()
+        } catch (e) {
+            setError((e as Error).message)
+        } finally {
+            setReviewBusy(null)
+        }
+    }
 
     const extracted: ExtractedDocument | undefined = useMemo(() => {
         return data?.checks.find((c) => c.type === 'document')?.detail
@@ -670,6 +708,65 @@ const SessionDetailView = () => {
                     </div>
                 </div>
             </Card>
+
+            {/* ---------- Acciones de revisión manual (cola in_review) ---------- */}
+            {data.state === 'in_review' && (
+                <Card className="mb-4 border border-amber-300 dark:border-amber-500/40">
+                    <div className="flex flex-wrap items-start justify-between gap-4">
+                        <div className="min-w-0">
+                            <h6 className="text-sm font-semibold heading-text">
+                                Revisión manual requerida
+                            </h6>
+                            <p className="mt-1 text-xs text-gray-500">
+                                Esta sesión espera una decisión humana. El motor
+                                sugiere:{' '}
+                                <span className="font-semibold">
+                                    {data.result?.decision === 'verified'
+                                        ? 'aprobar'
+                                        : data.result?.decision === 'rejected'
+                                          ? 'rechazar'
+                                          : '—'}
+                                </span>
+                                {data.result?.loa
+                                    ? ` (LoA sugerido ${data.result.loa})`
+                                    : ''}
+                                .
+                            </p>
+                        </div>
+                    </div>
+                    <div className="mt-3">
+                        <label className="mb-1 block text-xs font-medium text-gray-500 dark:text-gray-400">
+                            Motivo (opcional, se registra en auditoría)
+                        </label>
+                        <Input
+                            value={reviewReason}
+                            placeholder="Ej: documento legible, match dudoso revisado manualmente…"
+                            onChange={(e) => setReviewReason(e.target.value)}
+                        />
+                    </div>
+                    <div className="mt-4 flex justify-end gap-2">
+                        <Button
+                            variant="solid"
+                            customColorClass={() =>
+                                'bg-red-500 hover:bg-red-600 text-white border-0'
+                            }
+                            loading={reviewBusy === 'decline'}
+                            disabled={reviewBusy !== null}
+                            onClick={() => decideReview('decline')}
+                        >
+                            Rechazar
+                        </Button>
+                        <Button
+                            variant="solid"
+                            loading={reviewBusy === 'approve'}
+                            disabled={reviewBusy !== null}
+                            onClick={() => decideReview('approve')}
+                        >
+                            Aprobar
+                        </Button>
+                    </div>
+                </Card>
+            )}
 
             {/* ---------- Tira de miniaturas ---------- */}
             <Card className="mb-4">

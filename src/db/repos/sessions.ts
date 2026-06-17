@@ -16,6 +16,7 @@ import type {
   SessionResult,
   SessionState,
   VerificationSession,
+  WorkflowDefinition,
 } from "../../types";
 
 interface SessionRow {
@@ -26,6 +27,11 @@ interface SessionRow {
   link_token: string;
   callback_url: string | null;
   assurance_required: LoA;
+  workflow_id: string | null;
+  workflow_version: number | null;
+  workflow_snapshot: WorkflowDefinition | null;
+  reviewed_by: string | null;
+  reviewed_at: Date | null;
   redirect_url: string | null;
   locale: string;
   recapture_count: number;
@@ -46,6 +52,11 @@ function mapSession(row: SessionRow): VerificationSession {
     linkToken: row.link_token,
     callbackUrl: row.callback_url,
     assuranceRequired: row.assurance_required,
+    workflowId: row.workflow_id,
+    workflowVersion: row.workflow_version,
+    workflowSnapshot: row.workflow_snapshot,
+    reviewedBy: row.reviewed_by,
+    reviewedAt: isoOrNull(row.reviewed_at),
     redirectUrl: row.redirect_url,
     locale: row.locale,
     recaptureCount: row.recapture_count,
@@ -64,6 +75,10 @@ export interface CreateSessionInput {
   linkToken: string;
   callbackUrl?: string | null;
   assuranceRequired: LoA;
+  /** Workflow snapshoteado en la sesión (P0 #1). Opcional para compat. */
+  workflowId?: string | null;
+  workflowVersion?: number | null;
+  workflowSnapshot?: WorkflowDefinition | null;
   redirectUrl?: string | null;
   locale?: string;
   /** ISO 8601. */
@@ -77,8 +92,9 @@ export async function create(
   const res = await exec.query<SessionRow>(
     `INSERT INTO verification_sessions
        (tenant_id, external_ref, link_token, callback_url,
-        assurance_required, redirect_url, locale, expires_at)
-     VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, 'es'), $8)
+        assurance_required, workflow_id, workflow_version, workflow_snapshot,
+        redirect_url, locale, expires_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9, COALESCE($10, 'es'), $11)
      RETURNING *`,
     [
       input.tenantId,
@@ -86,12 +102,63 @@ export async function create(
       input.linkToken,
       input.callbackUrl ?? null,
       input.assuranceRequired,
+      input.workflowId ?? null,
+      input.workflowVersion ?? null,
+      input.workflowSnapshot !== undefined && input.workflowSnapshot !== null
+        ? JSON.stringify(input.workflowSnapshot)
+        : null,
       input.redirectUrl ?? null,
       input.locale ?? null,
       input.expiresAt,
     ]
   );
   return mapSession(res.rows[0]);
+}
+
+/**
+ * Lookup por id SIN scope de tenant. SOLO para superficies admin globales (cola de
+ * revisión: el operador opera cross-tenant). El tenant real se obtiene de la fila.
+ */
+export async function getByIdAny(
+  id: string,
+  exec: Executor = pool
+): Promise<VerificationSession | null> {
+  const res = await exec.query<SessionRow>(
+    "SELECT * FROM verification_sessions WHERE id = $1",
+    [id]
+  );
+  return res.rows[0] ? mapSession(res.rows[0]) : null;
+}
+
+/**
+ * Cola de revisión humana: sesiones en estado `in_review` (cross-tenant, admin).
+ * Filtro opcional por tenant. Devuelve total + filas (más nuevas primero).
+ */
+export async function listInReview(
+  opts: { tenantId?: string; limit?: number; offset?: number } = {},
+  exec: Executor = pool
+): Promise<{ total: number; sessions: VerificationSession[] }> {
+  const conds: string[] = ["state = 'in_review'"];
+  const params: unknown[] = [];
+  let p = 1;
+  if (opts.tenantId !== undefined) {
+    conds.push(`tenant_id = $${p++}`);
+    params.push(opts.tenantId);
+  }
+  const where = conds.join(" AND ");
+  const totalRes = await exec.query<{ count: string }>(
+    `SELECT COUNT(*)::text AS count FROM verification_sessions WHERE ${where}`,
+    params
+  );
+  const total = parseInt(totalRes.rows[0].count, 10);
+  const limit = opts.limit ?? 50;
+  const offset = opts.offset ?? 0;
+  const rowsRes = await exec.query<SessionRow>(
+    `SELECT * FROM verification_sessions WHERE ${where}
+     ORDER BY created_at DESC LIMIT $${p++} OFFSET $${p++}`,
+    [...params, limit, offset]
+  );
+  return { total, sessions: rowsRes.rows.map(mapSession) };
 }
 
 export async function getById(
@@ -199,6 +266,9 @@ export interface UpdateSessionInput {
    * forma atómica preferir `markUsed()`.
    */
   usedAt?: Date | null;
+  /** Revisión humana (cola in_review): sella quién/cuándo decidió. */
+  reviewedBy?: string | null;
+  reviewedAt?: Date | null;
 }
 
 /**
@@ -218,6 +288,8 @@ export async function update(
        result          = CASE WHEN $5::boolean THEN $6::jsonb ELSE result END,
        completed_at    = CASE WHEN $7::boolean THEN $8::timestamptz ELSE completed_at END,
        used_at         = CASE WHEN $9::boolean THEN $10::timestamptz ELSE used_at END,
+       reviewed_by     = CASE WHEN $11::boolean THEN $12::text ELSE reviewed_by END,
+       reviewed_at     = CASE WHEN $13::boolean THEN $14::timestamptz ELSE reviewed_at END,
        updated_at      = now()
      WHERE id = $1 AND tenant_id = $2
      RETURNING *`,
@@ -233,6 +305,10 @@ export async function update(
       patch.completedAt !== undefined ? patch.completedAt : null,
       patch.usedAt !== undefined,
       patch.usedAt !== undefined ? patch.usedAt : null,
+      patch.reviewedBy !== undefined,
+      patch.reviewedBy !== undefined ? patch.reviewedBy : null,
+      patch.reviewedAt !== undefined,
+      patch.reviewedAt !== undefined ? patch.reviewedAt : null,
     ]
   );
   return res.rows[0] ? mapSession(res.rows[0]) : null;

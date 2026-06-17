@@ -18,6 +18,7 @@ const STATE_OPTIONS: { value: SessionState | ''; label: string }[] = [
     { value: 'created', label: 'Creada' },
     { value: 'capturing', label: 'Capturando' },
     { value: 'processing', label: 'Procesando' },
+    { value: 'in_review', label: 'En revisión' },
     { value: 'verified', label: 'Verificada' },
     { value: 'rejected', label: 'Rechazada' },
     { value: 'needs_recapture', label: 'Recaptura' },

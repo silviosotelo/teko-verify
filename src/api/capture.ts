@@ -146,6 +146,11 @@ const TERMINAL_STATES = new Set<SessionState>([
   "rejected",
   "error",
   "expired",
+  // `in_review` no es terminal del lado SISTEMA (un operador lo resuelve), pero SÍ
+  // lo es del lado TITULAR: ya no captura más y su token quedó consumido. Tratarlo
+  // como terminal para la captura permite que /status lo lea (subject ve "en revisión")
+  // y bloquea nuevas mutaciones de captura.
+  "in_review",
 ]);
 
 /**
@@ -732,7 +737,7 @@ captureRouter.get("/:token/events", async (req: Request, res: Response) => {
   res.write(": connected\n\n");
 
   // Poll ligero del estado y empuje SSE; termina al llegar a estado terminal.
-  const terminal = new Set(["verified", "rejected", "expired", "error"]);
+  const terminal = new Set(["verified", "rejected", "expired", "error", "in_review"]);
   const tick = async () => {
     const s = await repos.sessions.findByLinkToken(req.params.token);
     if (!s) return;

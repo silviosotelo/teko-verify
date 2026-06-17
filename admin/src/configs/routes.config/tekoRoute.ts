@@ -28,6 +28,20 @@ const tekoRoute: Routes = [
         meta: { pageContainerType: 'contained' },
     },
     {
+        key: 'teko.reviewQueue',
+        path: '/review-queue',
+        component: lazy(() => import('@/views/teko/ReviewQueue')),
+        authority: [],
+        meta: { pageContainerType: 'contained' },
+    },
+    {
+        key: 'teko.workflows',
+        path: '/workflows',
+        component: lazy(() => import('@/views/teko/Workflows')),
+        authority: [],
+        meta: { pageContainerType: 'contained' },
+    },
+    {
         key: 'teko.testVerify',
         path: '/test-verify',
         component: lazy(() => import('@/views/teko/TestVerify')),

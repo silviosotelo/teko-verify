@@ -43,6 +43,7 @@ export type SessionState =
   | "capturing"
   | "processing"
   | "review"
+  | "in_review" // cola de revisión HUMANA (workflow review:always|on_borderline); no terminal
   | "verified"
   | "rejected"
   | "needs_recapture"
@@ -399,6 +400,54 @@ export interface TenantPolicy {
   };
 }
 
+// ---- Workflows (configurables + versionados) — P0 #1 --------------------- //
+
+/**
+ * Modo de revisión HUMANA tras computar los checks (cola de revisión, Didit-like):
+ *   - "auto"          → el sistema auto-decide (verified|rejected). Comportamiento actual.
+ *   - "always"        → SIEMPRE pasa por `in_review` (un operador resuelve).
+ *   - "on_borderline" → pasa por `in_review` sólo si algún score cae en la banda dudosa.
+ */
+export type ReviewMode = "auto" | "always" | "on_borderline";
+
+/**
+ * Definición de un workflow (JSONB versionado): QUÉ checks corren, con qué umbrales,
+ * y la política de revisión. Reemplaza el L1/L2/L3 hardcode. Compatibilidad: los
+ * workflows "default" (default-l1/-l2/-l3) mapean exacto a la escalera actual.
+ *
+ * El LoA EQUIVALENTE se DERIVA de la def (liveness.required→L3, match.required→L2,
+ * document.required→L1) para que `decision()`/`needsMatch`/`needsLiveness` sigan
+ * funcionando sin cambios sobre el `assuranceRequired` resultante.
+ */
+export interface WorkflowDefinition {
+  document?: { required: boolean };
+  liveness?: { required: boolean; mode?: "active" | "passive"; threshold?: number };
+  match?: { required: boolean; threshold?: number };
+  quality?: { glassesMaxPct?: number };
+  review?: {
+    mode: ReviewMode;
+    /** Para on_borderline: bandas de score [min,max] que disparan revisión humana. */
+    borderlineBand?: {
+      matchMin?: number;
+      matchMax?: number;
+      livenessMin?: number;
+      livenessMax?: number;
+    };
+  };
+}
+
+/** workflows — definición versionada por tenant (§ Workflow→Session). */
+export interface Workflow {
+  id: string;
+  tenantId: string;
+  name: string;
+  version: number;
+  definition: WorkflowDefinition;
+  isDefault: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
 /** tenants — organizaciones consumidoras (§5). */
 export interface Tenant {
   id: string;
@@ -465,6 +514,14 @@ export interface VerificationSession {
   callbackUrl: string | null;
   /** LoA requerido para esta sesión (snapshot de la policy al crearla). */
   assuranceRequired: LoA;
+  /** Workflow usado (versión concreta). null en sesiones viejas o default-virtual. */
+  workflowId?: string | null;
+  workflowVersion?: number | null;
+  /** Snapshot de la definición del workflow al crear la sesión (qué checks/umbrales/revisión). */
+  workflowSnapshot?: WorkflowDefinition | null;
+  /** Revisión humana (cola in_review): quién y cuándo decidió. */
+  reviewedBy?: string | null;
+  reviewedAt?: string | null;
   redirectUrl: string | null;
   locale: string;
   /** Contador de recapturas (adición de arquitecto: §5 no lo lista; §9 lo exige). */
@@ -573,6 +630,11 @@ export interface CreateSessionRequest {
   callbackUrl?: string;
   /** LoA requerido; si se omite usa el de la policy del tenant. */
   assuranceRequired?: LoA;
+  /**
+   * Workflow a usar (id de una versión concreta). Si se omite, se snapshotea el
+   * workflow default que corresponde al `assuranceRequired` (compatibilidad).
+   */
+  workflowId?: string;
   redirectUrl?: string;
   locale?: string;
   /**
@@ -864,6 +926,62 @@ export interface AdminMetricsResponse {
   byState: Record<SessionState, number>;
   /** Latencia media por módulo en ms. */
   latencyByModule: Partial<Record<CheckType, number>>;
+}
+
+// ---- 4.C.bis) Workflows + cola de revisión manual (P0 #1) ----------------- //
+
+/** Respuesta de un workflow (admin). */
+export interface WorkflowResponse {
+  id: string;
+  tenantId: string;
+  name: string;
+  version: number;
+  definition: WorkflowDefinition;
+  isDefault: boolean;
+  /** LoA equivalente derivado de la definición (informativo). */
+  assuranceLevel: LoA;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** POST /admin/tenants/:id/workflows — crear workflow nuevo (version 1). */
+export interface CreateWorkflowRequest {
+  name: string;
+  definition: WorkflowDefinition;
+}
+
+/** PUT /admin/tenants/:id/workflows/:name — editar = crear nueva versión. */
+export interface UpdateWorkflowRequest {
+  definition: WorkflowDefinition;
+}
+
+/** Ítem de la cola de revisión (GET /admin/review-queue). */
+export interface ReviewQueueItem {
+  sessionId: string;
+  tenantId: string;
+  tenantName: string;
+  externalRef: string | null;
+  assuranceRequired: LoA;
+  /** Pre-veredicto sugerido por el motor (la suggestion guardada en result). */
+  suggestion: SessionResult | null;
+  createdAt: string;
+}
+
+export interface ReviewQueueResponse {
+  total: number;
+  items: ReviewQueueItem[];
+}
+
+/** POST /admin/sessions/:id/review — decisión del operador. */
+export interface ReviewDecisionRequest {
+  decision: "approve" | "decline";
+  reason?: string;
+}
+
+export interface ReviewDecisionResponse {
+  sessionId: string;
+  state: SessionState;
+  result: SessionResult | null;
 }
 
 // ---- 4.D) Webhook firmado (HMAC) al tenant (§8) --------------------------- //

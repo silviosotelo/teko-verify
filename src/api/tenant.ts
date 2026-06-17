@@ -87,17 +87,34 @@ tenantRouter.post("/sessions", async (req: Request, res: Response) => {
       }
     }
 
-    const assuranceRequired = body.assuranceRequired ?? tenant.policies.assuranceRequired;
+    const requestedAssurance = body.assuranceRequired ?? tenant.policies.assuranceRequired;
     const ttlSec = tenant.policies.linkTokenTtlSeconds || 900;
     const expiresAt = new Date(Date.now() + ttlSec * 1000).toISOString();
     const linkToken = generateLinkToken();
+
+    // P0 #1: resuelve el workflow a snapshotear. workflowId explícito → esa versión;
+    // si no, el default que mapea al LoA pedido (comportamiento idéntico al actual).
+    // El assurance_required efectivo se DERIVA del workflow (default = igual al pedido).
+    let wf;
+    try {
+      wf = await repos.workflows.resolveForSession(tenant.id, {
+        workflowId: body.workflowId,
+        assuranceRequired: requestedAssurance,
+      });
+    } catch (e) {
+      res.status(400).json({ error: "invalid_workflow", detail: (e as Error).message });
+      return;
+    }
 
     const session = await repos.sessions.create({
       tenantId: tenant.id,
       externalRef: externalRef ?? null,
       linkToken,
       callbackUrl: body.callbackUrl ?? null,
-      assuranceRequired,
+      assuranceRequired: wf.assuranceRequired,
+      workflowId: wf.workflowId,
+      workflowVersion: wf.workflowVersion,
+      workflowSnapshot: wf.snapshot,
       redirectUrl: body.redirectUrl ?? null,
       locale: body.locale,
       expiresAt,
@@ -108,7 +125,12 @@ tenantRouter.post("/sessions", async (req: Request, res: Response) => {
       sessionId: session.id,
       actor: `tenant:${req.tenantCtx!.apiKey.id}`,
       event: "session.created",
-      detail: { externalRef: externalRef ?? null, assuranceRequired },
+      detail: {
+        externalRef: externalRef ?? null,
+        assuranceRequired: wf.assuranceRequired,
+        workflowId: wf.workflowId,
+        workflowVersion: wf.workflowVersion,
+      },
       ip: req.ip ?? null,
     });
 

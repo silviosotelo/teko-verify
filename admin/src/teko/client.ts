@@ -12,12 +12,16 @@ import type {
     MetricsResponse,
     OcrDebugResponse,
     OcrDebugVariant,
+    ReviewDecisionResponse,
+    ReviewQueueResponse,
     SessionDetail,
     SessionState,
     Tenant,
     TenantPolicy,
     TestSessionResponse,
     TestVerifyResponse,
+    Workflow,
+    WorkflowDefinition,
 } from './types'
 
 // baseURL origin-root: NO relativo a /admin-ui/.
@@ -169,6 +173,56 @@ export const tekoApi = {
         return request<SessionDetail>(
             'GET',
             `/tenants/${tenantId}/sessions/${sessionId}`,
+        )
+    },
+
+    // ---- Workflows (configurables + versionados) — P0 #1 ----
+    listWorkflows(tenantId: string) {
+        return request<{ workflows: Workflow[] }>(
+            'GET',
+            `/tenants/${tenantId}/workflows`,
+        )
+    },
+    createWorkflow(
+        tenantId: string,
+        body: { name: string; definition: WorkflowDefinition },
+    ) {
+        return request<Workflow>('POST', `/tenants/${tenantId}/workflows`, body)
+    },
+    // Editar = crear una nueva VERSIÓN del workflow `name`.
+    updateWorkflow(
+        tenantId: string,
+        name: string,
+        definition: WorkflowDefinition,
+    ) {
+        return request<Workflow>(
+            'PUT',
+            `/tenants/${tenantId}/workflows/${encodeURIComponent(name)}`,
+            { definition },
+        )
+    },
+
+    // ---- Cola de revisión manual — P0 #1 ----
+    reviewQueue(params?: { tenantId?: string; limit?: number; offset?: number }) {
+        const q = new URLSearchParams()
+        if (params?.tenantId) q.set('tenantId', params.tenantId)
+        if (params?.limit != null) q.set('limit', String(params.limit))
+        if (params?.offset != null) q.set('offset', String(params.offset))
+        const qs = q.toString()
+        return request<ReviewQueueResponse>(
+            'GET',
+            `/review-queue${qs ? `?${qs}` : ''}`,
+        )
+    },
+    decideReview(
+        sessionId: string,
+        decision: 'approve' | 'decline',
+        reason?: string,
+    ) {
+        return request<ReviewDecisionResponse>(
+            'POST',
+            `/sessions/${sessionId}/review`,
+            reason ? { decision, reason } : { decision },
         )
     },
 

@@ -8,6 +8,7 @@ export type SessionState =
     | 'capturing'
     | 'processing'
     | 'review'
+    | 'in_review'
     | 'verified'
     | 'rejected'
     | 'needs_recapture'
@@ -154,6 +155,59 @@ export interface AuditEntry {
     detail: Record<string, unknown>
     ip: string | null
     createdAt: string
+}
+
+// ---- Workflows (configurables + versionados) — P0 #1 ----
+export type ReviewMode = 'auto' | 'always' | 'on_borderline'
+
+export interface WorkflowDefinition {
+    document?: { required: boolean }
+    liveness?: { required: boolean; mode?: 'active' | 'passive'; threshold?: number }
+    match?: { required: boolean; threshold?: number }
+    quality?: { glassesMaxPct?: number }
+    review?: {
+        mode: ReviewMode
+        borderlineBand?: {
+            matchMin?: number
+            matchMax?: number
+            livenessMin?: number
+            livenessMax?: number
+        }
+    }
+}
+
+export interface Workflow {
+    id: string
+    tenantId: string
+    name: string
+    version: number
+    definition: WorkflowDefinition
+    isDefault: boolean
+    assuranceLevel: LoA
+    createdAt: string
+    updatedAt: string
+}
+
+// ---- Cola de revisión manual — P0 #1 ----
+export interface ReviewQueueItem {
+    sessionId: string
+    tenantId: string
+    tenantName: string
+    externalRef: string | null
+    assuranceRequired: LoA
+    suggestion: SessionResult | null
+    createdAt: string
+}
+
+export interface ReviewQueueResponse {
+    total: number
+    items: ReviewQueueItem[]
+}
+
+export interface ReviewDecisionResponse {
+    sessionId: string
+    state: SessionState
+    result: SessionResult | null
 }
 
 // ---- "Probar verificación" (test del operador) ----

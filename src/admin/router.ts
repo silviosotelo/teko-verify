@@ -34,9 +34,10 @@ import { resolveTestSessionTtlSec } from "./testSessionTtl";
 import { decodeBase64Image } from "../lib/images";
 import { ensureRasterImage } from "../lib/raster";
 import { isMailerConfigured, isValidEmail, sendVerificationEmail } from "../lib/mailer";
-import { computeChecks } from "../pipeline";
+import { computeChecks, applyReviewDecision } from "../pipeline";
 import { realPipelineDeps } from "../pipelineDeps";
 import { decision as decideVerdict } from "../modules/decision";
+import { assuranceFromDefinition } from "../lib/workflow";
 import sharp from "sharp";
 import {
   PaddleOcrClient,
@@ -55,8 +56,14 @@ import type {
   EvidenceType,
   LoA,
   MatchResult,
+  ReviewDecisionResponse,
+  ReviewQueueItem,
+  ReviewQueueResponse,
   SessionState,
   TenantResponse,
+  Workflow,
+  WorkflowDefinition,
+  WorkflowResponse,
 } from "../types";
 
 /** Base pública para construir el verifyUrl de la sesión de test con cámara. */
@@ -258,6 +265,8 @@ adminRouter.post("/tenants", canWrite, async (req: Request, res: Response) => {
       return;
     }
     const tenant = await repos.tenants.create({ name, slug, policies: mergePolicy(policies) });
+    // P0 #1: siembra los 3 workflows default (default-l1/-l2/-l3) del tenant nuevo.
+    await repos.workflows.ensureDefaults(tenant.id);
     await repos.auditLog.record({
       tenantId: tenant.id,
       actor: `admin:${req.adminOperator?.operatorId ?? "?"}`,
@@ -459,7 +468,7 @@ adminRouter.get(
 adminRouter.get("/tenants/:id/metrics", async (req: Request, res: Response) => {
   const tenantId = req.params.id;
   const states: SessionState[] = [
-    "created", "capturing", "processing", "verified",
+    "created", "capturing", "processing", "review", "in_review", "verified",
     "rejected", "needs_recapture", "expired", "error",
   ];
   const byState = {} as Record<SessionState, number>;
@@ -487,6 +496,171 @@ adminRouter.get("/tenants/:id/audit", async (req: Request, res: Response) => {
     limit: req.query.limit ? parseInt(String(req.query.limit), 10) : 500,
   });
   res.json({ entries });
+});
+
+// ---- Workflows (configurables + versionados) — P0 #1 --------------------- //
+
+function toWorkflowResponse(w: Workflow): WorkflowResponse {
+  return {
+    id: w.id,
+    tenantId: w.tenantId,
+    name: w.name,
+    version: w.version,
+    definition: w.definition,
+    isDefault: w.isDefault,
+    assuranceLevel: assuranceFromDefinition(w.definition),
+    createdAt: w.createdAt,
+    updatedAt: w.updatedAt,
+  };
+}
+
+/** Valida que `definition` sea un objeto plano (no array/null). Fail-closed → 400. */
+function isValidDefinition(d: unknown): d is WorkflowDefinition {
+  return !!d && typeof d === "object" && !Array.isArray(d);
+}
+
+// GET /admin/tenants/:id/workflows → todas las versiones (siembra defaults si faltan).
+adminRouter.get("/tenants/:id/workflows", async (req: Request, res: Response) => {
+  const tenant = await repos.tenants.getById(req.params.id);
+  if (!tenant) {
+    res.status(404).json({ error: "tenant_not_found" });
+    return;
+  }
+  await repos.workflows.ensureDefaults(tenant.id);
+  const workflows = await repos.workflows.listByTenant(tenant.id);
+  res.json({ workflows: workflows.map(toWorkflowResponse) });
+});
+
+// POST /admin/tenants/:id/workflows {name, definition} → workflow NUEVO (version 1).
+adminRouter.post("/tenants/:id/workflows", canWrite, async (req: Request, res: Response) => {
+  const tenant = await repos.tenants.getById(req.params.id);
+  if (!tenant) {
+    res.status(404).json({ error: "tenant_not_found" });
+    return;
+  }
+  const name = typeof req.body?.name === "string" ? req.body.name.trim() : "";
+  const definition = req.body?.definition;
+  if (!name || !isValidDefinition(definition)) {
+    res.status(400).json({ error: "name_and_definition_required" });
+    return;
+  }
+  const existing = await repos.workflows.getCurrentByName(tenant.id, name);
+  if (existing) {
+    res.status(409).json({ error: "workflow_name_exists", detail: "Usá PUT para crear una nueva versión." });
+    return;
+  }
+  const created = await repos.workflows.createVersion({ tenantId: tenant.id, name, definition });
+  await repos.auditLog.record({
+    tenantId: tenant.id,
+    actor: `admin:${req.adminOperator?.operatorId ?? "?"}`,
+    event: "workflow.created",
+    detail: { name, version: created.version },
+    ip: req.ip ?? null,
+  });
+  res.status(201).json(toWorkflowResponse(created));
+});
+
+// PUT /admin/tenants/:id/workflows/:name {definition} → EDITAR = nueva versión.
+adminRouter.put("/tenants/:id/workflows/:name", canWrite, async (req: Request, res: Response) => {
+  const tenant = await repos.tenants.getById(req.params.id);
+  if (!tenant) {
+    res.status(404).json({ error: "tenant_not_found" });
+    return;
+  }
+  const name = req.params.name;
+  const definition = req.body?.definition;
+  if (!isValidDefinition(definition)) {
+    res.status(400).json({ error: "definition_required" });
+    return;
+  }
+  const current = await repos.workflows.getCurrentByName(tenant.id, name);
+  if (!current) {
+    res.status(404).json({ error: "workflow_not_found" });
+    return;
+  }
+  const created = await repos.workflows.createVersion({
+    tenantId: tenant.id,
+    name,
+    definition,
+    isDefault: current.isDefault,
+  });
+  await repos.auditLog.record({
+    tenantId: tenant.id,
+    actor: `admin:${req.adminOperator?.operatorId ?? "?"}`,
+    event: "workflow.updated",
+    detail: { name, version: created.version },
+    ip: req.ip ?? null,
+  });
+  res.json(toWorkflowResponse(created));
+});
+
+// ---- Cola de revisión manual (P0 #1) ------------------------------------- //
+
+// GET /admin/review-queue?tenantId=&limit=&offset=  → sesiones en `in_review`.
+// Cross-tenant por defecto (el operador revisa todo); filtra por tenant si se pide.
+adminRouter.get("/review-queue", async (req: Request, res: Response) => {
+  const tenantId = req.query.tenantId ? String(req.query.tenantId) : undefined;
+  const limit = req.query.limit ? parseInt(String(req.query.limit), 10) : 50;
+  const offset = req.query.offset ? parseInt(String(req.query.offset), 10) : 0;
+  const { total, sessions } = await repos.sessions.listInReview({ tenantId, limit, offset });
+  // Mapa id→nombre de tenant para etiquetar cada ítem sin N consultas.
+  const tenants = await repos.tenants.list({ limit: 500 });
+  const nameById = new Map(tenants.map((t) => [t.id, t.name]));
+  const items: ReviewQueueItem[] = sessions.map((s) => ({
+    sessionId: s.id,
+    tenantId: s.tenantId,
+    tenantName: nameById.get(s.tenantId) ?? s.tenantId,
+    externalRef: s.externalRef,
+    assuranceRequired: s.assuranceRequired,
+    suggestion: s.result,
+    createdAt: s.createdAt,
+  }));
+  const resp: ReviewQueueResponse = { total, items };
+  res.json(resp);
+});
+
+// POST /admin/sessions/:id/review {decision, reason}  → decisión del operador.
+// Cross-tenant (el id es global). Sólo opera sobre sesiones `in_review`. canWrite.
+adminRouter.post("/sessions/:id/review", canWrite, async (req: Request, res: Response) => {
+  try {
+    const decision = req.body?.decision === "approve" ? "approve" : req.body?.decision === "decline" ? "decline" : null;
+    if (!decision) {
+      res.status(400).json({ error: "decision_required", detail: "approve | decline" });
+      return;
+    }
+    const reason = typeof req.body?.reason === "string" ? req.body.reason.slice(0, 500) : undefined;
+    const session = await repos.sessions.getByIdAny(req.params.id);
+    if (!session) {
+      res.status(404).json({ error: "session_not_found" });
+      return;
+    }
+    if (session.state !== "in_review") {
+      res.status(409).json({ error: "session_not_in_review", state: session.state });
+      return;
+    }
+    const tenant = await repos.tenants.getById(session.tenantId);
+    if (!tenant) {
+      res.status(404).json({ error: "tenant_not_found" });
+      return;
+    }
+    // Selfie original para el embedding de la identidad (puede no existir si se purgó).
+    const selfie = await evidenceStore.read(session.tenantId, session.id, "selfie");
+    const out = await applyReviewDecision(
+      session,
+      tenant.policies,
+      selfie,
+      { decision, reviewer: req.adminOperator?.operatorId ?? "?", reason },
+      realPipelineDeps
+    );
+    const resp: ReviewDecisionResponse = {
+      sessionId: session.id,
+      state: out.state,
+      result: out.result,
+    };
+    res.json(resp);
+  } catch (e) {
+    res.status(500).json({ error: "review_decision_failed", detail: (e as Error).message });
+  }
 });
 
 // ---- "Probar verificación" (test del operador) --------------------------- //

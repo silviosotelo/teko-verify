@@ -13,18 +13,22 @@
  *   - aislamiento: todas las escrituras llevan el tenantId de la sesión
  */
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { processSession } from "./pipeline";
+import { processSession, applyReviewDecision } from "./pipeline";
 import type {
   CapturedImages,
   PipelineDeps,
   PipelineModules,
 } from "./pipeline";
+import { workflowDefForLoA } from "./lib/workflow";
 import type {
   DocumentResult,
   LivenessResult,
+  MatchResult,
+  PipelineChecks,
   QualityResult,
   TenantPolicy,
   VerificationSession,
+  WorkflowDefinition,
 } from "./types";
 
 // ----------------------------- fixtures ----------------------------------- //
@@ -128,13 +132,15 @@ interface SpyState {
   identities: Array<{ tenantId: string; ci: string }>;
   evidence: Array<{ tenantId: string; type: string }>;
   audit: Array<{ tenantId: string; event: string }>;
-  sessionUpdates: Array<{ tenantId: string; state?: string; recaptureCount?: number }>;
+  sessionUpdates: Array<{ tenantId: string; state?: string; recaptureCount?: number; reviewedBy?: string | null }>;
   webhooks: Array<{ event: string; state: string }>;
 }
 
 function makeDeps(
   modules: PipelineModules,
-  spy: SpyState
+  spy: SpyState,
+  /** Checks que devuelve checks.listBySession (reconstrucción en finalize/review). */
+  listChecks: Array<{ type: "quality" | "liveness" | "document" | "match"; passed: boolean; detail: unknown }> = []
 ): PipelineDeps {
   const fakeClient = {} as never; // el cliente de tx no se usa en los mocks
   return {
@@ -143,7 +149,12 @@ function makeDeps(
     repos: {
       sessions: {
         update: async (tenantId, _id, patch) => {
-          spy.sessionUpdates.push({ tenantId, state: patch.state, recaptureCount: patch.recaptureCount });
+          spy.sessionUpdates.push({
+            tenantId,
+            state: patch.state,
+            recaptureCount: patch.recaptureCount,
+            reviewedBy: patch.reviewedBy,
+          });
           return makeSession({ tenantId, state: patch.state ?? "processing" });
         },
       },
@@ -152,6 +163,8 @@ function makeDeps(
           spy.checks.push({ tenantId: input.tenantId, type: input.type, passed: input.passed });
           return {};
         },
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        listBySession: async () => listChecks as any,
       },
       identities: {
         create: async (input) => {
@@ -362,5 +375,93 @@ describe("processSession — fail-closed ante excepción", () => {
     const out = await processSession(makeSession(), makePolicy(), IMAGES, makeDeps(modules, spy));
     expect(out.state).toBe("error");
     expect(spy.webhooks).toEqual([]);
+  });
+});
+
+describe("processSession — workflows + ruteo a in_review (P0 #1)", () => {
+  let spy: SpyState;
+  beforeEach(() => {
+    spy = freshSpy();
+  });
+
+  it("workflow review:always → in_review (sin identidad ni webhook), checks persistidos + sugerencia", async () => {
+    const snapshot: WorkflowDefinition = {
+      document: { required: true },
+      match: { required: true },
+      liveness: { required: true, mode: "active" },
+      review: { mode: "always" },
+    };
+    const modules = modulesFor({ quality: PASS_QUALITY, liveness: PASS_LIVENESS, document: makeDocument(true), match: "pass" });
+    const out = await processSession(makeSession({ workflowSnapshot: snapshot }), makePolicy(), IMAGES, makeDeps(modules, spy));
+
+    expect(out.state).toBe("in_review");
+    // El pre-veredicto (verified) viaja como SUGERENCIA en result.
+    expect(out.result?.decision).toBe("verified");
+    expect(spy.identities).toHaveLength(0);
+    expect(spy.webhooks).toEqual([]);
+    expect(spy.checks.map((c) => c.type).sort()).toEqual(["document", "liveness", "match", "quality"]);
+    expect(spy.sessionUpdates.some((u) => u.state === "in_review")).toBe(true);
+    expect(spy.audit.some((a) => a.event === "pipeline.in_review")).toBe(true);
+  });
+
+  it("snapshot default L3 (review auto) → idéntico: verified + identidad + webhook (no-regresión)", async () => {
+    const modules = modulesFor({ quality: PASS_QUALITY, liveness: PASS_LIVENESS, document: makeDocument(true), match: "pass" });
+    const out = await processSession(
+      makeSession({ workflowSnapshot: workflowDefForLoA("L3") }),
+      makePolicy(),
+      IMAGES,
+      makeDeps(modules, spy)
+    );
+    expect(out.state).toBe("verified");
+    expect(out.result?.loa).toBe("L3");
+    expect(spy.identities).toHaveLength(1);
+    expect(spy.webhooks).toEqual([{ event: "session.verified", state: "verified" }]);
+  });
+});
+
+describe("applyReviewDecision — decisión humana (P0 #1)", () => {
+  let spy: SpyState;
+  beforeEach(() => {
+    spy = freshSpy();
+  });
+
+  const listChecks = [
+    { type: "quality" as const, passed: true, detail: PASS_QUALITY },
+    { type: "document" as const, passed: true, detail: makeDocument(true) },
+    { type: "match" as const, passed: true, detail: { cosine: 0.5, threshold: 0.4, passed: true } as MatchResult },
+    { type: "liveness" as const, passed: true, detail: PASS_LIVENESS },
+  ];
+
+  it("approve → verified, crea identidad, sella revisor, webhook session.verified", async () => {
+    const modules = modulesFor({ quality: PASS_QUALITY, document: makeDocument(true), match: "pass" });
+    const deps = makeDeps(modules, spy, listChecks);
+    const out = await applyReviewDecision(
+      makeSession({ state: "in_review" }),
+      makePolicy(),
+      Buffer.from("selfie"),
+      { decision: "approve", reviewer: "op-1", reason: "ok manual" },
+      deps
+    );
+    expect(out.state).toBe("verified");
+    expect(out.result?.decision).toBe("verified");
+    expect(spy.identities).toHaveLength(1);
+    expect(spy.webhooks).toEqual([{ event: "session.verified", state: "verified" }]);
+    expect(spy.sessionUpdates.some((u) => u.reviewedBy === "op-1")).toBe(true);
+    expect(spy.audit.some((a) => a.event === "session.reviewed")).toBe(true);
+  });
+
+  it("decline → rejected, sin identidad, webhook session.rejected", async () => {
+    const modules = modulesFor({ quality: PASS_QUALITY, document: makeDocument(true), match: "pass" });
+    const deps = makeDeps(modules, spy, listChecks);
+    const out = await applyReviewDecision(
+      makeSession({ state: "in_review" }),
+      makePolicy(),
+      Buffer.from("selfie"),
+      { decision: "decline", reviewer: "op-1" },
+      deps
+    );
+    expect(out.state).toBe("rejected");
+    expect(spy.identities).toHaveLength(0);
+    expect(spy.webhooks).toEqual([{ event: "session.rejected", state: "rejected" }]);
   });
 });

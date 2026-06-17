@@ -47,6 +47,7 @@ import type {
 import { decision as decideVerdict } from "./modules/decision";
 import { match as matchEmbeddings } from "./modules/match";
 import { ensureRasterImage } from "./lib/raster";
+import { applyWorkflowToPolicy, shouldRouteToReview } from "./lib/workflow";
 
 /**
  * Normaliza las imágenes de DOCUMENTO a raster decodificable por sharp: si docFront/
@@ -123,6 +124,9 @@ export interface PipelineRepos {
         completedAt?: string | null;
         /** Consumo del token de un solo uso: setear al transicionar a terminal (§8/§9). */
         usedAt?: Date | null;
+        /** Revisión humana (cola in_review): sella revisor + momento de decisión. */
+        reviewedBy?: string | null;
+        reviewedAt?: Date | null;
       },
       exec: Executor
     ): Promise<VerificationSession | null>;
@@ -285,6 +289,13 @@ function effectivePolicy(
   session: VerificationSession,
   policy: TenantPolicy
 ): TenantPolicy {
+  // P0 #1: si la sesión snapshoteó un workflow, ÉL define qué checks corren y con
+  // qué umbrales (derivando el LoA equivalente). Sin snapshot (sesiones viejas o
+  // default-virtual) se cae al comportamiento previo (LoA por sesión). Para los
+  // workflows default-l1/-l2/-l3 ambos caminos dan idéntico resultado.
+  if (session.workflowSnapshot) {
+    return applyWorkflowToPolicy(policy, session.workflowSnapshot);
+  }
   return { ...policy, assuranceRequired: session.assuranceRequired ?? policy.assuranceRequired };
 }
 
@@ -440,6 +451,21 @@ export async function processSession(
         match: matchRes?.cosine,
       },
     };
+
+    // === 5.bis) RUTEO A REVISIÓN HUMANA (cola in_review) — P0 #1 ========== //
+    // Si el workflow lo pide (review:always | on_borderline), NO auto-decidimos:
+    // persistimos checks+evidencia y dejamos la sesión en `in_review` con el
+    // pre-veredicto como SUGERENCIA. Sin identidad, sin webhook. Un operador la
+    // resuelve luego. Sólo aplica con snapshot de workflow (sesiones nuevas);
+    // sin snapshot → comportamiento idéntico al actual (auto-decisión).
+    if (
+      shouldRouteToReview(session.workflowSnapshot, {
+        match: matchRes?.cosine,
+        liveness: liveness?.score,
+      })
+    ) {
+      return await goToReview(deps, session, result, { checks, images });
+    }
 
     const finalState: SessionState = verdict.verdict === "verified" ? "verified" : "rejected";
 
@@ -809,6 +835,18 @@ export async function finalizeFromChecks(
       extracted: extractedFrom(document),
       scores: { quality: quality.sharpness, liveness: liveness?.score, match: match?.cosine },
     };
+
+    // Ruteo a revisión humana (P0 #1): igual que en processSession, pero los checks
+    // ya fueron persistidos por computeChecks → goToReview no los re-persiste.
+    if (
+      shouldRouteToReview(session.workflowSnapshot, {
+        match: match?.cosine,
+        liveness: liveness?.score,
+      })
+    ) {
+      return await goToReview(deps, session, result, {});
+    }
+
     const finalState: SessionState = verdict.verdict === "verified" ? "verified" : "rejected";
 
     // Embedding de la identidad: el check de match no lo persiste (sólo el coseno),
@@ -956,6 +994,164 @@ async function persistEvidence(
       { tenantId, sessionId, type, storagePath: saved.storagePath, sha256: saved.sha256 },
       tx
     );
+  }
+}
+
+/**
+ * Rutea a la COLA DE REVISIÓN HUMANA (P0 #1): deja la sesión en `in_review` con el
+ * pre-veredicto como SUGERENCIA (result), SIN crear identidad ni disparar webhook.
+ * Consume el token (el titular ya terminó; un operador resuelve luego, con su propia
+ * auth). Si se pasan `checks`+`images` (camino processSession) los persiste; en
+ * finalizeFromChecks ya fueron persistidos por computeChecks, así que se omiten.
+ */
+async function goToReview(
+  deps: PipelineDeps,
+  session: VerificationSession,
+  suggestion: SessionResult,
+  opts: { checks?: PipelineChecks; images?: CapturedImages }
+): Promise<PipelineOutput> {
+  const { tenantId, id: sessionId } = session;
+  await deps.withTransaction(async (tx) => {
+    if (opts.checks && opts.images) {
+      await persistAllChecks(deps, tenantId, sessionId, opts.checks, tx);
+      await persistEvidence(deps, tenantId, sessionId, opts.images, tx);
+    }
+    await deps.repos.sessions.update(
+      tenantId,
+      sessionId,
+      // No terminal: NO se setea completedAt (lo hará el operador al decidir). El token
+      // SÍ se consume (anti-replay): un reintento del titular exige nueva sesión.
+      { state: "in_review", result: suggestion, usedAt: new Date() },
+      tx
+    );
+    await deps.repos.auditLog.record(
+      {
+        tenantId,
+        sessionId,
+        actor: "system",
+        event: "pipeline.in_review",
+        detail: { suggestion: suggestion.decision, loa: suggestion.loa, reasons: suggestion.reasons },
+      },
+      tx
+    );
+  });
+  return { state: "in_review", result: suggestion, reasons: suggestion.reasons };
+}
+
+/**
+ * DECISIÓN DE REVISIÓN MANUAL (P0 #1): un operador resuelve una sesión `in_review`.
+ * Reconstruye los checks persistidos, aplica la decisión humana (approve|decline),
+ * crea verified_identity si aprueba (re-infiriendo el embedding de la selfie), marca
+ * terminal (verified|rejected), sella revisor + reviewed_at y dispara webhook.
+ * Fail-closed: cualquier excepción → 'error' (NUNCA verified).
+ *
+ * `selfie` es la selfie original (para el embedding de la identidad); puede ser null
+ * si ya se purgó la evidencia: en ese caso se aprueba sin persistir biométrico.
+ */
+export async function applyReviewDecision(
+  session: VerificationSession,
+  tenantPolicy: TenantPolicy,
+  selfie: Buffer | null,
+  input: { decision: "approve" | "decline"; reviewer: string; reason?: string },
+  deps: PipelineDeps
+): Promise<PipelineOutput> {
+  const { tenantId, id: sessionId } = session;
+  const policy = effectivePolicy(session, tenantPolicy);
+  try {
+    const rows = await deps.repos.checks.listBySession(tenantId, sessionId);
+    const byType = new Map(rows.map((r) => [r.type, r]));
+    const quality = byType.get("quality")?.detail as QualityResult | undefined;
+    const document = byType.get("document")?.detail as DocumentResult | undefined;
+    const match = byType.get("match")?.detail as MatchResult | undefined;
+    const liveness = byType.get("liveness")?.detail as LivenessResult | undefined;
+
+    const approve = input.decision === "approve";
+    const checks: PipelineChecks | null =
+      quality && document ? { quality, document, match, liveness } : null;
+    // LoA otorgado al APROBAR manualmente: el alcanzado por la escalera si llega, o el
+    // requerido por la sesión (el operador acredita ese nivel). Decline → L0.
+    const autoVerdict = checks ? decideVerdict(checks, policy) : null;
+    const grantedLoa: SessionResult["loa"] = approve
+      ? autoVerdict && autoVerdict.loa !== "L0"
+        ? autoVerdict.loa
+        : policy.assuranceRequired
+      : "L0";
+    const reasonTag = input.reason ? [`reason:${input.reason}`] : [];
+    const result: SessionResult = {
+      decision: approve ? "verified" : "rejected",
+      loa: grantedLoa,
+      reasons: approve
+        ? ["manual_review_approved", ...reasonTag]
+        : ["manual_review_declined", ...reasonTag],
+      extracted: document ? extractedFrom(document) : undefined,
+      scores: { quality: quality?.sharpness, liveness: liveness?.score, match: match?.cosine },
+    };
+    const finalState: SessionState = approve ? "verified" : "rejected";
+    const identityEmbedding = approve && selfie ? await deps.modules.embed(selfie) : null;
+
+    await deps.withTransaction(async (tx) => {
+      if (approve && identityEmbedding && result.extracted) {
+        await deps.repos.identities.create(
+          {
+            tenantId,
+            sessionId,
+            ci: result.extracted.ci,
+            nombre: result.extracted.nombre,
+            fechaNac: result.extracted.fechaNac,
+            nacionalidad: result.extracted.nacionalidad,
+            tipoDoc: "ci_py",
+            assuranceLevel: grantedLoa,
+            faceEmbedding: identityEmbedding,
+          },
+          tx
+        );
+      }
+      await deps.repos.sessions.update(
+        tenantId,
+        sessionId,
+        {
+          state: finalState,
+          result,
+          completedAt: nowIso(),
+          usedAt: new Date(),
+          reviewedBy: input.reviewer,
+          reviewedAt: new Date(),
+        },
+        tx
+      );
+      await deps.repos.auditLog.record(
+        {
+          tenantId,
+          sessionId,
+          actor: `admin:${input.reviewer}`,
+          event: "session.reviewed",
+          detail: { decision: input.decision, reason: input.reason ?? null, loa: grantedLoa },
+        },
+        tx
+      );
+    });
+
+    await safeWebhook(
+      deps,
+      { ...session, state: finalState },
+      approve ? "session.verified" : "session.rejected",
+      result
+    );
+    return { state: finalState, result, reasons: result.reasons };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    try {
+      await deps.withTransaction(async (tx) => {
+        await deps.repos.sessions.update(tenantId, sessionId, { state: "error" }, tx);
+        await deps.repos.auditLog.record(
+          { tenantId, sessionId, actor: "system", event: "pipeline.error", detail: { message, stage: "review" } },
+          tx
+        );
+      });
+    } catch {
+      /* fail-closed */
+    }
+    return { state: "error", result: null, reasons: ["system_error", message] };
   }
 }
 
