@@ -18,36 +18,99 @@ import * as ort from "onnxruntime-node";
 import sharp from "sharp";
 import type { Engine, Face } from "../engine";
 import type { LivenessChallenge, LivenessResult } from "../types";
-import { PAD_MODEL, LIVENESS_THRESHOLD } from "../config";
+import { PAD_MODEL, PAD_MODEL_2, LIVENESS_THRESHOLD } from "../config";
 
 /**
- * Factor de escala del recorte PAD (minivision Silent-Face usa 2.7): el bbox del
- * rostro se EXPANDE por este factor alrededor del centro antes de recortar de la
- * imagen ORIGINAL. MiniFASNet necesita CONTEXTO (no el recorte ArcFace ajustado),
- * por eso ve más que la cara. Configurable por si hay que ajustarlo.
+ * Factores de escala del recorte PAD por modelo (estilo minivision Silent-Face):
+ * el bbox del rostro se EXPANDE por este factor alrededor del centro antes de
+ * recortar de la imagen ORIGINAL. MiniFASNet necesita CONTEXTO (no el recorte
+ * ArcFace ajustado), por eso ve más que la cara. El repo usa una escala POR
+ * modelo: 2.7 para MiniFASNetV2 (PAD_MODEL) y 4.0 para MiniFASNetV1SE (PAD_MODEL_2).
  */
 const PAD_CROP_SCALE = parseFloat(process.env.TEKO_PAD_CROP_SCALE || "2.7");
+const PAD_CROP_SCALE_2 = parseFloat(process.env.TEKO_PAD_CROP_SCALE_2 || "4.0");
 /** Tamaño de entrada de MiniFASNet (80x80). */
 const PAD_INPUT = 80;
 
+/**
+ * softmax numéricamente estable. Helper PURO (testeable sin el modelo real).
+ */
+export function softmax(arr: ArrayLike<number>): number[] {
+  let max = -Infinity;
+  for (let i = 0; i < arr.length; i++) if (arr[i] > max) max = arr[i];
+  const exps = new Array<number>(arr.length);
+  let sum = 0;
+  for (let i = 0; i < arr.length; i++) {
+    const e = Math.exp(arr[i] - max);
+    exps[i] = e;
+    sum += e;
+  }
+  sum += 1e-10;
+  for (let i = 0; i < exps.length; i++) exps[i] /= sum;
+  return exps;
+}
+
+/**
+ * Ensamble de Silent-Face: promedia las distribuciones softmax de cada modelo y
+ * devuelve la prob de "real" (índice 1) del resultado combinado, replicando el
+ * repo (`prediction += softmax(...)`, `value = prediction[label]/n_models`). Como
+ * cada softmax suma 1, el promedio también suma 1 y la prob "real" sale directa.
+ * Helper PURO (testeable sin el modelo real). `null` si no hay distribuciones.
+ */
+export function ensembleRealProb(dists: number[][]): number | null {
+  if (dists.length === 0) return null;
+  const k = dists[0].length;
+  const avg = new Array<number>(k).fill(0);
+  for (const d of dists) {
+    for (let i = 0; i < k; i++) avg[i] += d[i] ?? 0;
+  }
+  for (let i = 0; i < k; i++) avg[i] /= dists.length;
+  // índice 1 = "real" en la convención de Silent-Face; si el modelo emitiera un
+  // único escalar (no es el caso de MiniFASNet 3-clases) usamos el máximo.
+  return avg[1] ?? Math.max(...avg);
+}
+
+interface PadModel {
+  net: ort.InferenceSession;
+  scale: number;
+  path: string;
+}
+
 export class LivenessModule {
-  private padNet: ort.InferenceSession | null = null;
+  private padModels: PadModel[] = [];
   private padLoaded = false;
   public ready = false;
 
-  /** Carga MiniFASNet. No-throw: el faltante se maneja fail-closed en run(). */
+  /**
+   * Carga el ENSEMBLE de MiniFASNet (modelo 2.7 + modelo 4.0). No-throw: cada
+   * faltante se loguea y se omite; con AL MENOS uno el PAD opera (degradado a 1
+   * modelo). Con NINGUNO, padScore() devuelve null → fail-closed en run().
+   */
   async init(): Promise<void> {
-    try {
-      this.padNet = await ort.InferenceSession.create(PAD_MODEL, {
-        graphOptimizationLevel: "all",
-        executionProviders: ["cpu"],
-      });
-      this.padLoaded = true;
-    } catch (e) {
-      this.padLoaded = false;
+    const specs: Array<{ path: string; scale: number }> = [
+      { path: PAD_MODEL, scale: PAD_CROP_SCALE },
+      { path: PAD_MODEL_2, scale: PAD_CROP_SCALE_2 },
+    ];
+    this.padModels = [];
+    for (const spec of specs) {
+      try {
+        const net = await ort.InferenceSession.create(spec.path, {
+          graphOptimizationLevel: "all",
+          executionProviders: ["cpu"],
+        });
+        this.padModels.push({ net, scale: spec.scale, path: spec.path });
+      } catch (e) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[liveness] modelo PAD no disponible (${spec.path}): ${(e as Error).message}`
+        );
+      }
+    }
+    this.padLoaded = this.padModels.length > 0;
+    if (this.padModels.length === 1) {
       // eslint-disable-next-line no-console
       console.warn(
-        `[liveness] modelo PAD no disponible (${PAD_MODEL}): ${(e as Error).message}`
+        "[liveness] ensemble DEGRADADO a 1 modelo PAD; señal anti-spoof menos robusta (ver §13)."
       );
     }
     this.ready = true;
@@ -92,21 +155,28 @@ export class LivenessModule {
   }
 
   /**
-   * Score de vivacidad 0..1. MiniFASNet NO usa el recorte ArcFace (112, ajustado y
-   * sin contexto): recorta el bbox del rostro EXPANDIDO por `PAD_CROP_SCALE` (~2.7)
-   * de la imagen ORIGINAL, luego resize 80x80, RGB, NCHW [1,3,80,80], /255
-   * (ToTensor de minivision, sin mean/std). Null si el modelo no está.
+   * Distribución softmax (3 clases [fake_2d, real, fake_3d]) de UN modelo PAD para
+   * el recorte expandido por `scale`. MiniFASNet NO usa el recorte ArcFace (112,
+   * ajustado y sin contexto): recorta el bbox EXPANDIDO de la imagen ORIGINAL,
+   * resize 80x80, RGB, NCHW [1,3,80,80], entrada CRUDA 0..255.
+   *
+   * NORMALIZACIÓN: la entrada va en CRUDO 0..255 (SIN dividir por 255). No es un
+   * número mágico: la `to_tensor` de minivision NO divide por 255 (verificado: un
+   * patch constante 200 sale 200.0; su docstring "[0,255]→[0,1]" es copia engañosa
+   * de torchvision), así que estos modelos están ENTRENADOS en [0,255]. Control de
+   * independencia de entrada: con /255 ambos modelos SATURAN a un vector
+   * independiente de la entrada (rostro vivo, ruido y negro → mismo ~fake_3d 0.99);
+   * con 0..255 crudo la salida depende de la entrada (rostro vivo → "real" ~0.999).
+   * Export ONNX verificado bit-a-bit contra el .pth (dif. de logits ~1e-6).
    */
-  private async padScore(
+  private async modelDist(
+    model: PadModel,
     selfie: Buffer,
-    face: Face
-  ): Promise<number | null> {
-    if (!this.padLoaded || !this.padNet) return null;
-    const meta = await sharp(selfie).metadata();
-    const imgW = meta.width || 0;
-    const imgH = meta.height || 0;
-    if (!imgW || !imgH) return null;
-    const box = this.newBox(face.bbox, imgW, imgH, PAD_CROP_SCALE);
+    face: Face,
+    imgW: number,
+    imgH: number
+  ): Promise<number[] | null> {
+    const box = this.newBox(face.bbox, imgW, imgH, model.scale);
     const size = PAD_INPUT;
     const rgb = await sharp(selfie)
       .extract(box)
@@ -116,39 +186,48 @@ export class LivenessModule {
       .toBuffer();
     const n = size * size;
     const f = new Float32Array(3 * n);
-    // NORMALIZACIÓN: este export de MiniFASNet espera la entrada en CRUDO 0..255
-    // (SIN dividir por 255). Fundamento (no es un número mágico):
-    //   1) El grafo ONNX NO tiene normalización embebida (su primer nodo es Conv
-    //      directo sobre el input), así que el rango lo debe dar este código.
-    //   2) Control de independencia de entrada: con /255 el modelo SATURA y emite
-    //      el MISMO vector para negro, ruido y un rostro real (salida independiente
-    //      de la entrada) → falso rechazo ~0.007. Con 0..255 crudo la salida SÍ
-    //      depende de la entrada → un rostro vivo da prob "real" (índice 1) ~0.999.
-    //      Un modelo bien exportado NUNCA es input-independent con su preprocesado
-    //      de referencia: el rango entrenado es [0,255], NO [0,1]. NO dividir por 255.
-    // LIMITACIÓN conocida (asset del modelo, NO de este código): un único MiniFASNet
-    // discrimina débilmente real-vs-print (un retrato impreso da ~0.78, por encima
-    // del umbral 0.70). minivision en producción ENSAMBLA 2-3 variantes sumadas; con
-    // una sola hay que agregar variante(s) y/o revisar el umbral (ver §13).
     for (let i = 0; i < n; i++) {
       f[i] = rgb[i * 3];
       f[n + i] = rgb[i * 3 + 1];
       f[2 * n + i] = rgb[i * 3 + 2];
     }
     const t = new ort.Tensor("float32", f, [1, 3, size, size]);
-    const out = await this.padNet.run({ [this.padNet.inputNames[0]]: t });
-    const arr = out[this.padNet.outputNames[0]].data as Float32Array;
-    // MiniFASNet emite 3 clases [fake_2d, real, fake_3d] (o similar): softmax y
-    // tomamos la prob de "real" (índice 1). Si emite un único escalar, lo usamos.
+    const out = await model.net.run({ [model.net.inputNames[0]]: t });
+    const arr = out[model.net.outputNames[0]].data as Float32Array;
+    // MiniFASNet emite 3 logits → softmax. Si emitiera un único escalar (no es el
+    // caso), lo mapeamos a [fake, real] para que el ensemble lo promedie igual.
     if (arr.length === 1) {
       const v = arr[0];
-      return v >= 0 && v <= 1 ? v : 1 / (1 + Math.exp(-v));
+      const real = v >= 0 && v <= 1 ? v : 1 / (1 + Math.exp(-v));
+      return [1 - real, real];
     }
-    const exps = Array.from(arr).map((v) => Math.exp(v));
-    const sum = exps.reduce((a, b) => a + b, 0) + 1e-10;
-    const probs = exps.map((v) => v / sum);
-    // índice 1 = "real" en la convención de Silent-Face.
-    return probs[1] ?? Math.max(...probs);
+    return softmax(arr);
+  }
+
+  /**
+   * Score de vivacidad 0..1 = prob "real" del ENSEMBLE. Corre TODOS los modelos
+   * PAD cargados (cada uno con su crop scale), promedia los softmax y toma el
+   * índice "real". Null si no hay modelos (→ fail-closed en run()).
+   *
+   * LIMITACIÓN (asset del modelo, NO del código): un único MiniFASNet discrimina
+   * débilmente real-vs-print. El ensemble (diseño de minivision) suma una 2ª vista
+   * para una señal más robusta. La calibración FINA del umbral queda PENDIENTE de
+   * un set etiquetado de spoofs reales (no lo tenemos; un escaneo limpio de cédula
+   * lo clasifican "real" hasta el ensemble de referencia, porque MiniFASNet detecta
+   * TEXTURA de pantalla/impresión, ausente en una foto de documento nítida). Ver §13.
+   */
+  private async padScore(selfie: Buffer, face: Face): Promise<number | null> {
+    if (!this.padLoaded || this.padModels.length === 0) return null;
+    const meta = await sharp(selfie).metadata();
+    const imgW = meta.width || 0;
+    const imgH = meta.height || 0;
+    if (!imgW || !imgH) return null;
+    const dists: number[][] = [];
+    for (const model of this.padModels) {
+      const d = await this.modelDist(model, selfie, face, imgW, imgH);
+      if (d) dists.push(d);
+    }
+    return ensembleRealProb(dists);
   }
 
   /**

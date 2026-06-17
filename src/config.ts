@@ -40,9 +40,22 @@ export const DETECTOR_MODEL =
 // Modelos ML nuevos de Teko Verify (anti-spoof + anti-anteojos)
 // ---------------------------------------------------------------------------
 
-/** PAD / liveness pasivo: Silent-Face-Anti-Spoofing (MiniFASNet) ONNX. */
+/**
+ * PAD / liveness pasivo — ENSEMBLE Silent-Face-Anti-Spoofing (MiniVision,
+ * Apache-2.0). El repo de referencia ENSAMBLA 2 MiniFASNet sumando sus softmax:
+ *   - PAD_MODEL    = 2.7_80x80   MiniFASNetV2   (crop scale 2.7)
+ *   - PAD_MODEL_2  = 4_0_0_80x80 MiniFASNetV1SE (crop scale 4.0)
+ * Ambos: input 80x80 RGB CRUDO 0..255 (la `to_tensor` de minivision NO divide por
+ * 255 — verificado: un patch constante 200 sale 200.0; la docstring "[0,255]→[0,1]"
+ * es copia engañosa de torchvision). Cada uno emite 3 clases [fake_2d, real,
+ * fake_3d]; se promedian los softmax y se toma "real" (índice 1) del resultado
+ * combinado, como hace el repo (test.py: `prediction += softmax; value/=n`).
+ */
 export const PAD_MODEL =
   process.env.TEKO_PAD_MODEL || "/app/models/pad_minifasnet.onnx";
+/** 2º modelo del ensemble (MiniFASNetV1SE 4_0_0_80x80). Opcional: si falta, se degrada a 1 modelo. */
+export const PAD_MODEL_2 =
+  process.env.TEKO_PAD_MODEL_2 || "/app/models/pad_minifasnet_v1se_4_0.onnx";
 
 /**
  * Atributos de cara (anti-anteojos): Qualcomm face_attrib_net (TFLite->ONNX).

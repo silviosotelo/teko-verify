@@ -16,6 +16,7 @@ services:
       TEKO_DETECTOR_MODEL: "/app/models/scrfd_10g_bnkps.onnx"
       TEKO_RECOGNIZER_MODEL: "/app/models/recognizer.onnx"
       TEKO_PAD_MODEL: "/app/models/pad_minifasnet.onnx"
+      TEKO_PAD_MODEL_2: "/app/models/pad_minifasnet_v1se_4_0.onnx"
       TEKO_GLASSES_MODEL: "/app/models/face_attrib_net.onnx"
       TOKEN_TTL_MIN: "15"
       MATCH_THRESHOLD: "0.40"
