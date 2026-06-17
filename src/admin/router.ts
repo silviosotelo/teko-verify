@@ -25,9 +25,11 @@ import {
   generateApiKey,
   generateLinkToken,
   generateSessionToken,
+  generateWebhookSecret,
   hashPassword,
   verifyPassword,
 } from "../lib/crypto";
+import { webhookDispatcher } from "../webhooks/dispatcher";
 import { adminLoginRateLimiter } from "../lib/rateLimit";
 import { mergePolicy } from "../lib/policy";
 import { resolveTestSessionTtlSec } from "./testSessionTtl";
@@ -61,10 +63,14 @@ import type {
   ReviewQueueResponse,
   SessionState,
   TenantResponse,
+  WebhookEndpoint,
+  WebhookEndpointResponse,
+  WebhookEvent,
   Workflow,
   WorkflowDefinition,
   WorkflowResponse,
 } from "../types";
+import { WEBHOOK_EVENTS } from "../types";
 
 /** Base pública para construir el verifyUrl de la sesión de test con cámara. */
 const PUBLIC_BASE_URL = (
@@ -593,6 +599,221 @@ adminRouter.put("/tenants/:id/workflows/:name", canWrite, async (req: Request, r
   });
   res.json(toWorkflowResponse(created));
 });
+
+// ---- Webhooks (suscripciones + entregas) — P0 #2 ------------------------- //
+
+function toWebhookResponse(e: WebhookEndpoint): WebhookEndpointResponse {
+  return {
+    id: e.id,
+    url: e.url,
+    events: e.events,
+    description: e.description,
+    enabled: e.enabled,
+    createdAt: e.createdAt,
+    updatedAt: e.updatedAt,
+  };
+}
+
+/** Valida que la URL sea http(s) absoluta. Fail-closed. */
+function isValidWebhookUrl(u: unknown): u is string {
+  if (typeof u !== "string" || !u.trim()) return false;
+  try {
+    const parsed = new URL(u);
+    return parsed.protocol === "https:" || parsed.protocol === "http:";
+  } catch {
+    return false;
+  }
+}
+
+/** Normaliza/valida la lista de eventos suscritos (subset del catálogo, o '*'). */
+function normalizeEvents(input: unknown): WebhookEvent[] | null {
+  if (!Array.isArray(input) || input.length === 0) return null;
+  const out: WebhookEvent[] = [];
+  for (const e of input) {
+    if (e === "*") return ["*" as unknown as WebhookEvent]; // comodín: recibe todos
+    if (typeof e !== "string" || !WEBHOOK_EVENTS.includes(e as WebhookEvent)) return null;
+    if (!out.includes(e as WebhookEvent)) out.push(e as WebhookEvent);
+  }
+  return out;
+}
+
+// GET /admin/tenants/:id/webhooks → destinos (SIN secreto).
+adminRouter.get("/tenants/:id/webhooks", async (req: Request, res: Response) => {
+  const tenant = await repos.tenants.getById(req.params.id);
+  if (!tenant) {
+    res.status(404).json({ error: "tenant_not_found" });
+    return;
+  }
+  const endpoints = await repos.webhookEndpoints.listByTenant(tenant.id);
+  res.json({ events: WEBHOOK_EVENTS, endpoints: endpoints.map(toWebhookResponse) });
+});
+
+// POST /admin/tenants/:id/webhooks {url, events, description?} → crea (secreto 1 vez).
+adminRouter.post("/tenants/:id/webhooks", canWrite, async (req: Request, res: Response) => {
+  const tenant = await repos.tenants.getById(req.params.id);
+  if (!tenant) {
+    res.status(404).json({ error: "tenant_not_found" });
+    return;
+  }
+  const url = req.body?.url;
+  const events = normalizeEvents(req.body?.events);
+  if (!isValidWebhookUrl(url)) {
+    res.status(400).json({ error: "invalid_url" });
+    return;
+  }
+  if (!events) {
+    res.status(400).json({ error: "invalid_events", allowed: WEBHOOK_EVENTS });
+    return;
+  }
+  const secret = generateWebhookSecret();
+  const created = await repos.webhookEndpoints.create({
+    tenantId: tenant.id,
+    url,
+    secret,
+    events,
+    description: typeof req.body?.description === "string" ? req.body.description.slice(0, 200) : null,
+  });
+  await repos.auditLog.record({
+    tenantId: tenant.id,
+    actor: `admin:${req.adminOperator?.operatorId ?? "?"}`,
+    event: "webhook.created",
+    detail: { endpointId: created.id, url, events },
+    ip: req.ip ?? null,
+  });
+  // El secreto se devuelve UNA sola vez (igual que las API keys).
+  res.status(201).json({ ...toWebhookResponse(created), secret });
+});
+
+// PUT /admin/tenants/:id/webhooks/:whid {url?, events?, enabled?, description?}
+adminRouter.put("/tenants/:id/webhooks/:whid", canWrite, async (req: Request, res: Response) => {
+  const tenant = await repos.tenants.getById(req.params.id);
+  if (!tenant) {
+    res.status(404).json({ error: "tenant_not_found" });
+    return;
+  }
+  const patch: {
+    url?: string;
+    events?: WebhookEvent[];
+    enabled?: boolean;
+    description?: string | null;
+  } = {};
+  if (req.body?.url !== undefined) {
+    if (!isValidWebhookUrl(req.body.url)) {
+      res.status(400).json({ error: "invalid_url" });
+      return;
+    }
+    patch.url = req.body.url;
+  }
+  if (req.body?.events !== undefined) {
+    const ev = normalizeEvents(req.body.events);
+    if (!ev) {
+      res.status(400).json({ error: "invalid_events", allowed: WEBHOOK_EVENTS });
+      return;
+    }
+    patch.events = ev;
+  }
+  if (typeof req.body?.enabled === "boolean") patch.enabled = req.body.enabled;
+  if (typeof req.body?.description === "string") patch.description = req.body.description.slice(0, 200);
+
+  const updated = await repos.webhookEndpoints.update(tenant.id, req.params.whid, patch);
+  if (!updated) {
+    res.status(404).json({ error: "webhook_not_found" });
+    return;
+  }
+  await repos.auditLog.record({
+    tenantId: tenant.id,
+    actor: `admin:${req.adminOperator?.operatorId ?? "?"}`,
+    event: "webhook.updated",
+    detail: { endpointId: updated.id, patch: { ...patch } },
+    ip: req.ip ?? null,
+  });
+  res.json(toWebhookResponse(updated));
+});
+
+// DELETE /admin/tenants/:id/webhooks/:whid
+adminRouter.delete("/tenants/:id/webhooks/:whid", canWrite, async (req: Request, res: Response) => {
+  const ok = await repos.webhookEndpoints.remove(req.params.id, req.params.whid);
+  if (!ok) {
+    res.status(404).json({ error: "webhook_not_found" });
+    return;
+  }
+  await repos.auditLog.record({
+    tenantId: req.params.id,
+    actor: `admin:${req.adminOperator?.operatorId ?? "?"}`,
+    event: "webhook.deleted",
+    detail: { endpointId: req.params.whid },
+    ip: req.ip ?? null,
+  });
+  res.json({ id: req.params.whid, deleted: true });
+});
+
+// GET /admin/tenants/:id/webhooks/:whid/deliveries → log de entregas.
+adminRouter.get(
+  "/tenants/:id/webhooks/:whid/deliveries",
+  async (req: Request, res: Response) => {
+    const endpoint = await repos.webhookEndpoints.getById(req.params.id, req.params.whid);
+    if (!endpoint) {
+      res.status(404).json({ error: "webhook_not_found" });
+      return;
+    }
+    const limit = req.query.limit ? parseInt(String(req.query.limit), 10) : 100;
+    const deliveries = await repos.webhookDeliveries.listByEndpoint(
+      req.params.id,
+      req.params.whid,
+      { limit }
+    );
+    res.json({ deliveries });
+  }
+);
+
+// POST /admin/tenants/:id/webhooks/:whid/test → envía un evento de prueba (ping).
+adminRouter.post(
+  "/tenants/:id/webhooks/:whid/test",
+  canWrite,
+  async (req: Request, res: Response) => {
+    const endpoint = await repos.webhookEndpoints.getById(req.params.id, req.params.whid);
+    if (!endpoint) {
+      res.status(404).json({ error: "webhook_not_found" });
+      return;
+    }
+    const delivery = await webhookDispatcher().test(req.params.id, req.params.whid);
+    await repos.auditLog.record({
+      tenantId: req.params.id,
+      actor: `admin:${req.adminOperator?.operatorId ?? "?"}`,
+      event: "webhook.test",
+      detail: { endpointId: req.params.whid, status: delivery?.status, code: delivery?.responseCode },
+      ip: req.ip ?? null,
+    });
+    res.json({ delivery });
+  }
+);
+
+// POST /admin/tenants/:id/webhooks/:whid/deliveries/:did/resend → reenvía una entrega.
+adminRouter.post(
+  "/tenants/:id/webhooks/:whid/deliveries/:did/resend",
+  canWrite,
+  async (req: Request, res: Response) => {
+    const endpoint = await repos.webhookEndpoints.getById(req.params.id, req.params.whid);
+    if (!endpoint) {
+      res.status(404).json({ error: "webhook_not_found" });
+      return;
+    }
+    const existing = await repos.webhookDeliveries.getById(req.params.did);
+    if (!existing || existing.tenantId !== req.params.id || existing.endpointId !== req.params.whid) {
+      res.status(404).json({ error: "delivery_not_found" });
+      return;
+    }
+    const delivery = await webhookDispatcher().resend(req.params.did);
+    await repos.auditLog.record({
+      tenantId: req.params.id,
+      actor: `admin:${req.adminOperator?.operatorId ?? "?"}`,
+      event: "webhook.resend",
+      detail: { deliveryId: req.params.did, status: delivery?.status, code: delivery?.responseCode },
+      ip: req.ip ?? null,
+    });
+    res.json({ delivery });
+  }
+);
 
 // ---- Cola de revisión manual (P0 #1) ------------------------------------- //
 

@@ -22,6 +22,11 @@ import type {
     TestVerifyResponse,
     Workflow,
     WorkflowDefinition,
+    WebhookEvent,
+    WebhookEndpoint,
+    WebhookDelivery,
+    WebhookListResponse,
+    CreateWebhookEndpointResponse,
 } from './types'
 
 // baseURL origin-root: NO relativo a /admin-ui/.
@@ -223,6 +228,75 @@ export const tekoApi = {
             'POST',
             `/sessions/${sessionId}/review`,
             reason ? { decision, reason } : { decision },
+        )
+    },
+
+    // ---- Webhooks (suscripciones + entregas) — P0 #2 ----
+    listWebhooks(tenantId: string) {
+        return request<WebhookListResponse>(
+            'GET',
+            `/tenants/${tenantId}/webhooks`,
+        )
+    },
+    createWebhook(
+        tenantId: string,
+        body: { url: string; events: WebhookEvent[]; description?: string },
+    ) {
+        return request<CreateWebhookEndpointResponse>(
+            'POST',
+            `/tenants/${tenantId}/webhooks`,
+            body,
+        )
+    },
+    updateWebhook(
+        tenantId: string,
+        endpointId: string,
+        body: {
+            url?: string
+            events?: WebhookEvent[]
+            enabled?: boolean
+            description?: string
+        },
+    ) {
+        return request<WebhookEndpoint>(
+            'PUT',
+            `/tenants/${tenantId}/webhooks/${endpointId}`,
+            body,
+        )
+    },
+    deleteWebhook(tenantId: string, endpointId: string) {
+        return request<{ id: string; deleted: boolean }>(
+            'DELETE',
+            `/tenants/${tenantId}/webhooks/${endpointId}`,
+        )
+    },
+    listWebhookDeliveries(
+        tenantId: string,
+        endpointId: string,
+        params?: { limit?: number },
+    ) {
+        const q = new URLSearchParams()
+        if (params?.limit != null) q.set('limit', String(params.limit))
+        const qs = q.toString()
+        return request<{ deliveries: WebhookDelivery[] }>(
+            'GET',
+            `/tenants/${tenantId}/webhooks/${endpointId}/deliveries${qs ? `?${qs}` : ''}`,
+        )
+    },
+    testWebhook(tenantId: string, endpointId: string) {
+        return request<{ delivery: WebhookDelivery | null }>(
+            'POST',
+            `/tenants/${tenantId}/webhooks/${endpointId}/test`,
+        )
+    },
+    resendWebhookDelivery(
+        tenantId: string,
+        endpointId: string,
+        deliveryId: string,
+    ) {
+        return request<{ delivery: WebhookDelivery | null }>(
+            'POST',
+            `/tenants/${tenantId}/webhooks/${endpointId}/deliveries/${deliveryId}/resend`,
         )
     },
 

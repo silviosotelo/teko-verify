@@ -14,6 +14,7 @@ import type { Request, Response } from "express";
 import { repos } from "../db/repos";
 import { authenticateTenant } from "./auth";
 import { generateLinkToken } from "../lib/crypto";
+import { webhookDispatcher } from "../webhooks/dispatcher";
 import { evidenceStore } from "../lib/evidenceStore";
 import { isMailerConfigured, isValidEmail, sendVerificationEmail } from "../lib/mailer";
 import type {
@@ -133,6 +134,12 @@ tenantRouter.post("/sessions", async (req: Request, res: Response) => {
       },
       ip: req.ip ?? null,
     });
+
+    // Webhook session.created (fail-open): notifica a los destinos suscritos del
+    // tenant que se creó la verificación. Nunca rompe la creación.
+    await webhookDispatcher()
+      .emitSessionEvent(session, "session.created", null)
+      .catch(() => undefined);
 
     const url = verificationUrl(linkToken);
 

@@ -1014,6 +1014,103 @@ export interface WebhookDelivery {
   createdAt: string;
 }
 
+// ---- 4.E) Subsistema de webhooks (suscripciones + entrega) — P0 #2 -------- //
+
+/**
+ * Eventos públicos del ciclo de vida de una sesión a los que un tenant puede
+ * suscribir un destino. (Internamente el pipeline sigue usando WebhookEventType
+ * verified/rejected; el dispatcher los traduce a esta taxonomía pública.)
+ */
+export type WebhookEvent =
+  | "session.created"
+  | "session.status_updated"
+  | "session.approved"
+  | "session.declined"
+  | "session.in_review"
+  | "session.data_updated";
+
+/** Catálogo de eventos suscribibles (orden de presentación en el admin). */
+export const WEBHOOK_EVENTS: WebhookEvent[] = [
+  "session.created",
+  "session.status_updated",
+  "session.approved",
+  "session.declined",
+  "session.in_review",
+  "session.data_updated",
+];
+
+/** Destino de webhook (suscripción) de un tenant. */
+export interface WebhookEndpoint {
+  id: string;
+  tenantId: string;
+  url: string;
+  /** Secreto HMAC del destino. NUNCA se devuelve en listados (solo al crear). */
+  secret: string;
+  events: WebhookEvent[];
+  description: string | null;
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Vista del destino para el admin (SIN el secreto). */
+export interface WebhookEndpointResponse {
+  id: string;
+  url: string;
+  events: WebhookEvent[];
+  description: string | null;
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Respuesta de creación: incluye el secreto UNA sola vez. */
+export interface CreateWebhookEndpointResponse extends WebhookEndpointResponse {
+  secret: string;
+}
+
+export type WebhookDeliveryStatus = "pending" | "delivered" | "failed" | "dead";
+
+/** Registro persistido de un intento de entrega (cola/reintentos). */
+export interface WebhookDeliveryRecord {
+  id: string;
+  endpointId: string | null;
+  tenantId: string;
+  sessionId: string | null;
+  eventId: string;
+  eventType: WebhookEvent;
+  url: string;
+  payload: WebhookEventPayload;
+  status: WebhookDeliveryStatus;
+  attempts: number;
+  maxAttempts: number;
+  responseCode: number | null;
+  responseBody: string | null;
+  error: string | null;
+  lastAttemptAt: string | null;
+  nextAttemptAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * Cuerpo (canónico) del POST de webhook del subsistema P0 #2. `id` = event_id
+ * (idempotencia, también en X-Event-Id). `data` espeja el estado de la sesión.
+ */
+export interface WebhookEventPayload {
+  id: string;
+  event: WebhookEvent;
+  createdAt: string; // ISO 8601 de creación del evento
+  data: {
+    sessionId: string;
+    tenantId: string;
+    externalRef: string | null;
+    state: SessionState;
+    assuranceRequired: LoA;
+    result: SessionResult | null;
+  };
+}
+
 // ============================================================================ //
 // 5. RE-EXPORTS DE CONVENIENCIA
 // ============================================================================ //

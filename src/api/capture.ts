@@ -22,6 +22,7 @@ import { evidenceStore } from "../lib/evidenceStore";
 import { decodeBase64Image, assertFrameCount } from "../lib/images";
 import { processSession, computeChecks, finalizeFromChecks } from "../pipeline";
 import { realPipelineDeps } from "../pipelineDeps";
+import { webhookDispatcher } from "../webhooks/dispatcher";
 import { decision as decideVerdict } from "../modules/decision";
 // Guardas PURAS de la máquina de estados (single source of truth, testeables sin
 // levantar la capa de datos). Ver captureGuards.ts para el racional de cada una.
@@ -42,11 +43,32 @@ import type {
   PreviewExtracted,
   PreviewResponse,
   QualityResult,
+  SessionResult,
   SessionState,
   SubmitResponse,
   UploadResponse,
   VerificationSession,
 } from "../types";
+
+/**
+ * Emite session.in_review (fail-open) cuando el pipeline rutea a la cola de revisión
+ * humana. El pipeline NO dispara webhook en in_review (no es terminal); lo hacemos
+ * aquí, en la capa API, para no acoplar el seam de webhook del pipeline. verified/
+ * rejected los emite el propio pipeline vía su WebhookSender.
+ */
+async function emitInReviewIfNeeded(
+  session: VerificationSession,
+  out: { state: string; result: SessionResult | null }
+): Promise<void> {
+  if (out.state !== "in_review") return;
+  await webhookDispatcher()
+    .emitSessionEvent(
+      { ...session, state: "in_review", result: out.result },
+      "session.in_review",
+      out.result
+    )
+    .catch(() => undefined);
+}
 
 /** Base pública para construir las URLs token-auth de las fotos de revisión. */
 const EVIDENCE_BASE_URL = (
@@ -520,6 +542,8 @@ captureRouter.post("/:token/submit", async (req: Request, res: Response) => {
       realPipelineDeps
     );
 
+    await emitInReviewIfNeeded(session, out);
+
     const resp: SubmitResponse = { ok: out.state !== "error", state: out.state };
     res.json(resp);
   } catch (e) {
@@ -648,6 +672,7 @@ captureRouter.post("/:token/confirm", async (req: Request, res: Response) => {
       return;
     }
     const out = await finalizeFromChecks(session, tenant.policies, selfie, realPipelineDeps);
+    await emitInReviewIfNeeded(session, out);
     const resp: ConfirmResponse = {
       state: out.state,
       result: out.result,

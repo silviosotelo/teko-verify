@@ -239,6 +239,59 @@ export interface TestSessionResponse {
     emailSent?: boolean
 }
 
+// ---- Webhooks (suscripciones + entregas) — P0 #2 ----
+export type WebhookEvent =
+    | 'session.created'
+    | 'session.status_updated'
+    | 'session.approved'
+    | 'session.declined'
+    | 'session.in_review'
+    | 'session.data_updated'
+
+export interface WebhookEndpoint {
+    id: string
+    url: string
+    events: WebhookEvent[]
+    description: string | null
+    enabled: boolean
+    createdAt: string
+    updatedAt: string
+}
+
+// La creación devuelve además el secreto (UNA sola vez).
+export interface CreateWebhookEndpointResponse extends WebhookEndpoint {
+    secret: string
+}
+
+export type WebhookDeliveryStatus = 'pending' | 'delivered' | 'failed' | 'dead'
+
+export interface WebhookDelivery {
+    id: string
+    endpointId: string | null
+    tenantId: string
+    sessionId: string | null
+    eventId: string
+    eventType: WebhookEvent
+    url: string
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    payload: any
+    status: WebhookDeliveryStatus
+    attempts: number
+    maxAttempts: number
+    responseCode: number | null
+    responseBody: string | null
+    error: string | null
+    lastAttemptAt: string | null
+    nextAttemptAt: string | null
+    createdAt: string
+    updatedAt: string
+}
+
+export interface WebhookListResponse {
+    events: WebhookEvent[]
+    endpoints: WebhookEndpoint[]
+}
+
 // ---- Playground OCR (Inspector OCR) ----
 export type OcrDebugVariant =
     | 'production'

@@ -70,6 +70,13 @@ const tekoRoute: Routes = [
         meta: { pageContainerType: 'contained' },
     },
     {
+        key: 'teko.webhooks',
+        path: '/webhooks',
+        component: lazy(() => import('@/views/teko/Webhooks')),
+        authority: [],
+        meta: { pageContainerType: 'contained' },
+    },
+    {
         key: 'teko.audit',
         path: '/audit',
         component: lazy(() => import('@/views/teko/Audit')),

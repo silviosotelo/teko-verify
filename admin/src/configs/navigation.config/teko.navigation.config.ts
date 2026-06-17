@@ -95,6 +95,16 @@ const tekoNavigationConfig: NavigationTree[] = [
                 subMenu: [],
             },
             {
+                key: 'teko.webhooks',
+                path: '/webhooks',
+                title: 'Webhooks',
+                translateKey: '',
+                icon: 'tekoApiKeys',
+                type: NAV_ITEM_TYPE_ITEM,
+                authority: [],
+                subMenu: [],
+            },
+            {
                 key: 'teko.audit',
                 path: '/audit',
                 title: 'Auditoría',

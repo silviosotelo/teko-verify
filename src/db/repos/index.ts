@@ -15,6 +15,8 @@ export * as evidence from "./evidence";
 export * as auditLog from "./auditLog";
 export * as consents from "./consents";
 export * as workflows from "./workflows";
+export * as webhookEndpoints from "./webhookEndpoints";
+export * as webhookDeliveries from "./webhookDeliveries";
 
 import * as tenants from "./tenants";
 import * as apiKeys from "./apiKeys";
@@ -25,6 +27,8 @@ import * as evidence from "./evidence";
 import * as auditLog from "./auditLog";
 import * as consents from "./consents";
 import * as workflows from "./workflows";
+import * as webhookEndpoints from "./webhookEndpoints";
+import * as webhookDeliveries from "./webhookDeliveries";
 
 /** Agrupador único para inyección/uso conveniente. */
 export const repos = {
@@ -37,4 +41,6 @@ export const repos = {
   auditLog,
   consents,
   workflows,
+  webhookEndpoints,
+  webhookDeliveries,
 } as const;

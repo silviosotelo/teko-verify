@@ -27,6 +27,7 @@ import { livenessModule } from "./modules/liveness";
 import { tenantRouter } from "./api/tenant";
 import { captureRouter } from "./api/capture";
 import { adminRouter, bootstrapAdminOperator } from "./admin/router";
+import { webhookDispatcher } from "./webhooks/dispatcher";
 import {
   tenantRateLimiter,
   captureRateLimiter,
@@ -198,6 +199,15 @@ async function main(): Promise<void> {
     // eslint-disable-next-line no-console
     console.error("[admin] bootstrap operador falló:", (e as Error).message);
   });
+
+  // 3.6) Recupera entregas de webhook vencidas (el worker in-proc pierde sus timers
+  //      al reiniciar). Fail-open: nunca tumba el arranque.
+  webhookDispatcher()
+    .recoverDue()
+    .then((n) => {
+      if (n > 0) console.log(`[webhook] recuperadas ${n} entregas pendientes`);
+    })
+    .catch(() => undefined);
 
   app.listen(cfg.PORT, "0.0.0.0", () => {
     // eslint-disable-next-line no-console
