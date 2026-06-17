@@ -130,6 +130,31 @@ export const AML_MATCH_THRESHOLD = parseFloat(
 );
 
 /**
+ * MARGEN extra de similitud (0..1) exigido a un hit NO corroborado para marcar
+ * `potential_match` (P1 #1 — anti-falso-positivo de nombre común).
+ *
+ * Un hit "corroborado" (matchea también dob o nacionalidad real, no sólo nombre)
+ * basta con que supere `AML_MATCH_THRESHOLD`. Un hit que matchea SÓLO por nombre
+ * debe superar `AML_MATCH_THRESHOLD + AML_NAME_ONLY_MARGIN`: así un nombre común
+ * paraguayo cuyo único parecido es un token compartido ("ANDRES") cae a `clear`,
+ * mientras una entidad OFAC con nombre casi-idéntico (p.ej. "Vladimir Putin",
+ * score ≈ 1.0) sigue gatillando aunque no haya dob/nacionalidad. El margen escala
+ * con el umbral configurado (si el operador BAJA el threshold para ser laxo, el
+ * gate name-only baja en paralelo). Calibrable por env. Default 0.07.
+ *
+ * CALIBRACIÓN (2026-06-17, sesión field-test 986a770c): el titular real
+ * "SILVIO ANDRES SOTELO MACHUCA" daba potential_match 0.8529 por (a) un boost de
+ * nacionalidad ESPURIO ("PARAGUAYA" contiene el substring "UA" → matcheaba el
+ * código ISO de Ucrania de "PMC Andreevsky Krest") y (b) coincidencias parciales
+ * name-only ~0.85 ancladas en el token común "ANDRES". Con el boost de
+ * nacionalidad arreglado (comparación por código ISO, no substring) y margen 0.07,
+ * todos los hits caen <0.92 sin corroboración → `clear`.
+ */
+export const AML_NAME_ONLY_MARGIN = parseFloat(
+  process.env.AML_NAME_ONLY_MARGIN || "0.07"
+);
+
+/**
  * Umbral coseno (0..1) para que la búsqueda 1:N (face_search, P1 #2) considere a
  * una identidad de la galería como la MISMA cara (dedup/anti-fraude + returning
  * user). Es DISTINTO y más alto que el 1:1 (MATCH_THRESHOLD=0.40): el 1:1 compara

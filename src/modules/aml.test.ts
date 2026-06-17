@@ -13,6 +13,8 @@ import {
   jaroWinkler,
   nameSimilarity,
   fullNameNorm,
+  nationalityToCodes,
+  nationalityMatches,
   screenEntities,
   screen,
   type AmlProvider,
@@ -171,6 +173,79 @@ describe("screenEntities — hit vs clear", () => {
     for (let i = 1; i < r.hits.length; i++) {
       expect(r.hits[i - 1].score).toBeGreaterThanOrEqual(r.hits[i].score);
     }
+  });
+});
+
+describe("nationalityMatches — corroboración por código ISO (no substring)", () => {
+  it("'PARAGUAYA' NO matchea ['ru','ua'] (bug: 'PARAGUAYA' contiene 'UA')", () => {
+    expect(nationalityMatches("PARAGUAYA", ["ru", "ua"])).toBe(false);
+  });
+  it("'PARAGUAYA' matchea ['py']", () => {
+    expect(nationalityMatches("PARAGUAYA", ["py"])).toBe(true);
+  });
+  it("código ISO literal 'RU' matchea ['ru']", () => {
+    expect(nationalityMatches("RU", ["ru"])).toBe(true);
+  });
+  it("demónimo → código", () => {
+    expect(nationalityToCodes("PARAGUAYO")).toContain("py");
+    expect(nationalityToCodes("RUSA")).toContain("ru");
+  });
+  it("nacionalidad vacía → no corrobora", () => {
+    expect(nationalityMatches("", ["py"])).toBe(false);
+  });
+});
+
+describe("anti-falso-positivo de nombre común (tuning 986a770c)", () => {
+  // Reproduce la sesión real: el titular paraguayo daba potential_match 0.8529 por
+  // (a) boost de nacionalidad espurio y (b) coincidencias parciales name-only ~0.85.
+  const PMC = ent({
+    entityId: "NK-h2aV4Qyf26ZsX33pRzHRDc",
+    name: "PMC Andreevsky Krest",
+    aliases: ["empresa militar privada Cruz de San Andrés", "PMC St. Andrew's Cross"],
+    lists: ["EU FINANCIAL SANCTIONS"],
+    countries: ["ru", "ua"],
+  });
+  const ANDRES_MORALES = ent({
+    entityId: "NK-kndTZWgyHSqgpx4tWUsQwS",
+    name: "ANDRES MORALES",
+    countries: ["us"],
+  });
+  const titular: AmlInput = {
+    nombres: "SILVIO ANDRES",
+    apellidos: "SOTELO MACHUCA",
+    fechaNac: "1997-11-13",
+    nacionalidad: "PARAGUAYA",
+  };
+
+  it("nombre común paraguayo → clear (antes: potential_match 0.8529)", () => {
+    const r = screenEntities(titular, [PMC, ANDRES_MORALES], { threshold: 0.85 });
+    expect(r.decision).toBe("clear");
+    // ya NO hay boost espurio de nacionalidad sobre PMC (ru/ua).
+    const pmcHit = r.hits.find((h) => h.entityId === PMC.entityId);
+    expect(pmcHit?.matchedFields).not.toContain("nationality");
+  });
+
+  it("OFAC casi-exacto (Putin) → potential_match aun SIN dob/nacionalidad (name-only)", () => {
+    const r = screenEntities({ nombres: "Vladimir", apellidos: "Putin" }, [PUTIN], {
+      threshold: 0.85,
+    });
+    expect(r.decision).toBe("potential_match");
+  });
+
+  it("hit corroborado por nacionalidad gatilla con threshold base", () => {
+    // Entidad PY con nombre parcial: el boost de nacionalidad real lo lleva a flag.
+    const veNoise = ent({
+      entityId: "VE1",
+      name: "Andres Eloy Mendez Gonzalez",
+      countries: ["py"],
+    });
+    const r = screenEntities(
+      { nombres: "Andres Eloy", apellidos: "Mendez Gonzalez", nacionalidad: "PARAGUAYA" },
+      [veNoise],
+      { threshold: 0.85 }
+    );
+    expect(r.hits[0].matchedFields).toContain("nationality");
+    expect(r.decision).toBe("potential_match");
   });
 });
 

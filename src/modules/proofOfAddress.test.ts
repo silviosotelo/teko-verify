@@ -74,6 +74,47 @@ describe("extractProofOfAddress — parseo de campos", () => {
   });
 });
 
+/**
+ * Extracto Banco Continental real (sesión field-test 986a770c). El titular figura en
+ * formato "APELLIDO, NOMBRE" arriba y abajo; "INTERNACIONAL CASI BILBAO" es la línea de
+ * domicilio de la sucursal. Antes del fix, la coma en "MACHUCA," rompía el parseo del
+ * nombre y se elegía "INTERNACIONAL CASI BILBAO" como titular (nameSim 0.60 → fail).
+ */
+const CONTINENTAL_STMT = [
+  "SOTELO MACHUCA, SILVIO ANDRES",
+  "020-11-057425/6",
+  "continental",
+  "INTERNACIONAL CASI BILBAO",
+  "CIUDAD",
+  "CENTRAL/ASUNCION",
+  "Actual 22/05/26 05/06/26",
+  "SILVIO A. SOTELO M.",
+  "Cuenta Bancaria 0103179724 SOTELO MACHUCA, SILVIO ANDRES",
+  "Página 1 FINAL",
+];
+
+describe("extractProofOfAddress — formato bancario 'APELLIDO, NOMBRE' (986a770c)", () => {
+  it("extrae el titular pese a la coma (no la línea de domicilio de la sucursal)", () => {
+    const ex = extractProofOfAddress(CONTINENTAL_STMT, { now: NOW });
+    const c = ex.holderName.toUpperCase();
+    expect(c).toContain("SOTELO");
+    expect(c).toContain("MACHUCA");
+    expect(c).toContain("SILVIO");
+    expect(c).not.toContain("INTERNACIONAL"); // ya no se confunde con el domicilio
+  });
+
+  it("name-match contra la identidad verificada → pasa (antes: 0.60 fail)", () => {
+    const ex = extractProofOfAddress(CONTINENTAL_STMT, { now: NOW });
+    const ev = evaluateProofOfAddress(ex, {
+      identityName: "SILVIO ANDRES SOTELO MACHUCA",
+      now: NOW,
+    });
+    expect(ev.nameMatch).toBe(true);
+    expect(ev.nameSimilarity).toBeGreaterThan(0.9);
+    expect(ev.passed).toBe(true);
+  });
+});
+
 describe("evaluateProofOfAddress — validaciones", () => {
   it("name-match contra SOTELO pasa con typo/orden y reciente + domicilio → passed", () => {
     const ex = extractProofOfAddress(ANDE_BILL, { now: NOW });

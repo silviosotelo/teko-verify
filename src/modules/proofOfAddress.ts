@@ -170,7 +170,7 @@ function detectIssuer(text: string): string {
 const ADDRESS_KEYWORDS = [
   "CALLE", "AVENIDA", "AVDA", "AV ", "RUTA", "BARRIO", "BO ", "BÂ°", "MANZANA",
   "MZA", "LOTE", "CASA", "EDIFICIO", "PISO", "DEPTO", "DEPARTAMENTO", "ESQUINA",
-  "ESQ", "C/", "ENTRE", "KM ", "ZONA", "CIUDAD", "LOCALIDAD", "DISTRITO",
+  "ESQ", "CASI", "C/", "ENTRE", "KM ", "ZONA", "CIUDAD", "LOCALIDAD", "DISTRITO",
   "ASUNCION", "LUQUE", "CAPIATA", "LAMBARE", "FERNANDO", "ENCARNACION",
   "CIUDAD DEL ESTE", "SAN LORENZO", "MARIANO", "Ã‘EMBY", "NEMBY", "AREGUA",
   "VILLA ELISA", "ITAUGUA", "DOMICILIO", "DIRECCION",
@@ -218,18 +218,28 @@ function looksLikeAddressLine(line: string): boolean {
 /** Etiquetas que suelen PRECEDER al nombre del titular en un comprobante. */
 const NAME_LABELS = ["TITULAR", "CLIENTE", "NOMBRE", "SR ", "SRA ", "SEÑOR", "USUARIO", "A NOMBRE DE"];
 
+/** Quita puntuación de borde de un token ("MACHUCA," → "MACHUCA", "(SR)" → "SR"). */
+function stripTokenPunct(tok: string): string {
+  return tok.replace(/^[^A-ZÁÉÍÓÚÑ]+|[^A-ZÁÉÍÓÚÑ]+$/g, "");
+}
+
 /** ¿`token` es una palabra de nombre plausible (alfabética, ≥2 chars)? */
 function isNameToken(tok: string): boolean {
   return /^[A-ZÁÉÍÓÚÑ]{2,}$/.test(tok);
 }
 
-/** ¿La línea (canon) parece un NOMBRE de persona (2-6 tokens alfabéticos, sin dígitos)? */
+/**
+ * ¿La línea (canon) parece un NOMBRE de persona (2-6 tokens alfabéticos, sin dígitos)?
+ * Tolera el formato bancario "APELLIDO, NOMBRE" (la coma separa tokens y se ignora
+ * como puntuación de borde): sin esto, "SOTELO MACHUCA, SILVIO ANDRES" caía porque
+ * el token "MACHUCA," no era alfabético puro y la línea se descartaba (bug 986a770c).
+ */
 function looksLikeHolderName(line: string): boolean {
   const c = canon(line);
   if (HAS_NUMBER.test(c)) return false;
   if (ADDRESS_STOPWORDS.some((s) => c.includes(canon(s.trim())))) return false;
   if (ADDRESS_KEYWORDS.some((k) => c.includes(canon(k.trim())))) return false;
-  const tokens = c.split(" ").filter(Boolean);
+  const tokens = c.split(/[\s,]+/).map(stripTokenPunct).filter(Boolean);
   if (tokens.length < 2 || tokens.length > 6) return false;
   return tokens.every(isNameToken);
 }

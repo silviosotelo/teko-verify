@@ -19,7 +19,7 @@
  * corre, se trata como potential_match).
  */
 import type { AmlDecision, AmlEntity, AmlHit, AmlInput, AmlResult } from "../types";
-import { AML_MATCH_THRESHOLD } from "../config";
+import { AML_MATCH_THRESHOLD, AML_NAME_ONLY_MARGIN } from "../config";
 
 // ---------------------------------------------------------------------------
 // Normalización
@@ -181,12 +181,83 @@ function dobMatch(query?: string, entity?: string | null): "exact" | "year" | nu
 }
 
 // ---------------------------------------------------------------------------
+// Nacionalidad → código ISO (corroboración robusta, NO substring)
+// ---------------------------------------------------------------------------
+
+/**
+ * Mapa demónimo/nombre-de-país (ES/EN, normalizado) → ISO alpha-2. Best-effort,
+ * sesgado a PY + países de sanciones frecuentes. NO es exhaustivo: si un valor no
+ * se reconoce y no es ya un código de 2 letras, simplemente no corrobora (seguro:
+ * preferimos NO sumar señal antes que sumar una falsa).
+ */
+const NATIONALITY_TO_ISO2: Record<string, string> = {
+  PARAGUAY: "py", PARAGUAYA: "py", PARAGUAYO: "py", PARAGUAYOS: "py", PRY: "py", PAR: "py",
+  ARGENTINA: "ar", ARGENTINO: "ar", ARGENTINOS: "ar", ARG: "ar",
+  BRASIL: "br", BRAZIL: "br", BRASILENO: "br", BRASILENA: "br", BRA: "br",
+  BOLIVIA: "bo", BOLIVIANO: "bo", BOLIVIANA: "bo", BOL: "bo",
+  CHILE: "cl", CHILENO: "cl", CHILENA: "cl", CHL: "cl",
+  URUGUAY: "uy", URUGUAYO: "uy", URUGUAYA: "uy", URY: "uy",
+  PERU: "pe", PERUANO: "pe", PERUANA: "pe", PER: "pe",
+  COLOMBIA: "co", COLOMBIANO: "co", COLOMBIANA: "co", COL: "co",
+  VENEZUELA: "ve", VENEZOLANO: "ve", VENEZOLANA: "ve", VEN: "ve",
+  ECUADOR: "ec", ECUATORIANO: "ec", ECUATORIANA: "ec", ECU: "ec",
+  MEXICO: "mx", MEXICANO: "mx", MEXICANA: "mx", MEX: "mx",
+  ESTADOS: "us", USA: "us", AMERICANO: "us", ESTADOUNIDENSE: "us", USA2: "us",
+  RUSIA: "ru", RUSO: "ru", RUSA: "ru", RUS: "ru", RUSSIA: "ru",
+  UCRANIA: "ua", UCRANIANO: "ua", UCRANIANA: "ua", UKRAINE: "ua", UKR: "ua",
+  ESPANA: "es", ESPANOL: "es", ESPANOLA: "es", SPAIN: "es", ESP: "es",
+  CHINA: "cn", CHINO: "cn", CHINA2: "cn", CHN: "cn",
+  IRAN: "ir", IRANI: "ir", IRN: "ir",
+  COREA: "kp", "COREA DEL NORTE": "kp", PRK: "kp",
+};
+
+/**
+ * Convierte una nacionalidad/país de la consulta a un set de códigos ISO alpha-2.
+ * Reconoce demónimos del mapa, códigos ISO-2 literales ("RU") e ISO-3 mapeados.
+ * Tokeniza para tolerar "REPUBLICA DE CHINA"/"ESTADOS UNIDOS".
+ */
+export function nationalityToCodes(value: string | null | undefined): Set<string> {
+  const c = normalizeName(value);
+  const out = new Set<string>();
+  if (!c) return out;
+  if (NATIONALITY_TO_ISO2[c]) out.add(NATIONALITY_TO_ISO2[c]);
+  for (const tok of tokenize(c)) {
+    if (NATIONALITY_TO_ISO2[tok]) out.add(NATIONALITY_TO_ISO2[tok]);
+    else if (tok.length === 2) out.add(tok.toLowerCase()); // ya es un código ISO-2
+  }
+  return out;
+}
+
+/**
+ * ¿La nacionalidad de la consulta corrobora ALGÚN país de la entidad? Comparación
+ * por CÓDIGO ISO (no substring). Corrige el FP histórico donde "PARAGUAYA" contenía
+ * el substring "UA" y falso-matcheaba el código de Ucrania ("ua").
+ */
+export function nationalityMatches(qNat: string | null | undefined, countries: string[] | undefined): boolean {
+  const codes = nationalityToCodes(qNat);
+  if (codes.size === 0) return false;
+  for (const raw of countries ?? []) {
+    const cc = normalizeName(raw);
+    if (!cc) continue;
+    if (cc.length === 2 && codes.has(cc.toLowerCase())) return true; // entidad con código ISO-2
+    for (const e of nationalityToCodes(cc)) if (codes.has(e)) return true; // entidad con nombre de país
+  }
+  return false;
+}
+
+// ---------------------------------------------------------------------------
 // Screening (puro)
 // ---------------------------------------------------------------------------
 
 export interface ScreenOptions {
   /** Umbral de potential_match (default AML_MATCH_THRESHOLD). */
   threshold?: number;
+  /**
+   * Margen extra exigido a hits SÓLO-nombre (sin corroboración dob/nacionalidad)
+   * para gatillar potential_match (default AML_NAME_ONLY_MARGIN). Anti-FP de
+   * nombre común: un hit name-only debe superar `threshold + nameOnlyMargin`.
+   */
+  nameOnlyMargin?: number;
   /** Máximo de hits a devolver (default 10). */
   maxHits?: number;
   /** Nombre del proveedor (para auditoría). */
@@ -212,11 +283,16 @@ export function screenEntities(
   opts: ScreenOptions = {}
 ): AmlResult {
   const threshold = opts.threshold ?? AML_MATCH_THRESHOLD;
+  const nameOnlyMargin = opts.nameOnlyMargin ?? AML_NAME_ONLY_MARGIN;
+  // Gate para hits SIN corroboración (sólo nombre): debe superar threshold+margen.
+  // Acotado a 1 y nunca por debajo del propio threshold corroborado.
+  const nameOnlyThreshold = Math.min(1, threshold + Math.max(0, nameOnlyMargin));
   const maxHits = opts.maxHits ?? 10;
   const qNorm = fullNameNorm(input);
-  const qNat = normalizeName(input.nacionalidad);
 
   const hits: AmlHit[] = [];
+  // Marca interna por hit: ¿corrobora dob/nacionalidad? (para el gate de decisión).
+  const corroborated: boolean[] = [];
 
   if (qNorm) {
     for (const e of entities) {
@@ -234,24 +310,28 @@ export function screenEntities(
 
       const matchedFields: string[] = [via];
       let score = best;
+      let hasCorroboration = false;
 
       // Boost por fecha de nacimiento.
       const dob = dobMatch(input.fechaNac, e.birthDate);
       if (dob === "exact") {
         score = Math.min(1, score + 0.08);
         matchedFields.push("dob");
+        hasCorroboration = true;
       } else if (dob === "year") {
         score = Math.min(1, score + 0.04);
         matchedFields.push("dob");
+        hasCorroboration = true;
       } else if (input.fechaNac && e.birthDate && yearOf(input.fechaNac) && yearOf(e.birthDate)) {
         // Año presente en ambos pero distinto → leve penalización (desambigua homónimos).
         score = Math.max(0, score - 0.05);
       }
 
-      // Boost por nacionalidad/país.
-      if (qNat && (e.countries ?? []).some((c) => normalizeName(c).includes(qNat) || qNat.includes(normalizeName(c)))) {
+      // Boost por nacionalidad/país (comparación por código ISO, NO substring).
+      if (nationalityMatches(input.nacionalidad, e.countries)) {
         score = Math.min(1, score + 0.03);
         matchedFields.push("nationality");
+        hasCorroboration = true;
       }
 
       // Sólo retenemos candidatos con señal de nombre razonable (evita ruido).
@@ -265,14 +345,28 @@ export function screenEntities(
           topics: e.topics,
           countries: e.countries,
         });
+        corroborated.push(hasCorroboration);
       }
     }
   }
 
-  hits.sort((a, b) => b.score - a.score);
-  const top = hits.slice(0, maxHits);
-  const topScore = top.length > 0 ? top[0].score : 0;
-  const decision: AmlDecision = topScore >= threshold ? "potential_match" : "clear";
+  // Orden por score desc manteniendo el flag de corroboración alineado al hit.
+  const order = hits
+    .map((h, i) => ({ h, c: corroborated[i] }))
+    .sort((a, b) => b.h.score - a.h.score);
+  const top = order.slice(0, maxHits);
+  const topScore = top.length > 0 ? top[0].h.score : 0;
+
+  // Decisión: potential_match si ALGÚN hit califica.
+  //   - corroborado (dob/nacionalidad) → basta score >= threshold.
+  //   - sólo-nombre → exige score >= threshold + margen (anti FP de nombre común).
+  // Así un OFAC casi-exacto (Putin ≈ 1.0) gatilla aunque no haya dob/nacionalidad,
+  // pero un parecido parcial ~0.85 anclado en un token común cae a `clear`.
+  const matched = order.some(({ h, c }) =>
+    c ? h.score >= threshold : h.score >= nameOnlyThreshold
+  );
+  const decision: AmlDecision = matched ? "potential_match" : "clear";
+  const hitsOut = top.map(({ h }) => h);
 
   return {
     query: {
@@ -282,7 +376,7 @@ export function screenEntities(
       nacionalidad: input.nacionalidad,
       normalized: qNorm,
     },
-    hits: top,
+    hits: hitsOut,
     topScore,
     decision,
     threshold,
