@@ -45,7 +45,7 @@ import { computeChecks, applyReviewDecision } from "../pipeline";
 import { realPipelineDeps } from "../pipelineDeps";
 import { decision as decideVerdict } from "../modules/decision";
 import { assuranceFromDefinition } from "../lib/workflow";
-import { can } from "../lib/rbac";
+import { can, permissionsFor, isAssignableRole, ASSIGNABLE_ROLES } from "../lib/rbac";
 import type { Permission } from "../types";
 import sharp from "sharp";
 import {
@@ -121,6 +121,61 @@ async function insertOperator(
     "INSERT INTO admin_operators (username, password_hash, role) VALUES ($1, $2, $3) ON CONFLICT (username) DO NOTHING",
     [username, passwordHash, role]
   );
+}
+
+interface OperatorListRow {
+  id: string;
+  username: string;
+  role: AdminRole;
+  created_at: Date;
+}
+
+/** Lista los operadores del panel (sin secretos). */
+async function listOperators(): Promise<OperatorListRow[]> {
+  const res = await pool.query<OperatorListRow>(
+    "SELECT id, username, role, created_at FROM admin_operators ORDER BY created_at ASC"
+  );
+  return res.rows;
+}
+
+async function getOperatorById(id: string): Promise<OperatorListRow | null> {
+  const res = await pool.query<OperatorListRow>(
+    "SELECT id, username, role, created_at FROM admin_operators WHERE id = $1",
+    [id]
+  );
+  return res.rows[0] ?? null;
+}
+
+/** Crea un operador con password (scrypt). Devuelve la fila o null si el user ya existe. */
+async function createOperator(
+  username: string,
+  passwordHash: string,
+  role: AdminRole
+): Promise<OperatorListRow | null> {
+  const res = await pool.query<OperatorListRow>(
+    `INSERT INTO admin_operators (username, password_hash, role) VALUES ($1, $2, $3)
+     ON CONFLICT (username) DO NOTHING
+     RETURNING id, username, role, created_at`,
+    [username, passwordHash, role]
+  );
+  return res.rows[0] ?? null;
+}
+
+async function updateOperatorRole(id: string, role: AdminRole): Promise<OperatorListRow | null> {
+  const res = await pool.query<OperatorListRow>(
+    `UPDATE admin_operators SET role = $2 WHERE id = $1
+     RETURNING id, username, role, created_at`,
+    [id, role]
+  );
+  return res.rows[0] ?? null;
+}
+
+/** Cuenta los owners (para impedir quedarse sin owner = lockout). */
+async function countOwners(): Promise<number> {
+  const res = await pool.query<{ n: string }>(
+    "SELECT count(*)::text AS n FROM admin_operators WHERE role = 'owner'"
+  );
+  return parseInt(res.rows[0]?.n ?? "0", 10);
 }
 
 /**
@@ -407,6 +462,99 @@ adminRouter.post(
     res.json({ logoUrl, branding: updated?.branding ?? {} });
   }
 );
+
+// ---- Operador actual + permisos (RBAC) ----------------------------------- //
+// GET /admin/me → identidad del operador logueado + sus permisos efectivos. La UI
+// lo usa para mostrar/ocultar acciones (el enforcement REAL es server-side por
+// endpoint; esto es sólo UX). Cualquier operador autenticado puede leer lo suyo.
+adminRouter.get("/me", (req: Request, res: Response) => {
+  const op = req.adminOperator;
+  res.json({
+    operator: op ? { id: op.operatorId, email: op.username, role: op.role } : null,
+    permissions: permissionsFor(op?.role),
+    assignableRoles: ASSIGNABLE_ROLES,
+  });
+});
+
+// ---- Team / miembros (operadores del panel) — RBAC ------------------------ //
+// Gestión de operadores y su rol. Permiso: manage_members (owner). Fail-closed.
+// Guardas anti-lockout: no se puede dejar la instancia sin ningún owner.
+
+adminRouter.get("/operators", requirePermission("manage_members"), async (_req: Request, res: Response) => {
+  const ops = await listOperators();
+  res.json({
+    operators: ops.map((o) => ({
+      id: o.id,
+      email: o.username,
+      role: o.role,
+      createdAt: o.created_at.toISOString(),
+    })),
+    assignableRoles: ASSIGNABLE_ROLES,
+  });
+});
+
+// POST /admin/operators {email, password, role} → alta de operador.
+adminRouter.post("/operators", requirePermission("manage_members"), async (req: Request, res: Response) => {
+  const email = typeof req.body?.email === "string" ? req.body.email.trim() : "";
+  const password = typeof req.body?.password === "string" ? req.body.password : "";
+  const role = req.body?.role;
+  if (!email || !password) {
+    res.status(400).json({ error: "email_and_password_required" });
+    return;
+  }
+  if (password.length < 10) {
+    res.status(400).json({ error: "weak_password", detail: "mínimo 10 caracteres" });
+    return;
+  }
+  if (!isAssignableRole(role)) {
+    res.status(400).json({ error: "invalid_role", allowed: ASSIGNABLE_ROLES });
+    return;
+  }
+  const created = await createOperator(email, hashPassword(password), role);
+  if (!created) {
+    res.status(409).json({ error: "operator_exists" });
+    return;
+  }
+  // audit_log es tenant-scopeado (tenant_id NOT NULL); los operadores son
+  // platform-level, así que se traza por consola (sin migración de esquema).
+  // eslint-disable-next-line no-console
+  console.log(`[admin] operator.created ${created.username} (${role}) by ${req.adminOperator?.username ?? "?"}`);
+  res.status(201).json({
+    id: created.id,
+    email: created.username,
+    role: created.role,
+    createdAt: created.created_at.toISOString(),
+  });
+});
+
+// PATCH /admin/operators/:id {role} → cambia el rol. Anti-lockout: no degradar al
+// último owner.
+adminRouter.patch("/operators/:id", requirePermission("manage_members"), async (req: Request, res: Response) => {
+  const role = req.body?.role;
+  if (!isAssignableRole(role)) {
+    res.status(400).json({ error: "invalid_role", allowed: ASSIGNABLE_ROLES });
+    return;
+  }
+  const target = await getOperatorById(req.params.id);
+  if (!target) {
+    res.status(404).json({ error: "operator_not_found" });
+    return;
+  }
+  // Anti-lockout: si el target es el ÚLTIMO owner y se lo degrada → 409.
+  if (target.role === "owner" && role !== "owner" && (await countOwners()) <= 1) {
+    res.status(409).json({ error: "last_owner", detail: "Debe quedar al menos un owner." });
+    return;
+  }
+  const updated = await updateOperatorRole(target.id, role);
+  // eslint-disable-next-line no-console
+  console.log(`[admin] operator.role_updated ${target.username} ${target.role}→${role} by ${req.adminOperator?.username ?? "?"}`);
+  res.json({
+    id: updated!.id,
+    email: updated!.username,
+    role: updated!.role,
+    createdAt: updated!.created_at.toISOString(),
+  });
+});
 
 // ---- Apps (CRUD por org) — Pieza 2 App-scoping --------------------------- //
 // Una app es un proyecto bajo la org (tenant). La app Default es el fallback y NO
@@ -739,7 +887,64 @@ adminRouter.get("/tenants/:id/metrics", async (req: Request, res: Response) => {
   });
 });
 
-adminRouter.get("/tenants/:id/audit", async (req: Request, res: Response) => {
+// GET /admin/tenants/:id/usage?from=&to=  → uso por app (Pieza 3). Verificaciones
+// agrupadas por app y estado en el período; deriva de verification_sessions.
+// Permiso: view_usage (todos los roles lo tienen; fail-closed igualmente).
+adminRouter.get(
+  "/tenants/:id/usage",
+  requirePermission("view_usage"),
+  async (req: Request, res: Response) => {
+    const tenant = await repos.tenants.getById(req.params.id);
+    if (!tenant) {
+      res.status(404).json({ error: "tenant_not_found" });
+      return;
+    }
+    const from = req.query.from ? String(req.query.from) : undefined;
+    const to = req.query.to ? String(req.query.to) : undefined;
+    const [rows, apps] = await Promise.all([
+      repos.sessions.usageByApp(tenant.id, { from, to }),
+      repos.apps.listByTenant(tenant.id),
+    ]);
+    const nameById = new Map(apps.map((a) => [a.id, a.name]));
+    // Agrega por app: total + byState + verified/rejected.
+    const byApp = new Map<
+      string,
+      { appId: string | null; appName: string; total: number; verified: number; rejected: number; byState: Record<string, number> }
+    >();
+    let grandTotal = 0;
+    let grandVerified = 0;
+    for (const r of rows) {
+      const key = r.appId ?? "_none";
+      if (!byApp.has(key)) {
+        byApp.set(key, {
+          appId: r.appId,
+          appName: r.appId ? nameById.get(r.appId) ?? r.appId : "(sin app)",
+          total: 0,
+          verified: 0,
+          rejected: 0,
+          byState: {},
+        });
+      }
+      const agg = byApp.get(key)!;
+      agg.total += r.count;
+      agg.byState[r.state] = (agg.byState[r.state] ?? 0) + r.count;
+      if (r.state === "verified") agg.verified += r.count;
+      if (r.state === "rejected") agg.rejected += r.count;
+      grandTotal += r.count;
+      if (r.state === "verified") grandVerified += r.count;
+    }
+    res.json({
+      tenantId: tenant.id,
+      from: from ?? null,
+      to: to ?? null,
+      total: grandTotal,
+      verified: grandVerified,
+      apps: Array.from(byApp.values()).sort((a, b) => b.total - a.total),
+    });
+  }
+);
+
+adminRouter.get("/tenants/:id/audit", requirePermission("view_usage"), async (req: Request, res: Response) => {
   const entries = await repos.auditLog.listByTenant(req.params.id, {
     from: req.query.from ? String(req.query.from) : undefined,
     to: req.query.to ? String(req.query.to) : undefined,

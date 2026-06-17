@@ -188,6 +188,48 @@ export async function getById(
   return res.rows[0] ? mapSession(res.rows[0]) : null;
 }
 
+/** Fila de uso agregado: conteo de sesiones por (app, estado) en un período. */
+export interface UsageRow {
+  appId: string | null;
+  state: SessionState;
+  count: number;
+}
+
+/**
+ * Uso por org (Pieza 3): conteo de verificaciones agrupado por (app_id, state) en
+ * el rango [from, to] (ISO, opcional) sobre created_at. Derivado de
+ * verification_sessions (sin tabla de contadores). Scopeado por tenant.
+ */
+export async function usageByApp(
+  tenantId: string,
+  opts: { from?: string; to?: string } = {},
+  exec: Executor = pool
+): Promise<UsageRow[]> {
+  const conds: string[] = ["tenant_id = $1"];
+  const params: unknown[] = [tenantId];
+  let p = 2;
+  if (opts.from !== undefined) {
+    conds.push(`created_at >= $${p++}`);
+    params.push(opts.from);
+  }
+  if (opts.to !== undefined) {
+    conds.push(`created_at <= $${p++}`);
+    params.push(opts.to);
+  }
+  const res = await exec.query<{ app_id: string | null; state: SessionState; n: string }>(
+    `SELECT app_id, state, COUNT(*)::text AS n
+       FROM verification_sessions
+      WHERE ${conds.join(" AND ")}
+      GROUP BY app_id, state`,
+    params
+  );
+  return res.rows.map((r) => ({
+    appId: r.app_id ?? null,
+    state: r.state,
+    count: parseInt(r.n, 10),
+  }));
+}
+
 /**
  * Lookup por link_token. NO tenant-scopeado a propósito: el token es la auth del
  * flujo de captura del titular.
