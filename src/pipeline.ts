@@ -81,6 +81,12 @@ export interface CapturedImages {
   docFront: Buffer;
   docBack: Buffer;
   frames?: Buffer[];
+  /**
+   * Resultado del LIVENESS ACTIVO interactivo reportado por el navegador (desafíos
+   * guiados). Se reenvía al módulo liveness, que lo combina con el PAD pasivo
+   * (fail-closed). El video completo se persiste aparte como evidencia `liveness_video`.
+   */
+  activeLiveness?: { challenges: string[]; passed: boolean };
 }
 
 /** Módulos del pipeline, inyectables (las firmas calzan con los módulos reales). */
@@ -89,7 +95,12 @@ export interface PipelineModules {
   liveness(
     selfie: Buffer,
     engine: Engine,
-    opts?: { frames?: Buffer[]; challenge?: LivenessChallenge; threshold?: number }
+    opts?: {
+      frames?: Buffer[];
+      challenge?: LivenessChallenge;
+      threshold?: number;
+      activeLiveness?: { challenges: string[]; passed: boolean };
+    }
   ): Promise<LivenessResult>;
   document(front: Buffer, back: Buffer): Promise<DocumentResult>;
   /** Embedding 512D de una imagen, o null si no hay cara. (engine.embedBestFace) */
@@ -375,6 +386,7 @@ export async function processSession(
         frames: images.frames,
         challenge,
         threshold: policy.thresholds?.livenessScore,
+        activeLiveness: images.activeLiveness,
       });
       if (!liveness.passed) {
         return await rejectAt(deps, session, images, "liveness", ["liveness_failed", `attack=${liveness.attackType}`], { quality, liveness });
@@ -685,6 +697,7 @@ export async function computeChecks(
         frames: images.frames,
         challenge,
         threshold: policy.thresholds?.livenessScore,
+        activeLiveness: images.activeLiveness,
       });
     }
 

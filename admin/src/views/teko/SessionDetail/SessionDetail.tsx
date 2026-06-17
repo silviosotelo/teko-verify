@@ -277,6 +277,72 @@ function EvidenceThumb({
     )
 }
 
+/**
+ * Reproductor del VIDEO de liveness activo. Carga el binario con Authorization:
+ * Bearer (igual que las imágenes; un <video src> no manda el header) → Blob URL →
+ * <video controls>. Es la evidencia de que el titular ejecutó los desafíos en vivo.
+ */
+function LivenessVideoCard({
+    tenantId,
+    sessionId,
+}: {
+    tenantId: string
+    sessionId: string
+}) {
+    const [url, setUrl] = useState<string | null>(null)
+    const [error, setError] = useState(false)
+    const [loading, setLoading] = useState(true)
+
+    useEffect(() => {
+        let revoked: string | null = null
+        let alive = true
+        setLoading(true)
+        setError(false)
+        tekoApi
+            .evidenceBlob(tenantId, sessionId, 'liveness_video')
+            .then((blob) => {
+                if (!alive) return
+                const u = URL.createObjectURL(blob)
+                revoked = u
+                setUrl(u)
+            })
+            .catch(() => alive && setError(true))
+            .finally(() => alive && setLoading(false))
+        return () => {
+            alive = false
+            if (revoked) URL.revokeObjectURL(revoked)
+        }
+    }, [tenantId, sessionId])
+
+    return (
+        <Card className="mb-4">
+            <h6 className="mb-3 text-sm font-semibold heading-text">
+                Video de liveness activo
+            </h6>
+            <div className="flex min-h-[10rem] items-center justify-center overflow-hidden rounded-lg bg-gray-900/90">
+                {loading ? (
+                    <Spinner />
+                ) : error || !url ? (
+                    <span className="py-8 text-xs text-gray-400">
+                        No disponible
+                    </span>
+                ) : (
+                    <video
+                        src={url}
+                        controls
+                        playsInline
+                        className="max-h-[60vh] w-full object-contain"
+                    />
+                )}
+            </div>
+            <p className="mt-2 text-xs text-gray-400">
+                Grabación de los desafíos guiados (girar la cabeza · parpadear ·
+                sonreír). Señal anti-spoof fuerte que respalda el liveness activo.
+            </p>
+        </Card>
+    )
+}
+
 // ----------------------------------------------------------------------------
 // Fila de módulos con checks (Overview · ID Verification · …)
 // ----------------------------------------------------------------------------
@@ -489,9 +555,18 @@ const SessionDetailView = () => {
         data.externalRef ||
         'Sin identidad extraída'
 
+    const hasLivenessVideo = data.evidence.some(
+        (e) => e.type === 'liveness_video',
+    )
     const evidenceTypes = data.evidence
         .map((e) => e.type)
-        .filter((t) => t !== 'frames') as EvidenceType[]
+        .filter((t) => t !== 'frames' && t !== 'liveness_video') as EvidenceType[]
+
+    // Liveness activo (desafíos guiados) reportado por el cliente — vive en el
+    // detail del check liveness. Lo mostramos como chips junto al módulo Liveness.
+    const livenessActive = checkByType('liveness')?.detail?.activeLiveness as
+        | { challenges?: string[]; passed?: boolean }
+        | undefined
 
     const set = <K extends keyof FormState>(k: K, v: FormState[K]) =>
         setForm((p) => (p ? { ...p, [k]: v } : p))
@@ -621,6 +696,42 @@ const SessionDetailView = () => {
                     </div>
                 )}
             </Card>
+
+            {/* ---------- Video de liveness activo ---------- */}
+            {hasLivenessVideo && (
+                <LivenessVideoCard
+                    tenantId={data.tenantId}
+                    sessionId={data.sessionId}
+                />
+            )}
+
+            {/* ---------- Liveness activo (desafíos guiados) ---------- */}
+            {livenessActive &&
+                Array.isArray(livenessActive.challenges) &&
+                livenessActive.challenges.length > 0 && (
+                    <Card className="mb-4">
+                        <div className="flex items-center justify-between">
+                            <h6 className="text-sm font-semibold heading-text">
+                                Liveness activo · desafíos
+                            </h6>
+                            <PassPill passed={livenessActive.passed === true} />
+                        </div>
+                        <div className="mt-3 flex flex-wrap gap-2">
+                            {livenessActive.challenges.map((c, i) => (
+                                <span
+                                    key={`${c}-${i}`}
+                                    className="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2.5 py-1 text-xs font-medium text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300"
+                                >
+                                    <TbCheck
+                                        className="text-[11px]"
+                                        strokeWidth={3}
+                                    />
+                                    {c}
+                                </span>
+                            ))}
+                        </div>
+                    </Card>
+                )}
 
             {/* ---------- Datos personales (colapsable, 2 columnas, editable) --- */}
             <Card className="mb-4" bodyClass="p-0">

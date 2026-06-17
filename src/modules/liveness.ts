@@ -246,6 +246,13 @@ export class LivenessModule {
       frames?: Buffer[];
       challenge?: LivenessChallenge;
       threshold?: number;
+      /**
+       * Liveness ACTIVO interactivo reportado por el cliente (desafíos guiados
+       * detectados por blendshapes + matriz de transformación de MediaPipe). Señal
+       * anti-spoof FUERTE: un print/replay estático no completa la secuencia. Se
+       * COMBINA con el PAD (AND); fail-closed si está presente y no se completó.
+       */
+      activeLiveness?: { challenges: string[]; passed: boolean };
     } = {}
   ): Promise<LivenessResult> {
     const threshold = opts.threshold ?? LIVENESS_THRESHOLD;
@@ -298,6 +305,26 @@ export class LivenessModule {
       // Si el desafío exigido no se acreditó, la liveness NO pasa (rechazo duro).
       if (!result.challengePassed) {
         result.passed = false;
+      }
+    }
+
+    // LIVENESS ACTIVO interactivo (desafíos guiados ejecutados en el navegador). Es
+    // la señal anti-spoof FUERTE que cierra el print-attack que el PAD pasivo no
+    // cubre (un MiniFASNet clasifica "real" un escaneo nítido de cédula). Se COMBINA
+    // con el PAD por AND y es FAIL-CLOSED: presente-pero-no-completado fuerza el
+    // rechazo, aunque el PAD haya pasado. Ausente ⇒ no debilita (cae al PAD + el
+    // challenge por frames de arriba). El cliente reporta el resultado; el video
+    // `liveness_video` es la evidencia auditable que lo respalda.
+    if (opts.activeLiveness) {
+      result.activeLiveness = {
+        challenges: Array.isArray(opts.activeLiveness.challenges)
+          ? opts.activeLiveness.challenges
+          : [],
+        passed: opts.activeLiveness.passed === true,
+      };
+      if (!result.activeLiveness.passed) {
+        result.passed = false;
+        if (result.attackType === "none") result.attackType = "unknown";
       }
     }
 

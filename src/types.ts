@@ -68,7 +68,15 @@ export type EvidenceType =
   | "doc_back"
   | "frames"
   | "doc_front_raw"
-  | "doc_back_raw";
+  | "doc_back_raw"
+  /**
+   * Video completo de la sesión de LIVENESS ACTIVO (webm/mp4 grabado con
+   * MediaRecorder en el navegador). Es la evidencia de que la persona ejecutó los
+   * desafíos guiados (girar la cabeza, parpadear, sonreír) frente a la cámara. NO
+   * pasa por sharp (no es imagen): se guarda crudo vía evidenceStore.saveVideo y se
+   * sirve con su content-type real. Cierra el print-attack que el PAD pasivo no cubre.
+   */
+  | "liveness_video";
 
 /** Estado de un tenant. */
 export type TenantStatus = "active" | "suspended" | "disabled";
@@ -148,6 +156,23 @@ export interface LivenessResult {
   /** Desafío activo solicitado (si la policy lo exige) y si se cumplió. */
   challenge?: LivenessChallenge;
   challengePassed?: boolean;
+  /**
+   * LIVENESS ACTIVO interactivo ejecutado en el navegador (desafíos guiados:
+   * girar cabeza / parpadear / sonreír, detectados por blendshapes + matriz de
+   * transformación de MediaPipe FaceLandmarker). Es la señal anti-spoof FUERTE:
+   * un print/replay estático NO puede completar la secuencia. El video grabado
+   * (`liveness_video`) es la evidencia auditable. Se COMBINA con el PAD pasivo:
+   * la liveness sólo pasa si el PAD pasa Y, cuando este bloque está presente, los
+   * desafíos se completaron (`passed=true`). Fail-closed: presente-pero-no-completado
+   * fuerza liveness.passed=false. Ausente ⇒ se cae al gating PAD (+ challenge por
+   * frames) actual sin debilitarlo.
+   */
+  activeLiveness?: {
+    /** Desafíos efectivamente solicitados al titular (orden de presentación). */
+    challenges: string[];
+    /** ¿El cliente reportó la secuencia COMPLETA como superada? */
+    passed: boolean;
+  };
 }
 
 /** MRZ TD1 (ICAO 9303) — fuente legible-por-máquina autoritativa (dorso) — §3.13/§7. */
@@ -617,10 +642,21 @@ export interface ConsentResponse {
 
 /** POST /verify/:token/selfie — selfie + frames cortos para liveness. */
 export interface SelfieUploadRequest {
-  /** Selfie principal (base64 JPEG/PNG o data URL). */
+  /** Selfie principal (base64 JPEG/PNG o data URL). En el flujo de liveness activo
+   *  es el MEJOR frame seleccionado durante los momentos "de frente y centrado". */
   image: string;
   /** Frames cortos opcionales para PAD/desafío activo. */
   frames?: string[];
+  /**
+   * Resultado del LIVENESS ACTIVO interactivo ejecutado en el navegador (desafíos
+   * guiados). El servidor lo persiste y lo combina con el PAD pasivo en el pipeline
+   * (ver LivenessResult.activeLiveness). El video completo se sube aparte vía
+   * POST /verify/:token/liveness-video (evidencia auditable).
+   */
+  activeLiveness?: {
+    challenges: string[];
+    passed: boolean;
+  };
 }
 
 /** POST /verify/:token/document — cédula frente + dorso. */

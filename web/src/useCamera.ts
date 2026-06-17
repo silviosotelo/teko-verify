@@ -95,6 +95,11 @@ export function useCamera(facing: Facing) {
     return c.toDataURL("image/jpeg", quality)
   }, [])
 
+  // Devuelve el MediaStream activo (para MediaRecorder en el flujo de liveness).
+  // Null si la cámara no está abierta. NO transfiere ownership: stop() sigue siendo
+  // quien corta los tracks.
+  const getStream = useCallback((): MediaStream | null => streamRef.current, [])
+
   // Abrir la cámara al montar / cambiar de facing; cerrar en cleanup.
   useEffect(() => {
     void start()
@@ -102,5 +107,5 @@ export function useCamera(facing: Facing) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [facing])
 
-  return { videoRef, grab, start, stop, error, ready }
+  return { videoRef, grab, getStream, start, stop, error, ready }
 }

@@ -153,6 +153,29 @@ export async function apiPost<T = unknown>(
 }
 
 /**
+ * POST multipart /verify/:token/liveness-video — sube el video de la sesión de
+ * liveness activo (campo `video`). Es evidencia ADITIVA: fail-open en el caller
+ * (un fallo de subida del video NO debe bloquear el avance del flujo; la selfie y
+ * el resultado del liveness activo ya viajaron por /selfie). Devuelve true si el
+ * backend la aceptó (200).
+ */
+export async function apiUploadVideo(blob: Blob): Promise<boolean> {
+  try {
+    const form = new FormData()
+    // Nombre con extensión coherente con el tipo del blob (webm por defecto).
+    const ext = blob.type.includes("mp4") ? "mp4" : "webm"
+    form.append("video", blob, `liveness.${ext}`)
+    const r = await fetch(`/verify/${TOKEN}/liveness-video`, {
+      method: "POST",
+      body: form,
+    })
+    return r.ok
+  } catch {
+    return false
+  }
+}
+
+/**
  * GET /verify/:token/status — polling/rehidratación de estado.
  * Status-aware: si el backend responde !ok (404 token inválido, 410 expirado/
  * consumido), lanza ApiError para que el caller (App.tsx al montar) muestre la

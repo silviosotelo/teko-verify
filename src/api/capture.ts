@@ -16,6 +16,7 @@
  */
 import { Router } from "express";
 import type { Request, Response } from "express";
+import multer from "multer";
 import { repos } from "../db/repos";
 import { evidenceStore } from "../lib/evidenceStore";
 import { decodeBase64Image, assertFrameCount } from "../lib/images";
@@ -64,6 +65,71 @@ const DOC_SHARPNESS_MIN = parseFloat(process.env.TEKO_DOC_SHARPNESS_MIN || "12")
 
 /** Cliente OCR reusado para el pre-check del dorso (MRZ legible). */
 const docCheckOcr = new PaddleOcrClient();
+
+/**
+ * Límite del video de liveness activo (default 30 MiB). El video va por un endpoint
+ * MULTIPART dedicado (NO por el JSON de 25mb): es binario y puede ser más grande que
+ * una imagen base64. Configurable por env.
+ */
+const LIVENESS_VIDEO_MAX_BYTES = parseInt(
+  process.env.TEKO_LIVENESS_VIDEO_MAX_BYTES || String(30 * 1024 * 1024),
+  10
+);
+
+/** Upload multipart en memoria para el video de liveness (un solo archivo, con cap). */
+const livenessVideoUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: LIVENESS_VIDEO_MAX_BYTES, files: 1 },
+});
+
+/** Content-types de video aceptados → extensión normalizada. Fail-closed (whitelist). */
+const VIDEO_CT_TO_EXT: Record<string, string> = {
+  "video/webm": "webm",
+  "video/mp4": "mp4",
+  "video/x-matroska": "webm",
+  "video/quicktime": "mp4",
+};
+
+/**
+ * Detecta el tipo real del video por MAGIC BYTES (no se confía en el mimetype del
+ * cliente). webm/mkv = EBML (1A 45 DF A3); mp4/mov = "ftyp" en bytes 4..8. Devuelve
+ * la extensión + content-type canónico, o null si no es un contenedor reconocido.
+ */
+function sniffVideo(buf: Buffer): { ext: string; contentType: string } | null {
+  if (buf.length >= 4 && buf[0] === 0x1a && buf[1] === 0x45 && buf[2] === 0xdf && buf[3] === 0xa3) {
+    return { ext: "webm", contentType: "video/webm" };
+  }
+  if (
+    buf.length >= 12 &&
+    buf[4] === 0x66 && buf[5] === 0x74 && buf[6] === 0x79 && buf[7] === 0x70
+  ) {
+    return { ext: "mp4", contentType: "video/mp4" };
+  }
+  return null;
+}
+
+/** Forma validada del bloque de liveness activo reportado por el cliente. */
+interface ActiveLiveness {
+  challenges: string[];
+  passed: boolean;
+}
+
+/**
+ * Parsea/sanea el bloque `activeLiveness` del body de /selfie. Fail-closed: cualquier
+ * forma inválida ⇒ null (no se persiste, no se acredita liveness activo). Limita la
+ * cantidad/longitud de challenges para no almacenar payloads arbitrarios.
+ */
+function parseActiveLiveness(raw: unknown): ActiveLiveness | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as { challenges?: unknown; passed?: unknown };
+  const challenges = Array.isArray(r.challenges)
+    ? r.challenges
+        .filter((c): c is string => typeof c === "string")
+        .slice(0, 8)
+        .map((c) => c.slice(0, 40))
+    : [];
+  return { challenges, passed: r.passed === true };
+}
 
 export const captureRouter = Router();
 
@@ -217,6 +283,16 @@ captureRouter.post("/:token/selfie", async (req: Request, res: Response) => {
       await evidenceStore.save(session.tenantId, session.id, "frames", decodeBase64Image(repFrame));
     }
 
+    // Liveness ACTIVO interactivo reportado por el navegador (desafíos guiados): se
+    // persiste como sidecar JSON para que el pipeline (en /submit y /preview) lo
+    // combine con el PAD pasivo. Fail-closed: forma inválida ⇒ no se persiste (la
+    // liveness queda sólo con el PAD pasivo + el video como evidencia). El video
+    // completo se sube aparte vía POST /liveness-video.
+    const activeLiveness = parseActiveLiveness(req.body?.activeLiveness);
+    if (activeLiveness) {
+      await evidenceStore.saveJson(session.tenantId, session.id, "liveness_active", activeLiveness);
+    }
+
     // Pre-check INFORMATIVO de calidad sobre la selfie (§6.a): corre el mismo módulo
     // `quality` que usará el pipeline para avisar AL MOMENTO de la captura (anteojos,
     // luz, nitidez, pose). NO cambia el estado ni bloquea del lado servidor: la
@@ -237,6 +313,67 @@ captureRouter.post("/:token/selfie", async (req: Request, res: Response) => {
     res.status(400).json({ error: "selfie_upload_failed", detail: (e as Error).message });
   }
 });
+
+// POST /verify/:token/liveness-video  → sube el VIDEO de la sesión de liveness activo
+// Endpoint MULTIPART dedicado (campo `video`): el video es binario y puede superar el
+// JSON de 25mb, por eso usa multer con su propio cap (LIVENESS_VIDEO_MAX_BYTES). Se
+// valida el tipo real por magic bytes (webm/mp4), se persiste crudo vía
+// evidenceStore.saveVideo y se crea la fila `evidence` (tipo 'liveness_video') para
+// que el admin lo vea/reproduzca. NO consume el token ni cambia el estado: es
+// evidencia aditiva. Fail-closed: tipo/forma inválida → 400.
+captureRouter.post(
+  "/:token/liveness-video",
+  livenessVideoUpload.single("video"),
+  async (req: Request, res: Response) => {
+    const session = await loadSession(req, res);
+    if (!session) return;
+    if (!requireCapturable(session, res)) return;
+    try {
+      const file = (req as Request & { file?: { buffer: Buffer } }).file;
+      if (!file || !file.buffer || file.buffer.length < 100) {
+        res.status(400).json({ error: "liveness_video_missing" });
+        return;
+      }
+      const kind = sniffVideo(file.buffer);
+      if (!kind) {
+        res.status(400).json({ error: "liveness_video_invalid_type" });
+        return;
+      }
+      const saved = await evidenceStore.saveVideo(
+        session.tenantId,
+        session.id,
+        file.buffer,
+        kind.ext,
+        kind.contentType
+      );
+      // Fila de evidencia (idempotente a nivel de UX: re-subir crea otra fila, pero el
+      // disco sobreescribe; el admin lista por tipo y sirve el último archivo). Si ya
+      // existe una fila 'liveness_video' para la sesión, NO duplicamos.
+      const existing = await repos.evidence.listBySession(session.tenantId, session.id);
+      if (!existing.some((e) => e.type === "liveness_video")) {
+        await repos.evidence.create({
+          tenantId: session.tenantId,
+          sessionId: session.id,
+          type: "liveness_video",
+          storagePath: saved.storagePath,
+          sha256: saved.sha256,
+        });
+      }
+      await repos.auditLog.record({
+        tenantId: session.tenantId,
+        sessionId: session.id,
+        actor: "subject",
+        event: "liveness.video_uploaded",
+        detail: { bytes: file.buffer.length, contentType: kind.contentType },
+        ip: req.ip ?? null,
+      });
+      const resp: UploadResponse = { ok: true, state: session.state };
+      res.json(resp);
+    } catch (e) {
+      res.status(400).json({ error: "liveness_video_failed", detail: (e as Error).message });
+    }
+  }
+);
 
 // POST /verify/:token/document
 captureRouter.post("/:token/document", async (req: Request, res: Response) => {
@@ -364,6 +501,9 @@ captureRouter.post("/:token/submit", async (req: Request, res: Response) => {
     // guardado, frames=undefined y liveness queda fail-closed cuando hay desafío.
     const frame = await evidenceStore.read(session.tenantId, session.id, "frames");
     const frames: Buffer[] | undefined = frame ? [selfie, frame] : undefined;
+    const activeLiveness =
+      (await evidenceStore.readJson<ActiveLiveness>(session.tenantId, session.id, "liveness_active")) ??
+      undefined;
 
     await repos.sessions.update(session.tenantId, session.id, { state: "processing" });
 
@@ -371,7 +511,7 @@ captureRouter.post("/:token/submit", async (req: Request, res: Response) => {
     const out = await processSession(
       { ...session, state: "processing" },
       tenant.policies,
-      { selfie, docFront, docBack, frames },
+      { selfie, docFront, docBack, frames, activeLiveness },
       realPipelineDeps
     );
 
@@ -417,13 +557,16 @@ captureRouter.post("/:token/preview", async (req: Request, res: Response) => {
     }
     const frame = await evidenceStore.read(session.tenantId, session.id, "frames");
     const frames: Buffer[] | undefined = frame ? [selfie, frame] : undefined;
+    const activeLiveness =
+      (await evidenceStore.readJson<ActiveLiveness>(session.tenantId, session.id, "liveness_active")) ??
+      undefined;
 
     await repos.sessions.update(session.tenantId, session.id, { state: "processing" });
 
     const out = await computeChecks(
       { ...session, state: "processing" },
       tenant.policies,
-      { selfie, docFront, docBack, frames },
+      { selfie, docFront, docBack, frames, activeLiveness },
       realPipelineDeps
     );
 

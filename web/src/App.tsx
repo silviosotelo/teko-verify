@@ -10,7 +10,7 @@ import { Prepare } from "./screens/Prepare"
 import { Selfie } from "./screens/Selfie"
 import { Processing } from "./screens/Processing"
 import { Result } from "./screens/Result"
-import { warmupFaceDetector } from "./useFaceDetector"
+import { warmupFaceLandmarker } from "./useFaceLandmarker"
 
 /**
  * Wizard de captura Teko Verify — flujo estilo Didit (marca Teko), DOCUMENTO
@@ -171,11 +171,11 @@ export function App() {
     }
   }, [])
 
-  // Precarga del FaceDetector de la selfie EN PARALELO mientras el usuario está en
-  // "Preparate para la cámara" (o ya capturando el documento), para que la selfie
-  // arranque sin la espera fría del wasm/modelo. Idempotente (singleton de sesión).
+  // Precarga del FaceLandmarker del liveness activo EN PARALELO mientras el usuario
+  // está en "Preparate para la cámara" (o ya capturando el documento), para que la
+  // selfie arranque sin la espera fría del wasm/modelo. Idempotente (singleton de sesión).
   useEffect(() => {
-    if (step === "prep-selfie" || step === "doc") warmupFaceDetector()
+    if (step === "prep-selfie" || step === "doc") warmupFaceLandmarker()
   }, [step])
 
   if (step === "error") {

@@ -410,6 +410,7 @@ const EVIDENCE_TYPES: EvidenceType[] = [
   "frames",
   "doc_front_raw",
   "doc_back_raw",
+  "liveness_video",
 ];
 
 adminRouter.get(
@@ -426,6 +427,19 @@ adminRouter.get(
     const session = await repos.sessions.getById(tenantId, sessionId);
     if (!session) {
       res.status(404).json({ error: "session_not_found" });
+      return;
+    }
+    // El video de liveness activo NO es una imagen .jpg: se lee crudo + su content-type
+    // real (webm/mp4) desde el sidecar. El resto se sirve como JPEG (como hasta ahora).
+    if (type === "liveness_video") {
+      const video = await evidenceStore.readVideo(tenantId, sessionId);
+      if (!video) {
+        res.status(404).json({ error: "evidence_not_found" });
+        return;
+      }
+      res.setHeader("Content-Type", video.contentType);
+      res.setHeader("Cache-Control", "private, max-age=60");
+      res.send(video.buf);
       return;
     }
     const buf = await evidenceStore.read(tenantId, sessionId, type);

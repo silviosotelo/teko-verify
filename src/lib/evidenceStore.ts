@@ -88,6 +88,92 @@ export class DiskEvidenceStore {
     }
   }
 
+  /**
+   * Guarda el VIDEO de la sesión de liveness activo CRUDO (NO pasa por sharp: no es
+   * imagen). El navegador lo graba con MediaRecorder (webm/mp4). Se escribe tal cual
+   * bajo `liveness_video.<ext>` y se persiste su content-type en un sidecar para
+   * servirlo correctamente al admin. Idempotente (sobreescribe). Devuelve ruta + sha256.
+   */
+  async saveVideo(
+    tenantId: string,
+    sessionId: string,
+    video: Buffer,
+    ext: string,
+    contentType: string
+  ): Promise<{ storagePath: string; sha256: string }> {
+    const dir = dirFor(tenantId, sessionId);
+    await fsp.mkdir(dir, { recursive: true });
+    // Sanea la extensión (whitelist): sólo letras/dígitos, default "webm".
+    const safeExt = /^[a-z0-9]{2,5}$/i.test(ext) ? ext.toLowerCase() : "webm";
+    const sha256 = createHash("sha256").update(video).digest("hex");
+    const file = path.join(dir, `liveness_video.${safeExt}`);
+    await fsp.writeFile(file, video);
+    // Sidecar con el nombre real del archivo + content-type (para el admin).
+    await fsp.writeFile(
+      path.join(dir, "liveness_video.meta.json"),
+      JSON.stringify({ file: `liveness_video.${safeExt}`, contentType, sha256 })
+    );
+    return { storagePath: file, sha256 };
+  }
+
+  /**
+   * Relee el video de liveness activo + su content-type. Null si no existe. Usa el
+   * sidecar .meta.json para resolver el nombre/ext real y el content-type; si falta,
+   * cae a `liveness_video.webm` con `video/webm`.
+   */
+  async readVideo(
+    tenantId: string,
+    sessionId: string
+  ): Promise<{ buf: Buffer; contentType: string } | null> {
+    const dir = dirFor(tenantId, sessionId);
+    let fileName = "liveness_video.webm";
+    let contentType = "video/webm";
+    try {
+      const meta = JSON.parse(
+        await fsp.readFile(path.join(dir, "liveness_video.meta.json"), "utf8")
+      ) as { file?: string; contentType?: string };
+      if (typeof meta.file === "string" && /^liveness_video\.[a-z0-9]{2,5}$/i.test(meta.file)) {
+        fileName = meta.file;
+      }
+      if (typeof meta.contentType === "string") contentType = meta.contentType;
+    } catch {
+      /* sin sidecar: defaults webm */
+    }
+    try {
+      const buf = await fsp.readFile(path.join(dir, fileName));
+      return { buf, contentType };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Guarda un sidecar JSON pequeño (p.ej. el resultado del liveness activo reportado
+   * por el cliente entre /selfie y /submit). Key separada por `name`. Idempotente.
+   */
+  async saveJson(
+    tenantId: string,
+    sessionId: string,
+    name: string,
+    obj: unknown
+  ): Promise<void> {
+    const dir = dirFor(tenantId, sessionId);
+    await fsp.mkdir(dir, { recursive: true });
+    const safe = name.replace(/[^\w-]/g, "");
+    await fsp.writeFile(path.join(dir, `${safe}.json`), JSON.stringify(obj));
+  }
+
+  /** Relee un sidecar JSON. Null si no existe o no parsea. */
+  async readJson<T>(tenantId: string, sessionId: string, name: string): Promise<T | null> {
+    const safe = name.replace(/[^\w-]/g, "");
+    try {
+      const txt = await fsp.readFile(path.join(dirFor(tenantId, sessionId), `${safe}.json`), "utf8");
+      return JSON.parse(txt) as T;
+    } catch {
+      return null;
+    }
+  }
+
   /** Borra toda la evidencia de una sesión (retención/supresión §12). */
   async purge(tenantId: string, sessionId: string): Promise<void> {
     await fsp.rm(dirFor(tenantId, sessionId), { recursive: true, force: true });

@@ -18,7 +18,14 @@ export type LoA = 'L0' | 'L1' | 'L2' | 'L3' | 'L4'
 export type TenantStatus = 'active' | 'suspended' | 'disabled'
 export type ApiKeyStatus = 'active' | 'revoked'
 export type CheckType = 'quality' | 'liveness' | 'document' | 'match'
-export type EvidenceType = 'selfie' | 'doc_front' | 'doc_back' | 'frames'
+export type EvidenceType =
+    | 'selfie'
+    | 'doc_front'
+    | 'doc_back'
+    | 'frames'
+    | 'doc_front_raw'
+    | 'doc_back_raw'
+    | 'liveness_video'
 
 export interface Operator {
     id: string

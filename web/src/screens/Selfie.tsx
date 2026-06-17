@@ -1,35 +1,99 @@
 import { useCallback, useEffect, useRef, useState } from "react"
-import { apiPost, type QualityResult } from "../api"
-import { evalQuality, FACE_LIVE_MSG, errorMessage } from "../messages"
+import { apiPost, apiUploadVideo, type QualityResult } from "../api"
+import { evalQuality, errorMessage } from "../messages"
 import { useCamera } from "../useCamera"
-import { useFaceDetector } from "../useFaceDetector"
+import { useFaceLandmarker } from "../useFaceLandmarker"
+import {
+  CHALLENGE_LABEL,
+  challengeSatisfied,
+  initialSeqState,
+  isFrontal,
+  pickChallenges,
+  stepSequence,
+  type ChallengeId,
+  type LivenessSignals,
+  type SeqState,
+} from "../liveness/challenges"
+import { pickBestFrame, type FrameCandidate } from "../liveness/bestFrame"
+import { laplacianVariance } from "../liveness/signals"
 import { Button, Card, Notice, BackBar } from "../ui"
+
+// --- Parámetros del flujo de liveness activo ------------------------------- //
+// Cuánto hay que SOSTENER cada desafío para contarlo (ms). Los gestos (parpadeo)
+// son casi instantáneos; las poses exigen mantenerse un instante (anti-ruido).
+const HOLD_MS: Record<ChallengeId, number> = {
+  center: 650,
+  turn_left: 350,
+  turn_right: 350,
+  blink: 0,
+  smile: 150,
+  closer: 350,
+}
+// Candidatos para el mejor frame: cada cuánto capturamos uno (ms) y cuántos como tope.
+const CANDIDATE_EVERY_MS = 300
+const MAX_CANDIDATES = 10
+// Timeout global de la secuencia: si no se completa, ofrecemos reintentar / manual.
+const SESSION_TIMEOUT_MS = 60_000
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
-// Tiempo que el encuadre debe MANTENERSE "good" antes de arrancar la cuenta.
-const STABLE_MS = 1500
-// Pasos de la cuenta regresiva de auto-captura.
-const COUNTDOWN = [3, 2, 1]
-// Enfriamiento tras una captura RECHAZADA: nunca re-disparamos antes de esto.
-const COOLDOWN_MS = 1200
-// Re-adquisición: tras un rechazo exigimos que el rostro SALGA del óvalo
-// (no-face real, MediaPipe corriendo) por estos frames consecutivos antes de
-// re-habilitar el auto-disparo. Los frames "loading"/"no-camera" del reinicio
-// de cámara NO cuentan (ese era el bug del loop: el warm-up "rompía" el encuadre
-// y re-armaba la captura solo, sin que el usuario re-encuadre).
-const REACQUIRE_ABSENT_FRAMES = 4
+/** MIME de grabación soportado (prefiere webm; cae a mp4). null si no hay soporte. */
+function pickRecorderMime(): string | null {
+  const MR = typeof window !== "undefined" ? window.MediaRecorder : undefined
+  if (!MR || typeof MR.isTypeSupported !== "function") return null
+  const cands = [
+    "video/webm;codecs=vp9",
+    "video/webm;codecs=vp8",
+    "video/webm",
+    "video/mp4",
+  ]
+  return cands.find((m) => MR.isTypeSupported(m)) ?? null
+}
+
+/** Feedback en vivo accionable según el desafío actual y las señales. */
+function feedbackFor(
+  challenge: ChallengeId,
+  s: LivenessSignals,
+  awaitingReset: boolean
+): string {
+  if (!s.hasFace) return "Ubicá tu rostro en el círculo"
+  if (awaitingReset) return "Volvé al frente"
+  switch (challenge) {
+    case "center":
+      if (s.faceWidth < 0.3) return "Acercate un poco"
+      if (Math.abs(s.cx - 0.5) > 0.16 || Math.abs(s.cy - 0.5) > 0.16)
+        return "Centrate en el círculo"
+      if (Math.abs(s.yaw) > 10) return "Mirá de frente"
+      return "Perfecto, no te muevas"
+    case "turn_right":
+      return s.yaw >= 18 ? "¡Perfecto!" : "Seguí girando a la derecha"
+    case "turn_left":
+      return s.yaw <= -18 ? "¡Perfecto!" : "Seguí girando a la izquierda"
+    case "blink":
+      return "Parpadeá una vez"
+    case "smile":
+      return s.smile >= 0.5 ? "¡Buena sonrisa!" : "Regalanos una sonrisa"
+    case "closer":
+      return s.faceWidth >= 0.62 ? "¡Perfecto!" : "Acercate un poco más"
+    default:
+      return ""
+  }
+}
 
 /**
- * Selfie con AUTO-CAPTURA real (estilo Behance):
- *  - Detección facial EN VIVO con MediaPipe (useFaceDetector) sobre el <video>.
- *  - Feedback accionable dentro del óvalo; el óvalo va de gris → verde.
- *  - Cuando el rostro queda bien encuadrado ~1s, arranca cuenta 3·2·1 y dispara.
- *  - Preview ESPEJADO (scaleX(-1), como un espejo); la captura al canvas va
- *    SIN espejar (useCamera.grab dibuja el frame crudo) → la foto sale correcta.
- *  - Fallback: si MediaPipe no carga, mostramos botón manual "Sacar selfie".
+ * Selfie con LIVENESS ACTIVO interactivo (estilo KYC moderno):
+ *  - Detección con MediaPipe FaceLandmarker (blendshapes + matriz de transformación):
+ *    da parpadeo/sonrisa y yaw/pitch de la cabeza.
+ *  - Secuencia de desafíos guiados (centrate, girá izq/der, parpadeá, sonreí,
+ *    acercate): anillo de progreso, instrucción grande, ✓ por desafío, feedback en
+ *    vivo. Anti-trampa: hay que volver a frente entre desafíos.
+ *  - Grabación de TODA la sesión con MediaRecorder → video de evidencia (webm/mp4).
+ *  - Mejor frame: durante los momentos "de frente y centrado" junta candidatos y los
+ *    puntúa (frontalidad + tamaño + nitidez); el mejor es el selfie del match.
+ *  - Al terminar: sube el MEJOR frame a /selfie (con el resultado del liveness activo)
+ *    + sube el video a /liveness-video. Fallback a captura manual si no hay modelo.
  *
- * Pipeline (contrato intacto): POST /selfie {image, frames}.
+ * Contrato intacto: POST /selfie {image, frames, activeLiveness}.
  */
 export function Selfie({
   onDone,
@@ -39,201 +103,248 @@ export function Selfie({
   onBack?: () => void
 }) {
   const cam = useCamera("user")
-  // La detección corre solo cuando la cámara está lista y no estamos procesando.
-  const [busy, setBusy] = useState(false)
-  const detect = useFaceDetector(cam.videoRef, cam.ready && !busy)
 
+  type Phase = "running" | "uploading" | "error"
+  const [phase, setPhase] = useState<Phase>("running")
+  const [sequence] = useState<ChallengeId[]>(() => pickChallenges())
+  const [progress, setProgress] = useState(0) // desafíos completados
+  const [current, setCurrent] = useState<ChallengeId>(sequence[0])
+  const [feedback, setFeedback] = useState("Ubicá tu rostro en el círculo")
   const [notice, setNotice] = useState<string | null>(null)
   const [fatal, setFatal] = useState<string | null>(null)
-  const [count, setCount] = useState<number | null>(null)
-  const [flash, setFlash] = useState(false)
+  const [manualBusy, setManualBusy] = useState(false)
 
-  const stableSinceRef = useRef<number | null>(null)
-  const capturingRef = useRef(false)
-  const countingRef = useRef(false)
-  const timersRef = useRef<ReturnType<typeof setTimeout>[]>([])
-  // --- Guard anti-loop robusto (sobrevive al warm-up de cámara) -------------
-  // Tras un rechazo: enfriamiento por tiempo (cooldownUntilRef) + exigir que el
-  // rostro SALGA del óvalo de verdad (absentFramesRef llega al umbral) antes de
-  // re-disparar. El viejo blockedRef se levantaba con CUALQUIER frame no-good —
-  // y el reinicio de cámara produce frames "loading"/"no-camera", así que el
-  // bloqueo caía solo y re-disparaba en loop. Ahora el warm-up NO satisface la
-  // re-adquisición.
-  const cooldownUntilRef = useRef(0)
-  const needReacquireRef = useRef(false)
-  const absentFramesRef = useRef(0)
-  const manualMode = detect.status === "unavailable"
-  const isGood = detect.verdict === "good"
-  // "Ausencia real" del rostro: MediaPipe corriendo y NO ve cara (no es el
-  // transitorio de warm-up). Solo esto cuenta como re-adquisición tras rechazo.
-  const isAbsent = detect.verdict === "no-face"
+  // Refs vivos (el loop de detección los lee/escribe sin re-montar el efecto).
+  const seqRef = useRef<SeqState>(initialSeqState())
+  const holdStartRef = useRef<number | null>(null)
+  const seqIdxRef = useRef(0)
+  const candidatesRef = useRef<FrameCandidate[]>([])
+  const lastCandRef = useRef(0)
+  const lastFeedbackRef = useRef("")
+  const finishedRef = useRef(false)
+  const sharpCanvasRef = useRef<HTMLCanvasElement | null>(null)
 
-  // Refs espejo de valores vivos: el loop de auto-captura los lee SIN que su
-  // efecto se reejecute (clave para que la cuenta 3·2·1 no se autocancele).
-  const isGoodRef = useRef(isGood)
-  isGoodRef.current = isGood
-  const isAbsentRef = useRef(isAbsent)
-  isAbsentRef.current = isAbsent
+  // Grabación.
+  const recorderRef = useRef<MediaRecorder | null>(null)
+  const chunksRef = useRef<Blob[]>([])
+  const recMimeRef = useRef<string>("video/webm")
 
-  // Arma el enfriamiento + re-adquisición tras un rechazo de captura.
-  const armCooldown = () => {
-    cooldownUntilRef.current = Date.now() + COOLDOWN_MS
-    needReacquireRef.current = true
-    absentFramesRef.current = 0
-  }
+  const status = useFaceLandmarkerStatus(cam, phase, {
+    seqRef,
+    holdStartRef,
+    seqIdxRef,
+    candidatesRef,
+    lastCandRef,
+    lastFeedbackRef,
+    finishedRef,
+    sharpCanvasRef,
+    sequence,
+    setProgress,
+    setCurrent,
+    setFeedback,
+    onAllDone: () => void finishLiveness(),
+    grab: cam.grab,
+  })
 
-  // --- Captura + subida (compartida entre auto y manual) -------------------
-  const doCapture = useCallback(async () => {
-    if (capturingRef.current) return
-    capturingRef.current = true
-    // Matamos cualquier timer de cuenta pendiente (evita disparos zombis si el
-    // usuario tocó el botón manual durante la cuenta).
-    countingRef.current = false
-    timersRef.current.forEach(clearTimeout)
-    timersRef.current = []
-    setBusy(true)
+  const manualMode = status === "unavailable"
+
+  // ---- Grabación: arranca cuando la cámara está lista; junta chunks --------- //
+  // OJO con las deps: `cam` cambia de identidad en cada render; usar `cam` acá
+  // re-ejecutaría el efecto en cada render (stop+recreate del recorder → blob
+  // fragmentado sin header válido). Dependemos sólo de cam.ready/phase + el
+  // accessor ESTABLE cam.getStream (useCallback []). Así el recorder se crea UNA vez.
+  const getStream = cam.getStream
+  useEffect(() => {
+    if (!cam.ready || phase !== "running" || recorderRef.current) return
+    const stream = getStream()
+    if (!stream) return
+    const mime = pickRecorderMime()
+    try {
+      const rec = mime
+        ? new MediaRecorder(stream, {
+            mimeType: mime,
+            videoBitsPerSecond: 1_000_000,
+          })
+        : new MediaRecorder(stream)
+      recMimeRef.current = mime ?? "video/webm"
+      chunksRef.current = []
+      rec.ondataavailable = (e) => {
+        if (e.data && e.data.size > 0) chunksRef.current.push(e.data)
+      }
+      rec.start(1000) // chunk cada 1s
+      recorderRef.current = rec
+    } catch {
+      // MediaRecorder no soportado: seguimos sin video (fail-open, evidencia opcional).
+      recorderRef.current = null
+    }
+    return () => {
+      try {
+        if (recorderRef.current && recorderRef.current.state !== "inactive")
+          recorderRef.current.stop()
+      } catch {
+        /* noop */
+      }
+      recorderRef.current = null
+    }
+  }, [cam.ready, phase, getStream])
+
+  /** Detiene la grabación y resuelve el Blob final (null si no hubo grabación). */
+  const stopRecording = useCallback((): Promise<Blob | null> => {
+    const rec = recorderRef.current
+    if (!rec) return Promise.resolve(null)
+    return new Promise((resolve) => {
+      const finalize = () => {
+        const blob = chunksRef.current.length
+          ? new Blob(chunksRef.current, { type: recMimeRef.current })
+          : null
+        resolve(blob)
+      }
+      if (rec.state === "inactive") return finalize()
+      rec.onstop = finalize
+      try {
+        rec.stop()
+      } catch {
+        finalize()
+      }
+    })
+  }, [])
+
+  // ---- Subida del mejor frame + video --------------------------------------- //
+  const finishLiveness = useCallback(async () => {
+    if (finishedRef.current) return
+    finishedRef.current = true
+    setPhase("uploading")
     setNotice(null)
     setFatal(null)
-    setCount(null)
-    setFlash(true)
-    setTimeout(() => setFlash(false), 450)
     try {
-      // grab() dibuja el frame CRUDO (sin espejar) → la imagen sale correcta
-      // aunque el preview se vea como espejo.
-      const selfie = cam.grab()
-      await sleep(320)
-      const f1 = cam.grab()
-      await sleep(320)
-      const f2 = cam.grab()
+      // Mejor frame entre los candidatos "de frente"; si no hay, capturamos uno ya.
+      const cands = candidatesRef.current
+      const bestIdx = pickBestFrame(cands)
+      const bestImage = bestIdx >= 0 ? cands[bestIdx].image : cam.grab(0.9)
+      // Un 2º frame para el PAD/desafío por-frames del backend (distinto del mejor).
+      const frames: string[] = []
+      if (cands.length > 1) {
+        const other = bestIdx === 0 ? cands[cands.length - 1] : cands[0]
+        frames.push(other.image)
+      }
+
+      // Detiene la grabación y obtiene el video (evidencia).
+      const videoBlob = await stopRecording()
       cam.stop()
+
+      // 1) Sube el mejor frame + el resultado del liveness activo (desafíos cumplidos).
       const resp = await apiPost<{ quality?: QualityResult }>("/selfie", {
-        image: selfie,
-        frames: [f1, f2],
+        image: bestImage,
+        frames,
+        activeLiveness: { challenges: sequence, passed: true },
       })
+
+      // 2) Sube el video (fail-open: si falla, no bloquea el avance).
+      if (videoBlob && videoBlob.size > 0) {
+        void apiUploadVideo(videoBlob)
+      }
+
       const verdict = evalQuality(resp.quality)
       if (verdict.advance) {
         onDone()
         return
       }
-      // Recapturar: reabrimos cámara, mostramos tip y reanudamos detección.
-      // Bloqueamos el re-arme automático hasta que el usuario re-encuadre.
-      setNotice(verdict.msg ?? null)
-      setBusy(false)
-      stableSinceRef.current = null
-      capturingRef.current = false
-      countingRef.current = false
-      armCooldown()
-      void cam.start()
+      // La calidad del mejor frame no alcanzó (p.ej. anteojos/luz): pedimos reintento.
+      setNotice(verdict.msg ?? "Probá de nuevo, con buena luz y de frente.")
+      setPhase("error")
     } catch (e) {
-      setBusy(false)
-      capturingRef.current = false
-      countingRef.current = false
-      stableSinceRef.current = null
-      armCooldown()
       setFatal(errorMessage(e))
-      void cam.start()
+      setPhase("error")
     }
-  }, [cam, onDone])
+  }, [cam, onDone, sequence, stopRecording])
 
-  // Ref siempre apuntando a la última doCapture, para que el timer la invoque
-  // sin meter doCapture (inestable) en las deps del efecto de countdown.
-  const doCaptureRef = useRef(doCapture)
-  doCaptureRef.current = doCapture
-
-  // Cancela la cuenta regresiva en curso (timers + estado visible).
-  const cancelCountdown = useCallback(() => {
-    countingRef.current = false
-    timersRef.current.forEach(clearTimeout)
-    timersRef.current = []
-    setCount(null)
-  }, [])
-
-  // --- Estabilidad + cuenta regresiva de auto-captura ----------------------
-  // El loop lee SOLO refs (isGoodRef/capturingRef/countingRef) y programa los
-  // timers UNA vez en timersRef. NO se cancelan en cada render: solo si el
-  // encuadre se rompe o al desmontar. Así "setCount(3)" no se autocancela.
+  // ---- Timeout de la secuencia ---------------------------------------------- //
   useEffect(() => {
-    if (manualMode || busy) {
-      cancelCountdown()
-      stableSinceRef.current = null
-      return
-    }
-    let raf = 0
-    const loop = () => {
-      if (!capturingRef.current) {
-        // Re-adquisición tras rechazo: contamos AUSENCIA REAL (no-face con
-        // MediaPipe corriendo). El warm-up de cámara (loading/no-camera) NO
-        // cuenta — por eso el loop ya no se re-arma solo.
-        if (needReacquireRef.current) {
-          if (isAbsentRef.current) {
-            absentFramesRef.current++
-            if (absentFramesRef.current >= REACQUIRE_ABSENT_FRAMES)
-              needReacquireRef.current = false
-          }
-          stableSinceRef.current = null
-          if (countingRef.current) cancelCountdown()
-        } else if (
-          isGoodRef.current &&
-          Date.now() >= cooldownUntilRef.current
-        ) {
-          if (stableSinceRef.current == null)
-            stableSinceRef.current = Date.now()
-          const held = Date.now() - stableSinceRef.current
-          if (held >= STABLE_MS && !countingRef.current) {
-            // Arrancamos la secuencia 3·2·1 y disparamos al final (una sola vez).
-            countingRef.current = true
-            COUNTDOWN.forEach((n, i) => {
-              timersRef.current.push(setTimeout(() => setCount(n), i * 1000))
-            })
-            timersRef.current.push(
-              setTimeout(() => {
-                void doCaptureRef.current()
-              }, COUNTDOWN.length * 1000),
-            )
-          }
-        } else {
-          // Encuadre roto / en cooldown / aún no good: reseteamos estabilidad y
-          // abortamos cuenta. NO tocamos los guards de re-adquisición acá (ese
-          // era el bug: se levantaban con el warm-up de cámara).
-          stableSinceRef.current = null
-          if (countingRef.current) cancelCountdown()
-        }
+    if (phase !== "running") return
+    const t = setTimeout(() => {
+      if (!finishedRef.current) {
+        setFatal(
+          "No pudimos completar la verificación a tiempo. Probá de nuevo con buena luz."
+        )
+        setPhase("error")
       }
-      raf = requestAnimationFrame(loop)
-    }
-    raf = requestAnimationFrame(loop)
-    return () => {
-      cancelAnimationFrame(raf)
-      timersRef.current.forEach(clearTimeout)
-      timersRef.current = []
-      countingRef.current = false
-    }
-  }, [manualMode, busy, cancelCountdown])
+    }, SESSION_TIMEOUT_MS)
+    return () => clearTimeout(t)
+  }, [phase])
 
-  // Si la cámara falló/denegó el permiso, NO mostramos "Preparando la cámara…"
-  // (mentira que dejaba al usuario esperando). El pill pasa a un estado de error
-  // y aparece un botón de reintento (#5).
+  // ---- Reintento: reinicia la secuencia y la cámara ------------------------- //
+  const retry = useCallback(async () => {
+    seqRef.current = initialSeqState()
+    seqIdxRef.current = 0
+    holdStartRef.current = null
+    candidatesRef.current = []
+    lastCandRef.current = 0
+    lastFeedbackRef.current = ""
+    finishedRef.current = false
+    chunksRef.current = []
+    recorderRef.current = null
+    setProgress(0)
+    setCurrent(sequence[0])
+    setFeedback("Ubicá tu rostro en el círculo")
+    setNotice(null)
+    setFatal(null)
+    setPhase("running")
+    if (!cam.ready) await cam.start()
+  }, [cam, sequence])
+
+  // ---- Captura manual (fallback si no hay modelo o el usuario no puede) ------ //
+  const manualCapture = useCallback(async () => {
+    if (manualBusy) return
+    setManualBusy(true)
+    setNotice(null)
+    setFatal(null)
+    finishedRef.current = true
+    try {
+      const selfie = cam.grab(0.9)
+      await sleep(300)
+      const f1 = cam.grab(0.9)
+      const videoBlob = await stopRecording()
+      cam.stop()
+      // Captura manual: SIN activeLiveness (no se reclama liveness activo) → el
+      // backend cae al PAD pasivo, honesto/fail-closed.
+      const resp = await apiPost<{ quality?: QualityResult }>("/selfie", {
+        image: selfie,
+        frames: [f1],
+      })
+      if (videoBlob && videoBlob.size > 0) void apiUploadVideo(videoBlob)
+      const verdict = evalQuality(resp.quality)
+      if (verdict.advance) {
+        onDone()
+        return
+      }
+      setNotice(verdict.msg ?? "Probá de nuevo, con buena luz y de frente.")
+      setManualBusy(false)
+      finishedRef.current = false
+      await cam.start()
+    } catch (e) {
+      setFatal(errorMessage(e))
+      setManualBusy(false)
+      finishedRef.current = false
+      await cam.start()
+    }
+  }, [cam, manualBusy, onDone, stopRecording])
+
   const camDenied = !!cam.error
-  const liveMsg = camDenied
-    ? "No pudimos usar la cámara"
-    : detect.status === "loading"
-      ? "Preparando detección…"
-      : (FACE_LIVE_MSG[detect.verdict] ?? "Ubicá tu rostro en el círculo")
+  const total = sequence.length
+  const pct = total > 0 ? progress / total : 0
 
-  // Color del CÍRCULO (Didit): azul mientras buscás encuadre, verde cuando está
-  // bien. El "good" cierra con verde + halo; el resto, azul tenue sobre la cámara.
-  const ringColor = isGood ? "border-primary" : "border-info"
-  const ringGlow = isGood
-    ? "shadow-[0_0_0_5px_rgba(22,163,74,0.30)]"
-    : "shadow-[0_0_0_4px_rgba(14,165,233,0.22)]"
+  // Anillo de progreso (SVG). Verde Teko.
+  const R = 130
+  const C = 2 * Math.PI * R
+  const ringColor = "#16a34a"
 
   return (
     <Card>
       <BackBar onBack={onBack} />
-      <h1 className="text-xl font-bold text-gray-900">Sacate una selfie</h1>
+      <h1 className="text-xl font-bold text-gray-900">Verificá que sos vos</h1>
       <p className="mt-1 text-sm leading-relaxed text-gray-500">
-        Ubicá tu rostro dentro del círculo, con buena luz y de frente. Cuando
-        estés bien encuadrado, la foto se saca sola.
+        Seguí las instrucciones en pantalla. Vamos a grabar un video corto para
+        confirmar que estás en vivo.
       </p>
 
       {notice && <Notice>{notice}</Notice>}
@@ -243,78 +354,98 @@ export function Selfie({
         </p>
       )}
 
-      <div className="relative my-4 aspect-[3/4] w-full overflow-hidden rounded-3xl bg-gray-900">
+      <div className="relative my-4 aspect-square w-full overflow-hidden rounded-full bg-gray-900">
         <video
           ref={cam.videoRef}
           autoPlay
           playsInline
           muted
-          // ESPEJADO solo en el preview (como un espejo, fácil de encuadrar).
           className="size-full object-cover"
           style={{ transform: "scaleX(-1)" }}
         />
 
-        {/* CÍRCULO guía (Didit): azul → verde según el encuadre en vivo. Es un
-            círculo real (aspect-square), no un óvalo. */}
-        <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-          <div
-            className={`aspect-square w-[78%] rounded-full border-[3px] ${
-              isGood ? "border-solid" : "border-dashed"
-            } ${ringColor} ${ringGlow} transition-all duration-300`}
+        {/* Anillo de progreso de la secuencia (verde Teko). */}
+        <svg
+          className="pointer-events-none absolute inset-0 size-full -rotate-90"
+          viewBox="0 0 300 300"
+          aria-hidden
+        >
+          <circle
+            cx="150"
+            cy="150"
+            r={R}
+            fill="none"
+            stroke="rgba(255,255,255,0.25)"
+            strokeWidth="8"
           />
-        </div>
+          <circle
+            cx="150"
+            cy="150"
+            r={R}
+            fill="none"
+            stroke={ringColor}
+            strokeWidth="8"
+            strokeLinecap="round"
+            strokeDasharray={C}
+            strokeDashoffset={C * (1 - pct)}
+            style={{ transition: "stroke-dashoffset 400ms ease" }}
+          />
+        </svg>
 
-        {/* destello de captura */}
-        {flash && (
-          <div className="teko-flash pointer-events-none absolute inset-0 bg-white" />
+        {/* REC indicador */}
+        {phase === "running" && (
+          <div className="absolute left-1/2 top-4 flex -translate-x-1/2 items-center gap-1.5 rounded-full bg-black/45 px-2.5 py-1 text-[11px] font-semibold text-white">
+            <span className="size-2 animate-pulse rounded-full bg-red-500" />
+            REC
+          </div>
         )}
 
-        {/* cuenta regresiva 3·2·1 */}
-        {count != null && (
-          <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-            <span
-              key={count}
-              className="teko-count text-7xl font-black text-white drop-shadow-lg"
-            >
-              {count}
+        {/* Instrucción grande + feedback */}
+        {phase === "running" && !camDenied && (
+          <div className="pointer-events-none absolute inset-x-0 bottom-5 flex flex-col items-center gap-1 px-6 text-center">
+            <span className="rounded-2xl bg-black/55 px-4 py-2 text-lg font-bold text-white backdrop-blur-sm">
+              {CHALLENGE_LABEL[current]}
+            </span>
+            <span className="text-sm font-medium text-white/90 drop-shadow">
+              {feedback}
             </span>
           </div>
         )}
 
-        {/* feedback en vivo (accionable) */}
-        {count == null && (
-          <div className="pointer-events-none absolute inset-x-0 top-3 flex justify-center">
-            <span
-              className={`flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-semibold backdrop-blur-sm transition-colors ${
-                camDenied
-                  ? "bg-error/90 text-white"
-                  : isGood
-                    ? "bg-primary/90 text-white"
-                    : "bg-info/80 text-white"
-              }`}
-            >
-              <span
-                className={`size-2 rounded-full ${
-                  camDenied ? "bg-white" : isGood ? "bg-white" : "bg-mint"
-                }`}
-              />
-              {camDenied
-                ? liveMsg
-                : manualMode
-                  ? "Encuadrá tu rostro"
-                  : liveMsg}
-            </span>
+        {phase === "uploading" && (
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-black/55 text-white">
+            <div className="size-10 animate-spin rounded-full border-4 border-white/30 border-t-white" />
+            <span className="text-sm font-medium">Verificando…</span>
           </div>
         )}
       </div>
 
-      {/* Cámara denegada/fallida (#5): mensaje claro + botón para reintentar el
-          permiso. start() vuelve a llamar getUserMedia → re-dispara el prompt; si
-          el usuario lo bloqueó a nivel navegador, ofrecemos recargar la página. */}
+      {/* Pasos completados (✓) */}
+      {phase === "running" && (
+        <div className="mb-2 flex items-center justify-center gap-2">
+          {sequence.map((c, i) => (
+            <span
+              key={`${c}-${i}`}
+              className={`flex size-6 items-center justify-center rounded-full text-xs font-bold transition-colors ${
+                i < progress
+                  ? "bg-primary text-white"
+                  : i === progress
+                    ? "bg-primary/20 text-primary ring-2 ring-primary"
+                    : "bg-gray-100 text-gray-300"
+              }`}
+              title={CHALLENGE_LABEL[c]}
+            >
+              {i < progress ? "✓" : i + 1}
+            </span>
+          ))}
+        </div>
+      )}
+
+      {/* Cámara denegada/fallida: reintento. */}
       {camDenied && (
         <>
           <Notice>
-            No pudimos usar la cámara: {cam.error}. Revisá que le diste permiso al
+            No pudimos usar la cámara: {cam.error}. Revisá el permiso del
             navegador y volvé a intentar.
           </Notice>
           <Button onClick={() => void cam.start()}>
@@ -330,32 +461,169 @@ export function Selfie({
         </>
       )}
 
-      {/* Botón manual: SIEMPRE disponible como recovery; obligatorio si
-          MediaPipe no cargó (manualMode). Oculto si la cámara está denegada
-          (ahí mandan los botones de reintento de arriba). */}
+      {/* Error / timeout: reintentar la secuencia. */}
+      {phase === "error" && !camDenied && (
+        <Button onClick={() => void retry()}>Reintentar la verificación</Button>
+      )}
+
+      {/* Captura manual: SIEMPRE como recovery; obligatoria si no hay modelo. */}
       {!camDenied && (
         <>
           <Button
-            disabled={busy || !cam.ready}
-            onClick={() => void doCapture()}
-            variant={manualMode ? "primary" : "ghost"}
+            disabled={manualBusy || !cam.ready || phase === "uploading"}
+            onClick={() => void manualCapture()}
+            variant={manualMode || phase === "error" ? "primary" : "ghost"}
+            className="mt-2"
           >
-            {busy
+            {manualBusy
               ? "Revisando tu foto…"
               : manualMode
                 ? "Sacar selfie"
-                : "Sacar foto ahora"}
+                : "Sacar selfie ahora"}
           </Button>
-          {!manualMode && (
+          {!manualMode && phase === "running" && (
             <p className="mt-2 text-center text-xs text-gray-400">
-              La captura es automática · o tocá el botón cuando quieras
+              Seguí los pasos · o sacate la selfie manualmente cuando quieras
             </p>
           )}
         </>
       )}
+
       <p className="mt-3 text-center text-[11px] leading-snug text-gray-400">
         Tus datos se usan solo para verificar tu identidad · Ley 7593
       </p>
     </Card>
   )
+}
+
+/**
+ * Encapsula el cableado del FaceLandmarker + el loop por-frame de desafíos y captura
+ * de candidatos. Devuelve el `status` del modelo. Mantiene el componente legible:
+ * toda la lógica viva (refs) entra por `ctx`.
+ */
+function useFaceLandmarkerStatus(
+  cam: ReturnType<typeof useCamera>,
+  phase: "running" | "uploading" | "error",
+  ctx: {
+    seqRef: React.MutableRefObject<SeqState>
+    holdStartRef: React.MutableRefObject<number | null>
+    seqIdxRef: React.MutableRefObject<number>
+    candidatesRef: React.MutableRefObject<FrameCandidate[]>
+    lastCandRef: React.MutableRefObject<number>
+    lastFeedbackRef: React.MutableRefObject<string>
+    finishedRef: React.MutableRefObject<boolean>
+    sharpCanvasRef: React.MutableRefObject<HTMLCanvasElement | null>
+    sequence: ChallengeId[]
+    setProgress: (n: number) => void
+    setCurrent: (c: ChallengeId) => void
+    setFeedback: (s: string) => void
+    onAllDone: () => void
+    grab: (q?: number) => string
+  }
+) {
+  const ctxRef = useRef(ctx)
+  ctxRef.current = ctx
+
+  const onFrame = useCallback(
+    (s: LivenessSignals, video: HTMLVideoElement, ts: number) => {
+      const c = ctxRef.current
+      if (c.finishedRef.current) return
+
+      // 1) Captura de candidatos para el mejor frame (sólo de frente y centrado).
+      if (
+        isFrontal(s) &&
+        ts - c.lastCandRef.current > CANDIDATE_EVERY_MS &&
+        c.candidatesRef.current.length < MAX_CANDIDATES
+      ) {
+        c.lastCandRef.current = ts
+        const sharp = measureSharpness(video, c.sharpCanvasRef)
+        c.candidatesRef.current.push({
+          yaw: s.yaw,
+          faceWidth: s.faceWidth,
+          sharpness: sharp,
+          image: c.grab(0.9),
+        })
+      }
+
+      // 2) Avance de la secuencia de desafíos.
+      const seq = c.sequence
+      const idx = c.seqRef.current.i
+      if (idx >= seq.length) return
+      // Reset del hold si cambió el desafío actual.
+      if (idx !== c.seqIdxRef.current) {
+        c.seqIdxRef.current = idx
+        c.holdStartRef.current = null
+      }
+      const id = seq[idx]
+      const frontal = isFrontal(s)
+
+      // Satisfacción con HOLD (poses exigen sostenerse; gestos casi instantáneos).
+      let satisfied = false
+      if (challengeSatisfied(id, s)) {
+        if (c.holdStartRef.current == null) c.holdStartRef.current = ts
+        satisfied = ts - c.holdStartRef.current >= HOLD_MS[id]
+      } else {
+        c.holdStartRef.current = null
+      }
+
+      const r = stepSequence(c.seqRef.current, seq, satisfied, frontal)
+      c.seqRef.current = r.state
+      if (r.justCompleted) {
+        c.holdStartRef.current = null
+        c.setProgress(r.state.completed)
+      }
+      if (r.allDone) {
+        c.onAllDone()
+        return
+      }
+      // UI: desafío actual + feedback (sólo si cambió, para no re-render por frame).
+      const curId = seq[r.state.i] ?? id
+      c.setCurrent(curId)
+      const fb = feedbackFor(curId, s, r.state.awaitingReset)
+      if (fb !== c.lastFeedbackRef.current) {
+        c.lastFeedbackRef.current = fb
+        c.setFeedback(fb)
+      }
+    },
+    []
+  )
+
+  const { status } = useFaceLandmarker(
+    cam.videoRef,
+    cam.ready && phase === "running",
+    onFrame
+  )
+  return status
+}
+
+/**
+ * Nitidez (varianza del Laplaciano) del frame actual sobre un canvas chico (96x72)
+ * en escala de grises. Barato; reusa el mismo canvas.
+ */
+function measureSharpness(
+  video: HTMLVideoElement,
+  canvasRef: React.MutableRefObject<HTMLCanvasElement | null>
+): number {
+  let cv = canvasRef.current
+  if (!cv) {
+    cv = document.createElement("canvas")
+    cv.width = 96
+    cv.height = 72
+    canvasRef.current = cv
+  }
+  const ctx = cv.getContext("2d", { willReadFrequently: true })
+  if (!ctx) return 0
+  try {
+    ctx.drawImage(video, 0, 0, cv.width, cv.height)
+    const { data } = ctx.getImageData(0, 0, cv.width, cv.height)
+    const n = cv.width * cv.height
+    const gray = new Uint8Array(n)
+    for (let i = 0; i < n; i++) {
+      gray[i] =
+        0.299 * data[i * 4] + 0.587 * data[i * 4 + 1] + 0.114 * data[i * 4 + 2]
+    }
+    return laplacianVariance(gray, cv.width, cv.height)
+  } catch {
+    return 0
+  }
 }
