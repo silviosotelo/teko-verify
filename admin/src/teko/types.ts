@@ -1,7 +1,63 @@
 // Contratos del backend Teko admin (subconjunto consumido por el dashboard).
 // Espejo de src/types.ts del backend Teko Verify.
 
-export type AdminRole = 'owner' | 'operator' | 'viewer'
+export type AdminRole = 'owner' | 'admin' | 'reviewer' | 'viewer' | 'operator'
+
+export type Permission =
+    | 'manage_tenants'
+    | 'manage_apps'
+    | 'manage_workflows'
+    | 'manage_webhooks'
+    | 'manage_branding'
+    | 'manage_members'
+    | 'manage_api_keys'
+    | 'review_sessions'
+    | 'view_sessions'
+    | 'view_usage'
+
+// ---- Apps (App-scoping — Pieza 2) ----
+export interface App {
+    id: string
+    tenantId: string
+    name: string
+    isDefault: boolean
+    createdAt: string
+    updatedAt: string
+}
+
+// /admin/me — operador actual + permisos efectivos (para gating de UI).
+export interface MeResponse {
+    operator: { id: string; email: string; role: AdminRole } | null
+    permissions: Permission[]
+    assignableRoles: AdminRole[]
+}
+
+// Operador del panel con metadatos (vista Team).
+export interface OperatorRow {
+    id: string
+    email: string
+    role: AdminRole
+    createdAt: string
+}
+
+// Uso por org (Pieza 3).
+export interface UsageAppRow {
+    appId: string | null
+    appName: string
+    total: number
+    verified: number
+    rejected: number
+    byState: Record<string, number>
+}
+
+export interface UsageResponse {
+    tenantId: string
+    from: string | null
+    to: string | null
+    total: number
+    verified: number
+    apps: UsageAppRow[]
+}
 
 export type SessionState =
     | 'created'
@@ -161,6 +217,7 @@ export interface ApiKey {
     label: string
     scopes: string[]
     status: ApiKeyStatus
+    appId: string | null
     lastUsedAt: string | null
     createdAt: string
 }
@@ -319,6 +376,7 @@ export interface WorkflowDefinition {
 export interface Workflow {
     id: string
     tenantId: string
+    appId: string | null
     name: string
     version: number
     definition: WorkflowDefinition
@@ -390,6 +448,7 @@ export type WebhookEvent =
 
 export interface WebhookEndpoint {
     id: string
+    appId: string | null
     url: string
     events: WebhookEvent[]
     description: string | null

@@ -63,6 +63,27 @@ const tekoRoute: Routes = [
         meta: { pageContainerType: 'contained' },
     },
     {
+        key: 'teko.apps',
+        path: '/apps',
+        component: lazy(() => import('@/views/teko/Apps')),
+        authority: [],
+        meta: { pageContainerType: 'contained' },
+    },
+    {
+        key: 'teko.team',
+        path: '/team',
+        component: lazy(() => import('@/views/teko/Team')),
+        authority: [],
+        meta: { pageContainerType: 'contained' },
+    },
+    {
+        key: 'teko.usage',
+        path: '/usage',
+        component: lazy(() => import('@/views/teko/Usage')),
+        authority: [],
+        meta: { pageContainerType: 'contained' },
+    },
+    {
         key: 'teko.customization',
         path: '/customization',
         component: lazy(() => import('@/views/teko/Customization')),

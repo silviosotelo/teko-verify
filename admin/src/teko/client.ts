@@ -5,8 +5,13 @@
 import { TOKEN_NAME_IN_STORAGE } from '@/constants/api.constant'
 import type {
     ApiKey,
+    App,
     AuditEntry,
     CreateApiKeyResponse,
+    MeResponse,
+    OperatorRow,
+    AdminRole,
+    UsageResponse,
     ListSessionsResponse,
     LoA,
     MetricsResponse,
@@ -115,6 +120,54 @@ async function requestBlob(path: string): Promise<Blob> {
 }
 
 export const tekoApi = {
+    // ---- Operador actual + RBAC ----
+    me() {
+        return request<MeResponse>('GET', '/me')
+    },
+
+    // ---- Team / miembros (operadores) ----
+    listOperators() {
+        return request<{ operators: OperatorRow[]; assignableRoles: AdminRole[] }>(
+            'GET',
+            '/operators',
+        )
+    },
+    createOperator(body: { email: string; password: string; role: AdminRole }) {
+        return request<OperatorRow>('POST', '/operators', body)
+    },
+    updateOperatorRole(id: string, role: AdminRole) {
+        return request<OperatorRow>('PATCH', `/operators/${id}`, { role })
+    },
+
+    // ---- Apps (App-scoping — Pieza 2) ----
+    listApps(tenantId: string) {
+        return request<{ apps: App[] }>('GET', `/tenants/${tenantId}/apps`)
+    },
+    createApp(tenantId: string, name: string) {
+        return request<App>('POST', `/tenants/${tenantId}/apps`, { name })
+    },
+    updateApp(tenantId: string, appId: string, name: string) {
+        return request<App>('PUT', `/tenants/${tenantId}/apps/${appId}`, { name })
+    },
+    deleteApp(tenantId: string, appId: string) {
+        return request<{ id: string; deleted: boolean }>(
+            'DELETE',
+            `/tenants/${tenantId}/apps/${appId}`,
+        )
+    },
+
+    // ---- Uso por org (Pieza 3) ----
+    usage(tenantId: string, params?: { from?: string; to?: string }) {
+        const q = new URLSearchParams()
+        if (params?.from) q.set('from', params.from)
+        if (params?.to) q.set('to', params.to)
+        const qs = q.toString()
+        return request<UsageResponse>(
+            'GET',
+            `/tenants/${tenantId}/usage${qs ? `?${qs}` : ''}`,
+        )
+    },
+
     // ---- Tenants ----
     listTenants() {
         return request<{ tenants: Tenant[] }>('GET', '/tenants')
@@ -168,7 +221,10 @@ export const tekoApi = {
             `/tenants/${tenantId}/api-keys`,
         )
     },
-    createApiKey(tenantId: string, body: { label: string; scopes?: string[] }) {
+    createApiKey(
+        tenantId: string,
+        body: { label: string; scopes?: string[]; appId?: string },
+    ) {
         return request<CreateApiKeyResponse>(
             'POST',
             `/tenants/${tenantId}/api-keys`,
@@ -220,7 +276,7 @@ export const tekoApi = {
     },
     createWorkflow(
         tenantId: string,
-        body: { name: string; definition: WorkflowDefinition },
+        body: { name: string; definition: WorkflowDefinition; appId?: string },
     ) {
         return request<Workflow>('POST', `/tenants/${tenantId}/workflows`, body)
     },
@@ -270,7 +326,12 @@ export const tekoApi = {
     },
     createWebhook(
         tenantId: string,
-        body: { url: string; events: WebhookEvent[]; description?: string },
+        body: {
+            url: string
+            events: WebhookEvent[]
+            description?: string
+            appId?: string
+        },
     ) {
         return request<CreateWebhookEndpointResponse>(
             'POST',
@@ -366,11 +427,19 @@ export const tekoApi = {
     // Crea una sesión de test al nivel elegido y devuelve verifyUrl para la captura
     // en vivo (cámara) — reusa el flujo del usuario. Si se pasa `email`, el backend
     // le envía el verifyUrl por email nativo (transaccional, fail-open).
-    testSession(tenantId: string, assurance: LoA, email?: string) {
+    testSession(
+        tenantId: string,
+        assurance: LoA,
+        email?: string,
+        appId?: string,
+    ) {
+        const body: Record<string, unknown> = { assurance }
+        if (email) body.email = email
+        if (appId) body.appId = appId
         return request<TestSessionResponse>(
             'POST',
             `/tenants/${tenantId}/test-session`,
-            email ? { assurance, email } : { assurance },
+            body,
         )
     },
     // Reenvía el link de verificación de una sesión existente a un email.
