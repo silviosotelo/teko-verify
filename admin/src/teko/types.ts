@@ -174,6 +174,8 @@ export interface TestSessionResponse {
     sessionId: string
     assurance: LoA
     verifyUrl: string
+    // Sólo presente si se pasó `email`: ¿el backend aceptó el envío del link?
+    emailSent?: boolean
 }
 
 // ---- Playground OCR (Inspector OCR) ----

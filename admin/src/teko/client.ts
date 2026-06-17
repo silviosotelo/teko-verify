@@ -206,12 +206,21 @@ export const tekoApi = {
         return request<TestVerifyResponse>('POST', '/test-verify', body)
     },
     // Crea una sesión de test al nivel elegido y devuelve verifyUrl para la captura
-    // en vivo (cámara) — reusa el flujo del usuario.
-    testSession(tenantId: string, assurance: LoA) {
+    // en vivo (cámara) — reusa el flujo del usuario. Si se pasa `email`, el backend
+    // le envía el verifyUrl por email nativo (transaccional, fail-open).
+    testSession(tenantId: string, assurance: LoA, email?: string) {
         return request<TestSessionResponse>(
             'POST',
             `/tenants/${tenantId}/test-session`,
-            { assurance },
+            email ? { assurance, email } : { assurance },
+        )
+    },
+    // Reenvía el link de verificación de una sesión existente a un email.
+    sendSessionLink(tenantId: string, sessionId: string, email: string) {
+        return request<{ sessionId: string; emailSent: boolean }>(
+            'POST',
+            `/tenants/${tenantId}/sessions/${sessionId}/send-link`,
+            { email },
         )
     },
 

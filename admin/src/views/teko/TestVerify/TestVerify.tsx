@@ -193,6 +193,11 @@ const TestVerifyView = () => {
     const [result, setResult] = useState<TestVerifyResponse | null>(null)
     const [error, setError] = useState<string | null>(null)
     const [liveLoading, setLiveLoading] = useState(false)
+    const [email, setEmail] = useState('')
+    const [liveMsg, setLiveMsg] = useState<{
+        type: 'success' | 'warning'
+        text: string
+    } | null>(null)
 
     function pick(
         setFile: (f: File) => void,
@@ -236,11 +241,35 @@ const TestVerifyView = () => {
 
     async function openLive() {
         if (!currentId) return
+        const trimmed = email.trim()
+        // Validación de formato en el cliente (el backend igual revalida).
+        if (trimmed && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed)) {
+            setError('Email del solicitante inválido.')
+            return
+        }
         setLiveLoading(true)
         setError(null)
+        setLiveMsg(null)
         try {
-            const res = await tekoApi.testSession(currentId, level as LoA)
+            const res = await tekoApi.testSession(
+                currentId,
+                level as LoA,
+                trimmed || undefined,
+            )
             window.open(res.verifyUrl, '_blank', 'noopener')
+            if (trimmed) {
+                setLiveMsg(
+                    res.emailSent
+                        ? {
+                              type: 'success',
+                              text: `Link enviado por email a ${trimmed}.`,
+                          }
+                        : {
+                              type: 'warning',
+                              text: 'La sesión se creó, pero el email no pudo enviarse (revisá la configuración SMTP). El link se abrió en una pestaña.',
+                          },
+                )
+            }
         } catch (e) {
             setError((e as Error).message)
         } finally {
@@ -473,12 +502,44 @@ const TestVerifyView = () => {
                         pestaña. Reusa exactamente el mismo proceso que ve el
                         titular.
                     </p>
+                    <div className="mb-4 max-w-md">
+                        <label className="mb-1 block text-sm font-medium text-gray-600 dark:text-gray-300">
+                            Email del solicitante{' '}
+                            <span className="text-gray-400">(opcional)</span>
+                        </label>
+                        <input
+                            type="email"
+                            value={email}
+                            onChange={(e) => setEmail(e.target.value)}
+                            placeholder="persona@dominio.com"
+                            className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm outline-none focus:border-emerald-500 dark:border-gray-700 dark:bg-gray-800"
+                        />
+                        <p className="mt-1 text-xs text-gray-400">
+                            Si lo completás, se le envía el link de verificación
+                            por email.
+                        </p>
+                    </div>
+                    {liveMsg && (
+                        <Alert
+                            showIcon
+                            className="mb-4 max-w-xl"
+                            type={
+                                liveMsg.type === 'success'
+                                    ? 'success'
+                                    : 'warning'
+                            }
+                        >
+                            {liveMsg.text}
+                        </Alert>
+                    )}
                     <Button
                         variant="solid"
                         loading={liveLoading}
                         onClick={openLive}
                     >
-                        Abrir captura en vivo
+                        {email.trim()
+                            ? 'Crear sesión y enviar link'
+                            : 'Abrir captura en vivo'}
                     </Button>
                 </Card>
             )}

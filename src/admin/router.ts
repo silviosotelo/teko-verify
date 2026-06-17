@@ -32,6 +32,7 @@ import { adminLoginRateLimiter } from "../lib/rateLimit";
 import { mergePolicy } from "../lib/policy";
 import { decodeBase64Image } from "../lib/images";
 import { ensureRasterImage } from "../lib/raster";
+import { isMailerConfigured, isValidEmail, sendVerificationEmail } from "../lib/mailer";
 import { computeChecks } from "../pipeline";
 import { realPipelineDeps } from "../pipelineDeps";
 import { decision as decideVerdict } from "../modules/decision";
@@ -608,6 +609,15 @@ adminRouter.post(
         res.status(400).json({ error: "valid_assurance_required" });
         return;
       }
+      // Email opcional del solicitante (para enviarle el link de la captura en vivo).
+      const email =
+        typeof req.body?.email === "string" && req.body.email.trim()
+          ? req.body.email.trim()
+          : undefined;
+      if (email && !isValidEmail(email)) {
+        res.status(400).json({ error: "invalid_email" });
+        return;
+      }
       const tenant = await repos.tenants.getById(req.params.id);
       if (!tenant) {
         res.status(404).json({ error: "tenant_not_found" });
@@ -628,16 +638,66 @@ adminRouter.post(
         sessionId: created.id,
         actor: `admin:${req.adminOperator?.operatorId ?? "?"}`,
         event: "admin.test_session",
-        detail: { assurance },
+        detail: { assurance, email: email ?? null },
         ip: req.ip ?? null,
       });
+      const verifyUrl = `${PUBLIC_BASE_URL}/verify/${linkToken}`;
+
+      // Envío opcional del link por email (transaccional, fail-open).
+      let emailSent: boolean | undefined;
+      if (email) {
+        emailSent = isMailerConfigured() ? await sendVerificationEmail(email, verifyUrl) : false;
+      }
+
       res.status(201).json({
         sessionId: created.id,
         assurance,
-        verifyUrl: `${PUBLIC_BASE_URL}/verify/${linkToken}`,
+        verifyUrl,
+        ...(email ? { emailSent } : {}),
       });
     } catch (e) {
       res.status(500).json({ error: "test_session_failed", detail: (e as Error).message });
+    }
+  }
+);
+
+// POST /admin/tenants/:id/sessions/:sessionId/send-link  {email}  → reenvía el link
+// Reenvío manual del verifyUrl de una sesión existente al email indicado. Scopeado
+// al tenant (aislamiento). Transaccional/fail-open: si el SMTP falla, 200 con
+// emailSent:false (no es un error del operador). MUTACIÓN → canWrite.
+adminRouter.post(
+  "/tenants/:id/sessions/:sessionId/send-link",
+  canWrite,
+  async (req: Request, res: Response) => {
+    try {
+      const email =
+        typeof req.body?.email === "string" && req.body.email.trim()
+          ? req.body.email.trim()
+          : undefined;
+      if (!isValidEmail(email)) {
+        res.status(400).json({ error: "valid_email_required" });
+        return;
+      }
+      const session = await repos.sessions.getById(req.params.id, req.params.sessionId);
+      if (!session) {
+        res.status(404).json({ error: "session_not_found" });
+        return;
+      }
+      const verifyUrl = `${PUBLIC_BASE_URL}/verify/${session.linkToken}`;
+      const emailSent = isMailerConfigured()
+        ? await sendVerificationEmail(email!, verifyUrl)
+        : false;
+      await repos.auditLog.record({
+        tenantId: req.params.id,
+        sessionId: session.id,
+        actor: `admin:${req.adminOperator?.operatorId ?? "?"}`,
+        event: "admin.send_link",
+        detail: { email, emailSent },
+        ip: req.ip ?? null,
+      });
+      res.json({ sessionId: session.id, emailSent });
+    } catch (e) {
+      res.status(500).json({ error: "send_link_failed", detail: (e as Error).message });
     }
   }
 );

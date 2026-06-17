@@ -550,6 +550,11 @@ export interface CreateSessionRequest {
   assuranceRequired?: LoA;
   redirectUrl?: string;
   locale?: string;
+  /**
+   * Email opcional del solicitante. Si viene (y hay SMTP configurado), tras crear
+   * la sesión se le envía el verifyUrl por email nativo (transaccional, fail-open).
+   */
+  email?: string;
 }
 
 export interface CreateSessionResponse {

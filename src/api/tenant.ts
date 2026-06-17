@@ -15,6 +15,7 @@ import { repos } from "../db/repos";
 import { authenticateTenant } from "./auth";
 import { generateLinkToken } from "../lib/crypto";
 import { evidenceStore } from "../lib/evidenceStore";
+import { isMailerConfigured, isValidEmail, sendVerificationEmail } from "../lib/mailer";
 import type {
   CreateSessionResponse,
   DeleteSessionResponse,
@@ -23,7 +24,14 @@ import type {
   VerificationSession,
 } from "../types";
 
-const PUBLIC_BASE_URL = (process.env.TEKO_PUBLIC_URL || "http://localhost:4400").replace(/\/+$/, "");
+// Base pública del verifyUrl. Se prioriza PUBLIC_BASE_URL (el que setea el compose
+// del 34 con el dominio estable) y se cae a TEKO_PUBLIC_URL por compatibilidad. Sin
+// esta precedencia, el link emitido/enviado por email apuntaba a localhost.
+const PUBLIC_BASE_URL = (
+  process.env.PUBLIC_BASE_URL ||
+  process.env.TEKO_PUBLIC_URL ||
+  "http://localhost:4400"
+).replace(/\/+$/, "");
 
 function verificationUrl(token: string): string {
   return `${PUBLIC_BASE_URL}/verify/${token}`;
@@ -53,13 +61,25 @@ tenantRouter.post("/sessions", async (req: Request, res: Response) => {
     const body = req.body ?? {};
     const externalRef: string | undefined = body.externalRef;
 
+    // Email opcional del solicitante: si viene, se valida formato (fail-closed en
+    // input) y, tras crear la sesión, se le envía el verifyUrl (fail-open en envío).
+    const email: string | undefined =
+      typeof body.email === "string" && body.email.trim() ? body.email.trim() : undefined;
+    if (email && !isValidEmail(email)) {
+      res.status(400).json({ error: "invalid_email" });
+      return;
+    }
+
     // Idempotencia (§9): si ya existe (tenant, external_ref) devolvemos la misma sesión.
     if (externalRef) {
       const existing = await repos.sessions.findByExternalRef(tenant.id, externalRef);
       if (existing) {
+        const url = verificationUrl(existing.linkToken);
+        // Reenvío fail-open del link a quien lo pida de nuevo con email.
+        if (email && isMailerConfigured()) await sendVerificationEmail(email, url);
         const resp: CreateSessionResponse = {
           sessionId: existing.id,
-          verificationUrl: verificationUrl(existing.linkToken),
+          verificationUrl: url,
           expiresAt: existing.expiresAt,
         };
         res.status(200).json(resp);
@@ -92,9 +112,14 @@ tenantRouter.post("/sessions", async (req: Request, res: Response) => {
       ip: req.ip ?? null,
     });
 
+    const url = verificationUrl(linkToken);
+
+    // Envío del link por email (transaccional, fail-open): NUNCA rompe la creación.
+    if (email && isMailerConfigured()) await sendVerificationEmail(email, url);
+
     const resp: CreateSessionResponse = {
       sessionId: session.id,
-      verificationUrl: verificationUrl(linkToken),
+      verificationUrl: url,
       expiresAt: session.expiresAt,
     };
     res.status(201).json(resp);

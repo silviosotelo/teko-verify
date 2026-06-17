@@ -30,6 +30,17 @@ services:
       # Evidencia: alinear con el volumen teko-evidence (montado en /data/evidence).
       # Sin esto el default /data/teko/evidence cae en la capa efímera y se pierde en cada rebuild.
       TEKO_EVIDENCE_DIR: "/data/evidence"
+      # SMTP (Office365) para el envío nativo del link de verificación por email.
+      # Los VALORES (incl. SMTP_PASSWORD) viven SOLO en el .env junto al compose del
+      # server (NO se commitean): aquí sólo se referencian las vars. Si faltan, el
+      # mailer queda "no configurado" y el envío es no-op (fail-open).
+      SMTP_HOST: "${SMTP_HOST:-}"
+      SMTP_PORT: "${SMTP_PORT:-587}"
+      SMTP_SECURE: "${SMTP_SECURE:-false}"
+      SMTP_USER: "${SMTP_USER:-}"
+      SMTP_PASSWORD: "${SMTP_PASSWORD:-}"
+      SMTP_FROM_EMAIL: "${SMTP_FROM_EMAIL:-}"
+      SMTP_FROM_NAME: "${SMTP_FROM_NAME:-Teko Verify}"
     volumes:
       # Modelos ONNX montados desde el host (no se hornean en la imagen).
       - ./models:/app/models:ro
