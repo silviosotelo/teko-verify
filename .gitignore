@@ -12,3 +12,7 @@ coverage/
 .DS_Store
 __pycache__/
 ocr/.venv/
+
+# Credenciales locales de admin (NUNCA commitear)
+ADMIN_CREDENTIALS.local.txt
+*.local.txt

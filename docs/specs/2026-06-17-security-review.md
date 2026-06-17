@@ -14,7 +14,7 @@ la brecha principal pendiente: cabeceras de seguridad y fuga de stack traces.
 
 ## CRÍTICO
 
-### C1. Admin (login + dashboard) en el túnel público — MITIGACIÓN, NO IMPLEMENTADA (decisión del usuario)
+### C1. Admin (login + dashboard) en el túnel público — INTENTO 2026-06-17: bloqueado por permisos (ver Execution log)
 - **Hallazgo:** `/admin-ui` y `/admin/*` quedan accesibles desde Internet. El acceso
   depende de un único factor: usuario/contraseña de operador. Aunque el login tiene
   rate-limit estricto (ver A1), exponer la superficie admin de un sistema con PII
@@ -26,7 +26,7 @@ la brecha principal pendiente: cabeceras de seguridad y fuga de stack traces.
   IP-allowlist en Cloudflare. Cualquiera de las tres elimina la exposición sin tocar
   el flujo de captura (que sí debe ser público).
 
-### C2. Password bootstrap débil y conocido (`admin` / `TekoAdmin2026!`) — ROTAR (no se cambió)
+### C2. Password bootstrap débil y conocido (`admin` / `TekoAdmin2026!`) — RESUELTO 2026-06-17: operador fuerte nuevo creado (ver Execution log)
 - **Hallazgo:** la credencial bootstrap es débil y está documentada/compartida. Es,
   hoy, la única llave del admin público (combinado con C1 = riesgo real de takeover).
 - **Por qué NO se cambió:** es el único acceso; rotarla a ciegas desde aquí podía
@@ -134,3 +134,40 @@ la brecha principal pendiente: cabeceras de seguridad y fuga de stack traces.
   frameguard DENY solo en admin, handler de errores + 404 JSON sin stack.
 - `package.json`: +`helmet`.
 - `npx tsc --noEmit` limpio; 89/89 tests verdes.
+
+---
+
+## Execution log — 2026-06-17 (C2 hecho, C1 bloqueado)
+
+Ejecución conservadora de los dos críticos. No se tocó captura/OCR/pipeline ni el túnel.
+No se modificó código TS (sólo `.gitignore`), así que no hizo falta `tsc`.
+
+### C2 — Operador admin fuerte ✅ HECHO Y VERIFICADO
+- Se creó un operador **NUEVO** `informatica` (rol `owner`) en `admin_operators`.
+- Password de 240 bits (`crypto.randomBytes(30).toString('base64url')`) generada **dentro
+  del container** y hasheada **reusando la función real compilada**
+  `require('/app/dist/lib/crypto.js').hashPassword` (scrypt `scrypt$salt$hash`, keylen 64,
+  idéntica a `src/lib/crypto.ts`). Inserción vía el propio `require('/app/dist/db/pool.js').query`
+  (mismo pool que el login). Self-check `verifyPassword` OK antes de insertar.
+- El operador viejo `admin` (owner) **NO** fue modificado ni borrado → **cero lockout**.
+- **Verificado en vivo:** `POST https://teko.rohekawebservices.online/admin/login`
+  `{email:"informatica", password:<pw>}` → **HTTP 200** + token + `role=owner`.
+- Credenciales en `ADMIN_CREDENTIALS.local.txt` (git-ignored, NO commiteado).
+- **Next step usuario:** confirmar login y luego deshabilitar/rotar el `admin` débil
+  (instrucciones en el .txt). NUNCA dejar la tabla en 0 filas (bootstrap fail-closed).
+
+### C1 — Cloudflare Access sobre el admin ⛔ NO APLICADO (faltan permisos)
+- Paso 1 (gating del token): `GET /user/tokens/verify` → válido/activo; pero
+  `GET /accounts/{acct}/access/apps` → **HTTP 403** `Authentication error` (code 10000) y
+  `GET /accounts/{acct}/access/identity_providers` → **HTTP 403**.
+- Decisión conservadora (según plan): el token NO tiene permisos Access/Zero Trust (o no
+  hay org Zero Trust). **NO se forzó nada**, **NO se creó** ninguna Access App → **nada que
+  rollbackear**, estado de Cloudflare intacto.
+- Rutas públicas confirmadas SIN cambios y en vivo: `/health` 200, `/verify/<rnd>` 200,
+  `/admin-ui/` 200 (sigue sin gate, pendiente de proteger).
+- **Next step usuario:** (1) habilitar **Zero Trust** en la cuenta
+  `dd7511bcb58fb9387b3a5ea52ec3de2b`; (2) ampliar el token con **Access: Apps and Policies:
+  Edit** + **Access: Organizations, Identity Providers, and Groups: Edit**; (3) crear la
+  Access App cubriendo SOLO `/admin` y `/admin-ui`, política allow email
+  `informatica@santaclara.com.py` vía One-Time PIN; (4) verificar gate en `/admin-ui/` y que
+  `/health` + `/verify/*` sigan públicos.
