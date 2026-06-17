@@ -11,7 +11,8 @@ Loop autopaceado: trabajar de arriba a abajo; el deploy del subdominio es el pas
    - **[✓ 0ab5367]** Split apellidos pegados desde MRZ (CI-gated, reconstruye `<`→C/K).
    - **[✓ 0ab5367]** Persistir imagen cruda (`doc_front_raw`/`doc_back_raw`, migración 0005).
    - **[diferido]** Calibrar umbrales match/liveness + ensemble PAD anti-spoof → necesitan eval set + GPU (esfuerzo grande).
-   - **[diferido]** Orientación 180 (no apareció en datos) · PDF pág2=dorso (no hay forma byte-segura de distinguir 2-págs vs dorso-propio).
+   - **[✓ a587bdf]** Orientación 0/90/180/270 (cédula cabeza-abajo soportada). PDF pág2=dorso [diferido: no byte-seguro].
+   - **[✓]** Chequeo de regresión post-cambios: las 3 cédulas siguen OK en el dominio live (89 tests).
    - **[gated]** Purga PII de prueba (`/tmp/batch` = 57 cédulas reales de clientes) → recomendado; decisión del usuario (¿se usan para entrenar el ML?).
 
 ## Decisiones pendientes del usuario (gates)
