@@ -30,6 +30,8 @@ import type { Engine } from "./engine";
 import type { Executor } from "./db/executor";
 import sharp from "sharp";
 import type {
+  AmlInput,
+  AmlResult,
   DocumentResult,
   EvidenceCropType,
   EvidenceType,
@@ -106,6 +108,11 @@ export interface PipelineModules {
   document(front: Buffer, back: Buffer): Promise<DocumentResult>;
   /** Embedding 512D de una imagen, o null si no hay cara. (engine.embedBestFace) */
   embed(image: Buffer): Promise<Float32Array | null>;
+  /**
+   * Screening AML/PEP/sanciones contra el dataset LOCAL (P1 #1). Opcional: sólo se
+   * invoca si el workflow tiene `aml.required`. `opts.threshold` viene del workflow.
+   */
+  aml?(input: AmlInput, opts?: { threshold?: number }): Promise<AmlResult>;
 }
 
 /**
@@ -136,10 +143,10 @@ export interface PipelineRepos {
       input: {
         tenantId: string;
         sessionId: string;
-        type: "quality" | "liveness" | "document" | "match";
+        type: "quality" | "liveness" | "document" | "match" | "aml";
         score?: number | null;
         passed: boolean;
-        detail: QualityResult | LivenessResult | DocumentResult | MatchResult;
+        detail: QualityResult | LivenessResult | DocumentResult | MatchResult | AmlResult;
       },
       exec: Executor
     ): Promise<unknown>;
@@ -150,9 +157,9 @@ export interface PipelineRepos {
       exec?: Executor
     ): Promise<
       Array<{
-        type: "quality" | "liveness" | "document" | "match";
+        type: "quality" | "liveness" | "document" | "match" | "aml";
         passed: boolean;
-        detail: QualityResult | LivenessResult | DocumentResult | MatchResult;
+        detail: QualityResult | LivenessResult | DocumentResult | MatchResult | AmlResult;
       }>
     >;
     /** Borra los checks de una sesión (idempotencia de /preview). */
@@ -266,6 +273,62 @@ function needsMatch(policy: TenantPolicy): boolean {
 }
 function needsLiveness(policy: TenantPolicy): boolean {
   return LOA_RANK[policy.assuranceRequired] >= LOA_RANK.L3;
+}
+
+/**
+ * Construye el input del screening AML desde el documento. Fuente autoritativa: el
+ * OCR estructurado (`extracted.titular`); fallback al MRZ del dorso. Sólo nombre +
+ * fecha de nacimiento + nacionalidad (el mínimo necesario para el cruce de listas).
+ */
+function amlInputFrom(document: DocumentResult): AmlInput {
+  const t = document.extracted?.titular;
+  const m = document.mrz;
+  return {
+    nombres: (t?.nombres || m?.givenNames || "").trim(),
+    apellidos: (t?.apellidos || m?.surname || "").trim(),
+    fechaNac: (t?.fechaNacimiento || m?.dateOfBirth || "").trim() || undefined,
+    nacionalidad: (t?.nacionalidad || m?.nationality || "").trim() || undefined,
+  };
+}
+
+/**
+ * Corre el screening AML SI el workflow de la sesión lo exige (`aml.required`).
+ * Devuelve undefined cuando el check no aplica. FAIL-CLOSED (seguridad): si el
+ * módulo no está cableado o lanza, NO se silencia como "clear" — se devuelve un
+ * resultado `potential_match` con `error`, de modo que un workflow con
+ * `onMatch:review` igualmente rutee a revisión humana. NO es rechazo duro.
+ */
+async function runAml(
+  deps: PipelineDeps,
+  session: VerificationSession,
+  document: DocumentResult
+): Promise<AmlResult | undefined> {
+  const cfg = session.workflowSnapshot?.aml;
+  if (!cfg?.required) return undefined;
+  const input = amlInputFrom(document);
+  const failClosed = (error: string): AmlResult => ({
+    query: {
+      nombres: input.nombres,
+      apellidos: input.apellidos,
+      fechaNac: input.fechaNac,
+      nacionalidad: input.nacionalidad,
+      normalized: "",
+    },
+    hits: [],
+    topScore: 0,
+    decision: "potential_match",
+    threshold: cfg.threshold ?? 0,
+    provider: "unavailable",
+    datasetVersion: null,
+    passed: false,
+    error,
+  });
+  if (!deps.modules.aml) return failClosed("aml_provider_unavailable");
+  try {
+    return await deps.modules.aml(input, { threshold: cfg.threshold });
+  } catch (e) {
+    return failClosed(e instanceof Error ? e.message : String(e));
+  }
 }
 
 function nowIso(): string {
@@ -435,8 +498,13 @@ export async function processSession(
       }
     }
 
+    // === 4.bis) AML SCREENING (señal/score, NO rechazo duro) — P1 #1 ====== //
+    // Cruza la identidad extraída contra el dataset LOCAL de sanciones/PEP. No
+    // corta el flujo: el ruteo a revisión lo decide el workflow (aml.onMatch).
+    const aml = await runAml(deps, session, document);
+
     // === 5) DECISION (fusión + LoA) ======================================= //
-    const checks: PipelineChecks = { quality, document, match: matchRes, liveness };
+    const checks: PipelineChecks = { quality, document, match: matchRes, liveness, aml };
     const verdict = decideVerdict(checks, policy);
 
     // Persistencia atómica de checks + (si verified) identity + evidence + audit.
@@ -462,6 +530,7 @@ export async function processSession(
       shouldRouteToReview(session.workflowSnapshot, {
         match: matchRes?.cosine,
         liveness: liveness?.score,
+        amlDecision: aml?.decision,
       })
     ) {
       return await goToReview(deps, session, result, { checks, images });
@@ -747,7 +816,12 @@ export async function computeChecks(
       }
     }
 
-    const checks: PipelineChecks = { quality, document, match: matchRes, liveness };
+    // AML SCREENING (señal/score, NO rechazo duro) — P1 #1. Corre si el workflow lo
+    // exige; usa la identidad extraída por `document` (aunque document no haya pasado,
+    // se intenta el cruce con lo que se haya extraído). Ver runAml (fail-closed).
+    const aml = await runAml(deps, session, document);
+
+    const checks: PipelineChecks = { quality, document, match: matchRes, liveness, aml };
 
     // Persistencia: checks (reemplazando previos) + evidencia + recortes → estado 'review'.
     await deps.withTransaction(async (tx) => {
@@ -807,6 +881,7 @@ export async function finalizeFromChecks(
     const document = byType.get("document")?.detail as DocumentResult | undefined;
     const match = byType.get("match")?.detail as MatchResult | undefined;
     const liveness = byType.get("liveness")?.detail as LivenessResult | undefined;
+    const aml = byType.get("aml")?.detail as AmlResult | undefined;
     if (!quality || !document) {
       // Sin checks base no se puede decidir → fail-closed (rechazo).
       const result: SessionResult = { decision: "rejected", loa: "L0", reasons: ["missing_checks"] };
@@ -826,7 +901,7 @@ export async function finalizeFromChecks(
       return { state: "rejected", result, reasons: result.reasons };
     }
 
-    const checks: PipelineChecks = { quality, document, match, liveness };
+    const checks: PipelineChecks = { quality, document, match, liveness, aml };
     const verdict = decideVerdict(checks, policy);
     const result: SessionResult = {
       decision: verdict.verdict,
@@ -842,6 +917,7 @@ export async function finalizeFromChecks(
       shouldRouteToReview(session.workflowSnapshot, {
         match: match?.cosine,
         liveness: liveness?.score,
+        amlDecision: aml?.decision,
       })
     ) {
       return await goToReview(deps, session, result, {});
@@ -966,6 +1042,12 @@ async function persistAllChecks(
   if (checks.match) {
     await deps.repos.checks.create(
       { tenantId, sessionId, type: "match", score: checks.match.cosine, passed: checks.match.passed, detail: checks.match },
+      tx
+    );
+  }
+  if (checks.aml) {
+    await deps.repos.checks.create(
+      { tenantId, sessionId, type: "aml", score: checks.aml.topScore, passed: checks.aml.passed, detail: checks.aml },
       tx
     );
   }

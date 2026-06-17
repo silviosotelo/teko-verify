@@ -54,7 +54,7 @@ export type SessionState =
 export type DecisionVerdict = "verified" | "rejected" | "needs_recapture";
 
 /** Tipo de check granular auditable — §5 (verification_checks.tipo). */
-export type CheckType = "quality" | "liveness" | "document" | "match";
+export type CheckType = "quality" | "liveness" | "document" | "match" | "aml";
 
 /**
  * Tipo de evidencia almacenada — §5 (evidence.tipo).
@@ -368,6 +368,91 @@ export interface PipelineChecks {
   document: DocumentResult;
   match?: MatchResult;
   liveness?: LivenessResult;
+  /**
+   * Screening AML/PEP/sanciones (P1 #1). NO lo consume `decision()` (no es rechazo
+   * duro): es señal/score. El ruteo a revisión humana lo decide el workflow vía
+   * `aml.onMatch`. Sólo corre cuando el workflow tiene `aml.required`.
+   */
+  aml?: AmlResult;
+}
+
+// ============================================================================ //
+// 2.bis MÓDULO AML — screening de sanciones/PEP por matching LOCAL (P1 #1)
+// ============================================================================ //
+
+/** Identidad mínima que se cruza contra las listas (extraída del documento). */
+export interface AmlInput {
+  nombres: string;
+  apellidos: string;
+  /** ISO 8601 (YYYY-MM-DD) o vacío si no se pudo extraer. */
+  fechaNac?: string;
+  nacionalidad?: string;
+}
+
+/**
+ * Entidad del dataset LOCAL de sanciones/PEP (fila de `aml_entities`). Fuente
+ * swappable (OpenSanctions u otra) — ver `AmlProvider`.
+ */
+export interface AmlEntity {
+  entityId: string;
+  /** Nombre canónico de la entidad. */
+  name: string;
+  /** Nombres alternativos/alias (crudos). */
+  aliases: string[];
+  /** Etiquetas de lista legibles: OFAC, UN, EU, UK, PEP, ... */
+  lists: string[];
+  /** Topics de la fuente: sanction, role.pep, crime, ... */
+  topics: string[];
+  /** Países asociados (ISO alpha-2 o nombre). */
+  countries: string[];
+  /** Fecha/año de nacimiento (puede ser parcial: "1965" o "1965-04-12"). */
+  birthDate: string | null;
+  schema?: string | null;
+}
+
+/** Un cruce individual contra una entidad de la lista. */
+export interface AmlHit {
+  entityId: string;
+  name: string;
+  /** Listas a las que pertenece (OFAC/UN/EU/PEP...). */
+  lists: string[];
+  /** Similitud 0..1 (fuzzy de nombre + boosts por dob/nacionalidad). */
+  score: number;
+  /** Qué campos contribuyeron al match: 'name' | 'alias' | 'dob' | 'nationality'. */
+  matchedFields: string[];
+  topics?: string[];
+  countries?: string[];
+}
+
+/** Decisión del screening (NO auto-rechaza; es señal). */
+export type AmlDecision = "clear" | "potential_match";
+
+/** Resultado del módulo AML — se persiste como check `aml` (detail JSONB). */
+export interface AmlResult {
+  /** Consulta normalizada (auditable; es PII → se queda on-prem en la propia DB). */
+  query: {
+    nombres: string;
+    apellidos: string;
+    fechaNac?: string;
+    nacionalidad?: string;
+    /** Nombre completo normalizado usado para el match. */
+    normalized: string;
+  };
+  /** Hits ordenados por score desc (top primero). */
+  hits: AmlHit[];
+  /** Score del mejor hit (0 si no hay hits). */
+  topScore: number;
+  decision: AmlDecision;
+  /** Umbral aplicado (auditable). */
+  threshold: number;
+  /** Proveedor que resolvió el screening (p.ej. "local-opensanctions"). */
+  provider: string;
+  /** Versión del dataset cargado (informativo). */
+  datasetVersion?: string | null;
+  /** true = clear (informativo para la columna `passed` del check; NO afecta decision()). */
+  passed: boolean;
+  /** Si el screening no pudo correr (fail-closed → decision potential_match). */
+  error?: string;
 }
 
 // ============================================================================ //
@@ -424,6 +509,13 @@ export interface WorkflowDefinition {
   liveness?: { required: boolean; mode?: "active" | "passive"; threshold?: number };
   match?: { required: boolean; threshold?: number };
   quality?: { glassesMaxPct?: number };
+  /**
+   * Screening AML/PEP/sanciones (P1 #1). `required` = el check corre. `threshold`
+   * = umbral de similitud para potential_match. `onMatch` = qué hacer ante un
+   * potential_match: 'review' rutea a la cola de revisión humana; 'flag' sólo
+   * persiste el hallazgo (sin frenar la auto-decisión). NO es rechazo duro.
+   */
+  aml?: { required: boolean; threshold?: number; onMatch?: "review" | "flag" };
   review?: {
     mode: ReviewMode;
     /** Para on_borderline: bandas de score [min,max] que disparan revisión humana. */
@@ -538,7 +630,8 @@ export type CheckDetail =
   | QualityResult
   | LivenessResult
   | DocumentResult
-  | MatchResult;
+  | MatchResult
+  | AmlResult;
 
 /** verification_checks — resultado granular por módulo, auditable (§5). */
 export interface VerificationCheck {

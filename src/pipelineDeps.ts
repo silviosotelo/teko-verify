@@ -14,6 +14,8 @@ import { documentModule, defaultDocumentDeps, upscaleForOcr } from "./modules/do
 import { evidenceStore } from "./lib/evidenceStore";
 import { webhookSender } from "./lib/webhook";
 import { OCR_SIDECAR_URL } from "./config";
+import { screen as amlScreen } from "./modules/aml";
+import { createLocalAmlProvider } from "./modules/amlProvider";
 import type { DocCropper, PipelineDeps, PipelineModules } from "./pipeline";
 
 /**
@@ -60,6 +62,12 @@ async function preprocessFrontForOcr(front: Buffer): Promise<Buffer> {
   return upscaleForOcr(front, 1600);
 }
 
+/** Provider local del screening AML, respaldado por la tabla `aml_entities`. */
+const localAmlProvider = createLocalAmlProvider({
+  candidates: (input, limit) => repos.amlEntities.candidates(input, limit),
+  datasetVersion: () => repos.amlEntities.datasetVersion(),
+});
+
 /** Adaptador de los módulos reales a la interfaz `PipelineModules` del pipeline. */
 const modules: PipelineModules = {
   quality: (image, eng, glassesMax) => qualityModule.run(image, eng, glassesMax),
@@ -73,6 +81,10 @@ const modules: PipelineModules = {
     const r = await engine.embedBestFace(image);
     return r ? r.embedding : null;
   },
+  // Screening AML/PEP/sanciones contra el dataset LOCAL (`aml_entities`). On-prem:
+  // el nombre del titular sólo viaja a la propia DB del 34, nunca a un tercero.
+  aml: (input, opts) =>
+    amlScreen(input, localAmlProvider, { threshold: opts?.threshold }),
 };
 
 /** Dependencias reales listas para inyectar en processSession(). */

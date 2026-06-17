@@ -50,6 +50,7 @@ import { useTenant } from '@/teko/TenantContext'
 import { LoaBadge, PassPill } from '@/teko/badges'
 import { fmtDate, fmtScore } from '@/teko/format'
 import type {
+    AmlResult,
     CheckType,
     DeviceIpAnalysis,
     EvidenceType,
@@ -367,8 +368,9 @@ function LivenessVideoCard({
 // Fila de módulos con checks (Overview · ID Verification · …)
 // ----------------------------------------------------------------------------
 
-// Pestañas navegables del detalle (P0 #3 añade Eventos + Device & IP funcionales).
-type TabKey = 'overview' | 'events' | 'device'
+// Pestañas navegables del detalle (P0 #3 añade Eventos + Device & IP funcionales;
+// P1 #1 añade AML / Sanciones).
+type TabKey = 'overview' | 'events' | 'device' | 'aml'
 
 type ModuleDef = {
     key: string
@@ -386,6 +388,7 @@ const MODULE_ROW: ModuleDef[] = [
     { key: 'liveness', label: 'Liveness', type: 'liveness' },
     { key: 'match', label: 'Face Match', type: 'match' },
     { key: 'quality', label: 'Calidad', type: 'quality' },
+    { key: 'aml', label: 'AML / Sanciones', type: null, tab: 'aml' },
     { key: 'events', label: 'Eventos', type: null, tab: 'events' },
     { key: 'device', label: 'Device & IP', type: null, tab: 'device' },
 ]
@@ -408,7 +411,9 @@ function ModuleTab({
                 ? TbClock
                 : def.tab === 'device'
                   ? TbDeviceMobile
-                  : TbShieldCheck
+                  : def.tab === 'aml'
+                    ? TbGavel
+                    : TbShieldCheck
         return (
             <button
                 type="button"
@@ -775,6 +780,169 @@ function DeviceIpPanel({ analysis }: { analysis: DeviceIpAnalysis | null }) {
 }
 
 // ----------------------------------------------------------------------------
+// Panel AML / Sanciones (P1 #1)
+// ----------------------------------------------------------------------------
+
+/** Color del badge por etiqueta de lista (OFAC/UN/EU/PEP...). */
+function listBadgeCls(list: string): string {
+    const k = list.toUpperCase()
+    if (k.includes('PEP'))
+        return 'bg-violet-50 text-violet-700 ring-violet-200 dark:bg-violet-500/10 dark:text-violet-300'
+    if (k.includes('OFAC') || k.includes('US'))
+        return 'bg-blue-50 text-blue-700 ring-blue-200 dark:bg-blue-500/10 dark:text-blue-300'
+    if (k.includes('UN'))
+        return 'bg-sky-50 text-sky-700 ring-sky-200 dark:bg-sky-500/10 dark:text-sky-300'
+    if (k.includes('EU'))
+        return 'bg-amber-50 text-amber-700 ring-amber-200 dark:bg-amber-500/10 dark:text-amber-300'
+    return 'bg-gray-100 text-gray-600 ring-gray-200 dark:bg-gray-700 dark:text-gray-300'
+}
+
+/**
+ * Panel "AML / Sanciones": resultado del screening LOCAL (clear / potential match),
+ * lista de hits (nombre, listas con badges, score, campos que matchearon). On-prem:
+ * el cruce se hizo contra el dataset local; el nombre nunca salió a un tercero.
+ */
+function AmlPanel({ aml }: { aml: AmlResult | undefined }) {
+    if (!aml) {
+        return (
+            <Card>
+                <p className="text-sm text-gray-400">
+                    El screening AML no corrió en esta sesión (el workflow no tiene
+                    el check <span className="font-mono">aml</span> activo).
+                </p>
+            </Card>
+        )
+    }
+    const match = aml.decision === 'potential_match'
+    return (
+        <div className="space-y-4">
+            <Card>
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                        <h6 className="text-sm font-semibold heading-text">
+                            Screening AML / Sanciones / PEP
+                        </h6>
+                        <p className="mt-1 text-xs text-gray-400">
+                            Cruce LOCAL (on-prem) contra{' '}
+                            {aml.provider || 'dataset local'}
+                            {aml.datasetVersion
+                                ? ` · v${aml.datasetVersion}`
+                                : ''}
+                            . El nombre del titular no se envió a terceros.
+                        </p>
+                    </div>
+                    <span
+                        className={`inline-flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-bold uppercase tracking-wide ring-1 ${
+                            match
+                                ? 'bg-red-50 text-red-700 ring-red-200 dark:bg-red-500/10 dark:text-red-300 dark:ring-red-500/30'
+                                : 'bg-emerald-50 text-emerald-700 ring-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-300 dark:ring-emerald-500/30'
+                        }`}
+                    >
+                        {match ? (
+                            <TbAlertTriangle className="text-sm" />
+                        ) : (
+                            <TbCircleCheck className="text-sm" />
+                        )}
+                        {match ? 'COINCIDENCIA POTENCIAL' : 'SIN COINCIDENCIAS'}
+                    </span>
+                </div>
+                <dl className="mt-4 grid grid-cols-2 gap-x-8 gap-y-2 text-sm sm:grid-cols-4">
+                    <div>
+                        <dt className="text-gray-400">Top score</dt>
+                        <dd className="font-mono font-semibold heading-text">
+                            {aml.topScore.toFixed(3)}
+                        </dd>
+                    </div>
+                    <div>
+                        <dt className="text-gray-400">Umbral</dt>
+                        <dd className="font-mono font-semibold heading-text">
+                            {aml.threshold.toFixed(2)}
+                        </dd>
+                    </div>
+                    <div>
+                        <dt className="text-gray-400">Hits</dt>
+                        <dd className="font-semibold heading-text">
+                            {aml.hits.length}
+                        </dd>
+                    </div>
+                    <div>
+                        <dt className="text-gray-400">Consulta</dt>
+                        <dd
+                            className="truncate font-medium heading-text"
+                            title={aml.query.normalized}
+                        >
+                            {aml.query.normalized || '—'}
+                        </dd>
+                    </div>
+                </dl>
+                {aml.error && (
+                    <div className="mt-3 rounded-lg bg-red-50 px-3 py-2 text-xs text-red-700 dark:bg-red-500/10 dark:text-red-300">
+                        Screening no disponible ({aml.error}). Por seguridad
+                        (fail-closed) se trató como coincidencia potencial.
+                    </div>
+                )}
+            </Card>
+
+            {aml.hits.length > 0 && (
+                <Card>
+                    <h6 className="mb-3 text-sm font-semibold heading-text">
+                        Coincidencias
+                    </h6>
+                    <ul className="space-y-3">
+                        {aml.hits.map((h) => (
+                            <li
+                                key={h.entityId}
+                                className="rounded-lg border border-gray-200 p-3 dark:border-gray-700"
+                            >
+                                <div className="flex flex-wrap items-center justify-between gap-2">
+                                    <span className="text-sm font-semibold heading-text">
+                                        {h.name}
+                                    </span>
+                                    <span className="font-mono text-xs font-semibold text-gray-500">
+                                        score {h.score.toFixed(3)}
+                                    </span>
+                                </div>
+                                <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                                    {h.lists.map((l) => (
+                                        <span
+                                            key={l}
+                                            className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-bold uppercase ring-1 ${listBadgeCls(l)}`}
+                                        >
+                                            {l}
+                                        </span>
+                                    ))}
+                                    {h.matchedFields.map((f) => (
+                                        <span
+                                            key={f}
+                                            className="inline-flex items-center rounded bg-gray-100 px-1.5 py-0.5 text-[10px] font-medium text-gray-500 dark:bg-gray-700 dark:text-gray-300"
+                                        >
+                                            {f}
+                                        </span>
+                                    ))}
+                                </div>
+                                {(h.countries?.length || h.entityId) && (
+                                    <div className="mt-1.5 flex flex-wrap items-center gap-2 text-[11px] text-gray-400">
+                                        {h.countries &&
+                                            h.countries.length > 0 && (
+                                                <span>
+                                                    {h.countries.join(', ')}
+                                                </span>
+                                            )}
+                                        <span className="font-mono">
+                                            {h.entityId}
+                                        </span>
+                                    </div>
+                                )}
+                            </li>
+                        ))}
+                    </ul>
+                </Card>
+            )}
+        </div>
+    )
+}
+
+// ----------------------------------------------------------------------------
 // Campo editable de "Datos personales"
 // ----------------------------------------------------------------------------
 
@@ -960,6 +1128,7 @@ const SessionDetailView = () => {
 
     const checkByType = (t: CheckType) => data.checks.find((c) => c.type === t)
     const docCheck = checkByType('document')
+    const amlResult = checkByType('aml')?.detail as AmlResult | undefined
     const reasons = data.result?.reasons ?? []
     const fullName =
         [form.firstName, form.lastName].filter(Boolean).join(' ').trim() ||
@@ -1082,7 +1251,15 @@ const SessionDetailView = () => {
                                                 (deviceIp?.signals.length ??
                                                     0) > 0,
                                         }
-                                      : def
+                                      : def.tab === 'aml'
+                                        ? {
+                                              ...def,
+                                              badge: amlResult?.hits.length ?? 0,
+                                              danger:
+                                                  amlResult?.decision ===
+                                                  'potential_match',
+                                          }
+                                        : def
                             return (
                                 <ModuleTab
                                     key={def.key}
@@ -1169,6 +1346,9 @@ const SessionDetailView = () => {
 
             {/* ---------- Pestaña Device & IP ---------- */}
             {activeTab === 'device' && <DeviceIpPanel analysis={deviceIp} />}
+
+            {/* ---------- Pestaña AML / Sanciones ---------- */}
+            {activeTab === 'aml' && <AmlPanel aml={amlResult} />}
 
             {/* ---------- Pestaña Overview (contenido por defecto) ---------- */}
             {activeTab === 'overview' && (

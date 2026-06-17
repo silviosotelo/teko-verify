@@ -119,6 +119,16 @@ export const LIVENESS_THRESHOLD = parseFloat(
 /** Máximo porcentaje de anteojos tolerado en la selfie (gating de calidad). */
 export const GLASSES_MAX = parseFloat(process.env.GLASSES_MAX || "0.50");
 
+/**
+ * Umbral de similitud (0..1) para que el screening AML marque `potential_match`
+ * (P1 #1). Calibrable por env; el workflow puede sobreescribirlo por sesión
+ * (def.aml.threshold). Default conservador (0.85): prioriza precisión razonable
+ * sin inundar la cola de revisión. Es un PoC con dataset/umbral swappables.
+ */
+export const AML_MATCH_THRESHOLD = parseFloat(
+  process.env.AML_MATCH_THRESHOLD || "0.85"
+);
+
 // ---------------------------------------------------------------------------
 // Contrato heredado del engine de v9 — NO MODIFICAR VALORES
 // ---------------------------------------------------------------------------

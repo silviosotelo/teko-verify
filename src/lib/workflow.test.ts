@@ -96,4 +96,26 @@ describe("shouldRouteToReview — política de revisión", () => {
     expect(shouldRouteToReview(def, { liveness: 0.6 })).toBe(true);
     expect(shouldRouteToReview(def, { liveness: 0.95 })).toBe(false);
   });
+
+  describe("ruteo por AML (P1 #1)", () => {
+    it("aml.onMatch:'review' + potential_match → revisión, aunque review.mode sea auto", () => {
+      const def: WorkflowDefinition = {
+        aml: { required: true, onMatch: "review" },
+        review: { mode: "auto" },
+      };
+      expect(shouldRouteToReview(def, { amlDecision: "potential_match" })).toBe(true);
+    });
+    it("aml.onMatch:'review' + clear → no rutea (por AML)", () => {
+      const def: WorkflowDefinition = { aml: { required: true, onMatch: "review" } };
+      expect(shouldRouteToReview(def, { amlDecision: "clear" })).toBe(false);
+    });
+    it("aml.onMatch:'flag' + potential_match → NO rutea (sólo persiste el hit)", () => {
+      const def: WorkflowDefinition = { aml: { required: true, onMatch: "flag" } };
+      expect(shouldRouteToReview(def, { amlDecision: "potential_match" })).toBe(false);
+    });
+    it("aml.required:false → ignora amlDecision", () => {
+      const def: WorkflowDefinition = { aml: { required: false, onMatch: "review" } };
+      expect(shouldRouteToReview(def, { amlDecision: "potential_match" })).toBe(false);
+    });
+  });
 });

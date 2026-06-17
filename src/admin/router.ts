@@ -969,6 +969,22 @@ adminRouter.post("/test-verify", canWrite, async (req: Request, res: Response) =
       return;
     }
 
+    // Screening AML opcional (P1 #1): si `aml:true`, se adjunta un workflowSnapshot
+    // EFÍMERO a la sesión de prueba que activa el check `aml`, de modo que
+    // computeChecks lo corra y lo persista (visible luego en el detalle de sesión).
+    // onMatch por defecto 'flag' (no fuerza revisión en la prueba); 'review' lo rutea.
+    const amlOn = req.body?.aml === true || req.body?.aml === "true";
+    const amlOnMatch = req.body?.amlOnMatch === "review" ? "review" : "flag";
+    const workflowSnapshot = amlOn
+      ? {
+          document: { required: true },
+          ...(assurance !== "L1" ? { match: { required: true } } : {}),
+          quality: {},
+          aml: { required: true, onMatch: amlOnMatch as "review" | "flag" },
+          review: { mode: "auto" as const },
+        }
+      : null;
+
     // Sesión efímera REAL (con external_ref "admin-test:*" para distinguirla) al nivel
     // elegido: computeChecks persiste checks+evidencia+recortes y la deja en 'review'.
     const externalRef = `admin-test:${Date.now()}`;
@@ -992,7 +1008,7 @@ adminRouter.post("/test-verify", canWrite, async (req: Request, res: Response) =
     });
 
     const out = await computeChecks(
-      { ...created, state: "processing" },
+      { ...created, state: "processing", workflowSnapshot },
       tenant.policies, // computeChecks aplica effectivePolicy(session) → usa `assurance`
       { selfie, docFront: front, docBack: back },
       realPipelineDeps
@@ -1013,6 +1029,9 @@ adminRouter.post("/test-verify", canWrite, async (req: Request, res: Response) =
       checksOut.push({ type: "document", passed: c.document.passed, score: c.document.ocr.confidence });
       if (c.match) {
         checksOut.push({ type: "match", passed: c.match.passed, score: c.match.cosine });
+      }
+      if (c.aml) {
+        checksOut.push({ type: "aml", passed: c.aml.passed, score: c.aml.topScore });
       }
       extracted = c.document.extracted;
       match = c.match;
@@ -1049,6 +1068,7 @@ adminRouter.post("/test-verify", canWrite, async (req: Request, res: Response) =
       checks: checksOut,
       extracted,
       match: match ? { cosine: match.cosine, passed: match.passed } : null,
+      aml: out.checks?.aml ?? null,
       decision: { state: decisionState, loa, reasons },
       photos,
     });

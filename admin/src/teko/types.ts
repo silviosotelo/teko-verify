@@ -18,7 +18,38 @@ export type SessionState =
 export type LoA = 'L0' | 'L1' | 'L2' | 'L3' | 'L4'
 export type TenantStatus = 'active' | 'suspended' | 'disabled'
 export type ApiKeyStatus = 'active' | 'revoked'
-export type CheckType = 'quality' | 'liveness' | 'document' | 'match'
+export type CheckType = 'quality' | 'liveness' | 'document' | 'match' | 'aml'
+
+// ---- AML / Sanciones / PEP (P1 #1) ----
+export type AmlDecision = 'clear' | 'potential_match'
+
+export interface AmlHit {
+    entityId: string
+    name: string
+    lists: string[]
+    score: number
+    matchedFields: string[]
+    topics?: string[]
+    countries?: string[]
+}
+
+export interface AmlResult {
+    query: {
+        nombres: string
+        apellidos: string
+        fechaNac?: string
+        nacionalidad?: string
+        normalized: string
+    }
+    hits: AmlHit[]
+    topScore: number
+    decision: AmlDecision
+    threshold: number
+    provider: string
+    datasetVersion?: string | null
+    passed: boolean
+    error?: string
+}
 export type EvidenceType =
     | 'selfie'
     | 'doc_front'
@@ -213,6 +244,7 @@ export interface WorkflowDefinition {
     liveness?: { required: boolean; mode?: 'active' | 'passive'; threshold?: number }
     match?: { required: boolean; threshold?: number }
     quality?: { glassesMaxPct?: number }
+    aml?: { required: boolean; threshold?: number; onMatch?: 'review' | 'flag' }
     review?: {
         mode: ReviewMode
         borderlineBand?: {

@@ -93,16 +93,29 @@ function inBand(v: number | undefined, min?: number, max?: number): boolean {
 
 /**
  * ¿La sesión debe ir a la COLA DE REVISIÓN HUMANA (in_review) en vez de auto-decidir?
+ *   - AML potential_match con `aml.onMatch:"review"` → SIEMPRE (independiente del
+ *     review.mode): un hit en lista de sanciones/PEP exige ojo humano (P1 #1).
  *   - review.mode "always"        → siempre.
  *   - review.mode "on_borderline" → si match o liveness caen en su banda dudosa.
  *   - "auto" / sin def / sin review → nunca (auto-decisión, comportamiento actual).
- * `scores` son los scores computados (cosine de match, score de liveness).
+ * `scores` son los scores computados (cosine de match, score de liveness) + la
+ * decisión del screening AML (clear|potential_match).
  */
 export function shouldRouteToReview(
   def: WorkflowDefinition | null | undefined,
-  scores: { match?: number; liveness?: number }
+  scores: { match?: number; liveness?: number; amlDecision?: "clear" | "potential_match" }
 ): boolean {
-  const review = def?.review;
+  if (!def) return false;
+  // Ruteo por AML: un potential_match con onMatch:'review' va a revisión SIEMPRE,
+  // aunque el review.mode sea 'auto'. Con 'flag' (default) sólo se persiste el hit.
+  if (
+    def.aml?.required &&
+    def.aml.onMatch === "review" &&
+    scores.amlDecision === "potential_match"
+  ) {
+    return true;
+  }
+  const review = def.review;
   if (!review) return false;
   if (review.mode === "always") return true;
   if (review.mode === "on_borderline") {
