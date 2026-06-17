@@ -492,7 +492,25 @@ captureRouter.post("/:token/proof-of-address", async (req: Request, res: Respons
     const raw = decodeBase64Image(req.body?.image, { allowPdf: true });
     // Rasteriza PDF→PNG si hace falta (passthrough para JPEG/PNG) antes de guardar.
     const image = await ensureRasterImage(raw);
-    await evidenceStore.save(session.tenantId, session.id, "proof_of_address", image);
+    const saved = await evidenceStore.save(session.tenantId, session.id, "proof_of_address", image);
+    // Fila de evidencia (mismo patrón que liveness-video): el archivo en disco NO basta,
+    // el admin lista/muestra la miniatura POR FILA `evidence`. ADITIVO + FAIL-OPEN: un
+    // fallo de registro NO rompe la subida ya exitosa. Idempotente: si ya hay una fila
+    // 'proof_of_address' para la sesión, NO duplicamos (re-subir pisa el archivo en disco).
+    try {
+      const existing = await repos.evidence.listBySession(session.tenantId, session.id);
+      if (!existing.some((e) => e.type === "proof_of_address")) {
+        await repos.evidence.create({
+          tenantId: session.tenantId,
+          sessionId: session.id,
+          type: "proof_of_address",
+          storagePath: saved.storagePath,
+          sha256: saved.sha256,
+        });
+      }
+    } catch {
+      // Fail-open: el registro de la fila es aditivo; nunca debe romper la captura.
+    }
     await recordEvent(req, session, "proof_of_address.captured", { bytes: raw.length });
     const resp: UploadResponse = { ok: true, state: "capturing" };
     res.json(resp);
