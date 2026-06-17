@@ -1,0 +1,23 @@
+{
+  "name": "@teko/verify-sdk",
+  "version": "0.1.0",
+  "description": "Server-side SDK for Teko Verify (KYC / identity verification). Zero runtime dependencies — uses Node built-ins (crypto, fetch).",
+  "license": "UNLICENSED",
+  "type": "commonjs",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": ["dist", "README.md"],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.4.0",
+    "vitest": "^2.1.8"
+  }
+}
