@@ -714,6 +714,59 @@ export interface AppResponse {
   updatedAt: string;
 }
 
+// ---- Questionnaires (formularios custom por workflow) — P2 --------------- //
+
+/** Tipo de campo de una pregunta de cuestionario. */
+export type QuestionnaireQuestionType =
+  | "text"
+  | "select"
+  | "multiselect"
+  | "checkbox"
+  | "date"
+  | "number";
+
+/** Una pregunta del cuestionario (elemento de `questionnaires.questions` JSONB). */
+export interface QuestionnaireQuestion {
+  /** Id estable de la pregunta (clave de la respuesta). */
+  id: string;
+  /** Etiqueta mostrada al solicitante. */
+  label: string;
+  type: QuestionnaireQuestionType;
+  /** Opciones (sólo select/multiselect). */
+  options?: string[];
+  /** ¿Obligatoria? (default false). */
+  required?: boolean;
+}
+
+/** Valor de una respuesta según el tipo de pregunta. */
+export type QuestionnaireAnswerValue = string | number | boolean | string[];
+
+/** Respuestas del solicitante: { questionId → valor }. */
+export type QuestionnaireAnswers = Record<string, QuestionnaireAnswerValue>;
+
+/** questionnaires — set de preguntas custom por tenant (P2). */
+export interface Questionnaire {
+  id: string;
+  tenantId: string;
+  name: string;
+  questions: QuestionnaireQuestion[];
+  version: number;
+  active: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** questionnaire_answers — respuestas del solicitante por sesión (P2). */
+export interface QuestionnaireAnswerRecord {
+  id: string;
+  tenantId: string;
+  sessionId: string;
+  questionnaireId: string | null;
+  answers: QuestionnaireAnswers;
+  createdAt: string;
+  updatedAt: string;
+}
+
 // ---- Workflows (configurables + versionados) — P0 #1 --------------------- //
 
 /**
@@ -772,6 +825,15 @@ export interface WorkflowDefinition {
     nameThreshold?: number;
     onFail?: "review" | "flag";
   };
+  /**
+   * Cuestionario custom (P2). Referencia a un `questionnaires.id` del tenant. Si está
+   * presente (y `required` no es false), el flujo de captura EXIGE que el solicitante
+   * responda el set de preguntas antes de finalizar; las respuestas se persisten en la
+   * sesión (`questionnaire_answers`) y se ven en el admin. No es un check del pipeline
+   * (no afecta `decision()`): es captura de datos. Resolución de las preguntas: live
+   * por id contra la tabla `questionnaires` (diferido: snapshotear las preguntas).
+   */
+  questionnaire?: { questionnaireId: string; required?: boolean };
   review?: {
     mode: ReviewMode;
     /** Para on_borderline: bandas de score [min,max] que disparan revisión humana. */
@@ -1218,6 +1280,16 @@ export interface SubmitResponse {
   state: SessionState;
 }
 
+/** POST /verify/:token/questionnaire — respuestas del cuestionario custom (P2). */
+export interface QuestionnaireSubmitRequest {
+  answers: QuestionnaireAnswers;
+}
+
+export interface QuestionnaireSubmitResponse {
+  ok: boolean;
+  state: SessionState;
+}
+
 /**
  * Datos extraídos del documento que se muestran en la pantalla de REVISIÓN del
  * titular (POST /preview). Subconjunto seguro del `ExtractedDocument`.
@@ -1297,6 +1369,22 @@ export interface CaptureStatusResponse {
    * insertar (o no) el paso "Comprobante de domicilio" — adaptativo por workflow.
    */
   requiresProofOfAddress?: boolean;
+  /**
+   * ¿El workflow de la sesión exige cuestionario custom (P2)? Lo deriva del
+   * `workflowSnapshot.questionnaire.questionnaireId`. La SPA de captura usa este flag
+   * para insertar (o no) el paso "Preguntas" — adaptativo por workflow.
+   */
+  requiresQuestionnaire?: boolean;
+  /**
+   * Cuestionario YA resuelto (id + nombre + preguntas a mostrar) cuando
+   * `requiresQuestionnaire` es true; null/ausente si el workflow no lo pide. La SPA
+   * renderiza las preguntas según su tipo y POST-ea las respuestas a /questionnaire.
+   */
+  questionnaire?: {
+    id: string;
+    name: string;
+    questions: QuestionnaireQuestion[];
+  } | null;
   /**
    * Branding YA resuelto del tenant de la sesión (white-label P1 #5). SIEMPRE
    * presente (default Teko aplicado): el front theme-a el flujo con `primaryColor`,
@@ -1394,6 +1482,17 @@ export interface AdminSessionDetailResponse extends SessionStatusResponse {
   tenantId: string;
   checks: Array<Pick<VerificationCheck, "type" | "score" | "passed" | "detail">>;
   consents: Array<Pick<Consent, "version" | "acceptedAt" | "ip">>;
+  /**
+   * Cuestionario custom de la sesión (P2): preguntas (def vigente o snapshot del
+   * workflow) + respuestas del solicitante. null si el workflow no exigió cuestionario
+   * o si aún no respondió. El admin muestra el par pregunta→respuesta.
+   */
+  questionnaire?: {
+    questionnaireId: string | null;
+    name: string | null;
+    questions: QuestionnaireQuestion[];
+    answers: QuestionnaireAnswers;
+  } | null;
 }
 
 /** Métricas del dashboard admin (§8.C/§11). */
@@ -1432,6 +1531,33 @@ export interface CreateWorkflowRequest {
 /** PUT /admin/tenants/:id/workflows/:name — editar = crear nueva versión. */
 export interface UpdateWorkflowRequest {
   definition: WorkflowDefinition;
+}
+
+// ---- 4.C.ter) Questionnaires (formularios custom) — P2 -------------------- //
+
+/** Respuesta de un questionnaire (admin). */
+export interface QuestionnaireResponse {
+  id: string;
+  tenantId: string;
+  name: string;
+  questions: QuestionnaireQuestion[];
+  version: number;
+  active: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** POST /admin/tenants/:id/questionnaires — crear un cuestionario. */
+export interface CreateQuestionnaireRequest {
+  name: string;
+  questions: QuestionnaireQuestion[];
+}
+
+/** PUT /admin/tenants/:id/questionnaires/:qid — editar nombre/preguntas/activo. */
+export interface UpdateQuestionnaireRequest {
+  name?: string;
+  questions?: QuestionnaireQuestion[];
+  active?: boolean;
 }
 
 /** Ítem de la cola de revisión (GET /admin/review-queue). */

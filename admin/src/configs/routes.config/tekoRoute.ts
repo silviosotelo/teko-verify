@@ -42,6 +42,13 @@ const tekoRoute: Routes = [
         meta: { pageContainerType: 'contained' },
     },
     {
+        key: 'teko.questionnaires',
+        path: '/questionnaires',
+        component: lazy(() => import('@/views/teko/Questionnaires')),
+        authority: [],
+        meta: { pageContainerType: 'contained' },
+    },
+    {
         key: 'teko.testVerify',
         path: '/test-verify',
         component: lazy(() => import('@/views/teko/TestVerify')),

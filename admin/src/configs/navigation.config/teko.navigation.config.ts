@@ -55,6 +55,16 @@ const tekoNavigationConfig: NavigationTree[] = [
                 subMenu: [],
             },
             {
+                key: 'teko.questionnaires',
+                path: '/questionnaires',
+                title: 'Cuestionarios',
+                translateKey: '',
+                icon: 'tekoTenants',
+                type: NAV_ITEM_TYPE_ITEM,
+                authority: [],
+                subMenu: [],
+            },
+            {
                 key: 'teko.testVerify',
                 path: '/test-verify',
                 title: 'Probar',

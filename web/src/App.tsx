@@ -1,5 +1,12 @@
 import { useEffect, useState } from "react"
-import { TOKEN, getStatus, ApiError, type StatusResult, type DocumentType } from "./api"
+import {
+  TOKEN,
+  getStatus,
+  ApiError,
+  type StatusResult,
+  type DocumentType,
+  type QuestionnaireQuestion,
+} from "./api"
 import { errorMessage } from "./messages"
 import { applyTheme, normalizeBranding, DEFAULT_BRANDING, type Branding } from "./branding"
 import { Brand, BrandingProvider, Card, Stepper } from "./ui"
@@ -8,6 +15,7 @@ import { Intro } from "./screens/Intro"
 import { ChooseDocument } from "./screens/ChooseDocument"
 import { DocCapture } from "./screens/DocCapture"
 import { ProofOfAddress } from "./screens/ProofOfAddress"
+import { Questionnaire } from "./screens/Questionnaire"
 import { Prepare } from "./screens/Prepare"
 import { Selfie } from "./screens/Selfie"
 import { Processing } from "./screens/Processing"
@@ -33,6 +41,7 @@ type Step =
   | "choose-doc"
   | "doc"
   | "proof-of-address"
+  | "questionnaire"
   | "prep-selfie"
   | "selfie"
   | "processing"
@@ -47,6 +56,7 @@ const STEP_PHASE: Record<Step, number> = {
   "choose-doc": 1,
   doc: 1,
   "proof-of-address": 1,
+  questionnaire: 1,
   "prep-selfie": 2,
   selfie: 2,
   processing: 3,
@@ -147,6 +157,12 @@ export function App() {
   // ¿El workflow exige comprobante de domicilio (P1 #4)? Lo trae GET /status. Cuando
   // es true se inserta el paso "Comprobante de domicilio" tras la captura del documento.
   const [requiresPoa, setRequiresPoa] = useState(false)
+  // ¿El workflow exige cuestionario custom (P2)? Lo trae GET /status junto a las
+  // preguntas. Cuando hay preguntas se inserta el paso "Preguntas" tras el documento.
+  const [questionnaire, setQuestionnaire] = useState<{
+    name: string
+    questions: QuestionnaireQuestion[]
+  } | null>(null)
   // Branding del tenant (white-label P1 #5). Default Teko hasta que /status resuelve.
   const [branding, setBranding] = useState<Branding>(DEFAULT_BRANDING)
 
@@ -167,6 +183,12 @@ export function App() {
         setBranding(b)
         applyTheme(b.primaryColor)
         setRequiresPoa(s.requiresProofOfAddress === true)
+        // P2: cuestionario custom (si el workflow lo pide y trae preguntas).
+        if (s.requiresQuestionnaire && s.questionnaire && s.questionnaire.questions.length > 0) {
+          setQuestionnaire({ name: s.questionnaire.name, questions: s.questionnaire.questions })
+        } else {
+          setQuestionnaire(null)
+        }
         const target = stepForState(s.state)
         // Estados terminales/tip rehidratan directo al resultado con su payload.
         if (target === "result") setStatus(s)
@@ -221,6 +243,12 @@ export function App() {
     )
   }
 
+  // Cadena de pasos post-documento (adaptativa por workflow):
+  //   doc → [comprobante de domicilio?] → [preguntas?] → preparar selfie.
+  const stepAfterQuestionnaire = (): Step => "prep-selfie"
+  const stepAfterPoa = (): Step => (questionnaire ? "questionnaire" : stepAfterQuestionnaire())
+  const stepAfterDoc = (): Step => (requiresPoa ? "proof-of-address" : stepAfterPoa())
+
   return (
     <BrandingProvider value={branding}>
     <Shell step={step}>
@@ -238,14 +266,22 @@ export function App() {
       {step === "doc" && (
         <DocCapture
           documentType={documentType}
-          onDone={() => setStep(requiresPoa ? "proof-of-address" : "prep-selfie")}
+          onDone={() => setStep(stepAfterDoc())}
           onBack={() => setStep("choose-doc")}
         />
       )}
       {step === "proof-of-address" && (
         <ProofOfAddress
-          onDone={() => setStep("prep-selfie")}
+          onDone={() => setStep(stepAfterPoa())}
           onBack={() => setStep("doc")}
+        />
+      )}
+      {step === "questionnaire" && questionnaire && (
+        <Questionnaire
+          title={questionnaire.name}
+          questions={questionnaire.questions}
+          onDone={() => setStep(stepAfterQuestionnaire())}
+          onBack={() => setStep(requiresPoa ? "proof-of-address" : "doc")}
         />
       )}
       {step === "prep-selfie" && (

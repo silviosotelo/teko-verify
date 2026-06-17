@@ -284,6 +284,13 @@ export interface SessionDetail {
     completedAt: string | null
     checks: SessionCheck[]
     consents: Array<{ version: string; acceptedAt: string; ip: string | null }>
+    // Cuestionario custom (P2): preguntas + respuestas del solicitante. null si no aplica.
+    questionnaire?: {
+        questionnaireId: string | null
+        name: string | null
+        questions: QuestionnaireQuestion[]
+        answers: Record<string, QuestionnaireAnswerValue>
+    } | null
 }
 
 export interface MetricsResponse {
@@ -362,6 +369,8 @@ export interface WorkflowDefinition {
     match?: { required: boolean; threshold?: number }
     quality?: { glassesMaxPct?: number }
     aml?: { required: boolean; threshold?: number; onMatch?: 'review' | 'flag' }
+    // Cuestionario custom (P2): referencia a un questionnaires.id del tenant.
+    questionnaire?: { questionnaireId: string; required?: boolean }
     review?: {
         mode: ReviewMode
         borderlineBand?: {
@@ -382,6 +391,36 @@ export interface Workflow {
     definition: WorkflowDefinition
     isDefault: boolean
     assuranceLevel: LoA
+    createdAt: string
+    updatedAt: string
+}
+
+// ---- Questionnaires (formularios custom por workflow) — P2 ----
+export type QuestionnaireQuestionType =
+    | 'text'
+    | 'select'
+    | 'multiselect'
+    | 'checkbox'
+    | 'date'
+    | 'number'
+
+export interface QuestionnaireQuestion {
+    id: string
+    label: string
+    type: QuestionnaireQuestionType
+    options?: string[]
+    required?: boolean
+}
+
+export type QuestionnaireAnswerValue = string | number | boolean | string[]
+
+export interface Questionnaire {
+    id: string
+    tenantId: string
+    name: string
+    questions: QuestionnaireQuestion[]
+    version: number
+    active: boolean
     createdAt: string
     updatedAt: string
 }

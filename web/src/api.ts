@@ -44,6 +44,28 @@ export interface StatusBranding {
   supportEmail?: string | null
 }
 
+/** Tipo de campo de una pregunta de cuestionario (espejo del backend, P2). */
+export type QuestionnaireQuestionType =
+  | "text"
+  | "select"
+  | "multiselect"
+  | "checkbox"
+  | "date"
+  | "number"
+
+/** Una pregunta del cuestionario custom (P2). */
+export interface QuestionnaireQuestion {
+  id: string
+  label: string
+  type: QuestionnaireQuestionType
+  options?: string[]
+  required?: boolean
+}
+
+/** Valor de una respuesta según el tipo. */
+export type QuestionnaireAnswerValue = string | number | boolean | string[]
+export type QuestionnaireAnswers = Record<string, QuestionnaireAnswerValue>
+
 export interface StatusResult {
   state: VerifyState
   reasons?: string[]
@@ -53,6 +75,16 @@ export interface StatusResult {
    * "Comprobante de domicilio" sólo cuando es true (adaptativo por workflow).
    */
   requiresProofOfAddress?: boolean
+  /**
+   * ¿El workflow exige cuestionario custom (P2)? La SPA inserta el paso "Preguntas"
+   * sólo cuando es true; `questionnaire` trae las preguntas a renderizar.
+   */
+  requiresQuestionnaire?: boolean
+  questionnaire?: {
+    id: string
+    name: string
+    questions: QuestionnaireQuestion[]
+  } | null
   /**
    * Branding del tenant (white-label P1 #5) YA resuelto por el backend. La SPA
    * theme-a el flujo con `primaryColor` y muestra logo/nombre/textos propios.
@@ -210,6 +242,16 @@ export async function apiUploadVideo(blob: Blob): Promise<boolean> {
  */
 export async function uploadProofOfAddress(image: string): Promise<void> {
   await apiPost("/proof-of-address", { image })
+}
+
+/**
+ * POST /verify/:token/questionnaire — envía las respuestas del cuestionario custom
+ * (P2). El backend valida contra las preguntas (requeridas/tipos/opciones) y persiste.
+ * Reusa apiPost (mismo envelope de error). Un 422 (questionnaire_invalid) llega como
+ * ApiError para que la pantalla muestre el detalle.
+ */
+export async function submitQuestionnaire(answers: QuestionnaireAnswers): Promise<void> {
+  await apiPost("/questionnaire", { answers })
 }
 
 /**

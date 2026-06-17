@@ -382,6 +382,7 @@ type TabKey =
     | 'aml'
     | 'face_search'
     | 'proof_of_address'
+    | 'questionnaire'
 
 type ModuleDef = {
     key: string
@@ -412,6 +413,12 @@ const MODULE_ROW: ModuleDef[] = [
         type: null,
         tab: 'proof_of_address',
     },
+    {
+        key: 'questionnaire',
+        label: 'Cuestionario',
+        type: null,
+        tab: 'questionnaire',
+    },
     { key: 'events', label: 'Eventos', type: null, tab: 'events' },
     { key: 'device', label: 'Device & IP', type: null, tab: 'device' },
 ]
@@ -438,7 +445,9 @@ function ModuleTab({
                     ? TbGavel
                     : def.tab === 'face_search'
                       ? TbUsers
-                      : TbShieldCheck
+                      : def.tab === 'questionnaire'
+                        ? TbFileText
+                        : TbShieldCheck
         return (
             <button
                 type="button"
@@ -1366,6 +1375,80 @@ type FormState = {
     placeOfBirth: string
 }
 
+// ----------------------------------------------------------------------------
+// Panel "Cuestionario" (P2): preguntas del workflow + respuestas del solicitante.
+// ----------------------------------------------------------------------------
+function fmtAnswer(v: unknown): string {
+    if (v === null || v === undefined || v === '') return '—'
+    if (typeof v === 'boolean') return v ? 'Sí' : 'No'
+    if (Array.isArray(v)) return v.length ? v.join(', ') : '—'
+    return String(v)
+}
+
+function QuestionnairePanel({
+    data,
+}: {
+    data: NonNullable<SessionDetail['questionnaire']> | null
+}) {
+    if (!data) {
+        return (
+            <Card>
+                <p className="py-8 text-center text-sm text-gray-400">
+                    Este workflow no incluyó cuestionario.
+                </p>
+            </Card>
+        )
+    }
+    const answers = data.answers ?? {}
+    const answeredCount = Object.keys(answers).length
+    // Si tenemos las preguntas (def vigente), mostramos label→respuesta en orden;
+    // si no (questionnaire borrado), caemos a las claves crudas de las respuestas.
+    const rows: Array<{ id: string; label: string; value: unknown }> =
+        data.questions.length > 0
+            ? data.questions.map((q) => ({
+                  id: q.id,
+                  label: q.label,
+                  value: answers[q.id],
+              }))
+            : Object.keys(answers).map((k) => ({
+                  id: k,
+                  label: k,
+                  value: answers[k],
+              }))
+
+    return (
+        <Card>
+            <div className="mb-4 flex items-center justify-between">
+                <h6 className="text-sm font-semibold heading-text">
+                    {data.name || 'Cuestionario'}
+                </h6>
+                <span className="text-xs text-gray-400">
+                    {answeredCount} respuesta{answeredCount === 1 ? '' : 's'}
+                </span>
+            </div>
+            {rows.length === 0 ? (
+                <p className="py-6 text-center text-sm text-gray-400">
+                    El solicitante aún no respondió el cuestionario.
+                </p>
+            ) : (
+                <dl className="divide-y divide-gray-100 dark:divide-gray-700">
+                    {rows.map((r) => (
+                        <div
+                            key={r.id}
+                            className="flex flex-col gap-1 py-3 sm:flex-row sm:items-start sm:justify-between sm:gap-6"
+                        >
+                            <dt className="text-sm text-gray-500">{r.label}</dt>
+                            <dd className="text-sm font-medium heading-text sm:max-w-[60%] sm:text-right">
+                                {fmtAnswer(r.value)}
+                            </dd>
+                        </div>
+                    ))}
+                </dl>
+            )}
+        </Card>
+    )
+}
+
 const SessionDetailView = () => {
     const { sessionId } = useParams()
     const { currentId } = useTenant()
@@ -1759,6 +1842,11 @@ const SessionDetailView = () => {
                     )}
                     onOpen={(url, label) => setLightbox({ url, label })}
                 />
+            )}
+
+            {/* ---------- Pestaña Cuestionario (P2) ---------- */}
+            {activeTab === 'questionnaire' && (
+                <QuestionnairePanel data={data.questionnaire ?? null} />
             )}
 
             {/* ---------- Pestaña Overview (contenido por defecto) ---------- */}

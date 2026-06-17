@@ -37,6 +37,10 @@ import { PaddleOcrClient } from "../modules/document";
 // FAIL-OPEN de eventos del ciclo de vida en session_events.
 import { requestContext } from "../lib/requestContext";
 import { resolveBranding } from "../lib/branding";
+import {
+  questionnaireIdFromWorkflow,
+  validateQuestionnaireAnswers,
+} from "../lib/questionnaire";
 import { isDocumentType } from "../types";
 import type {
   CaptureStatusResponse,
@@ -49,6 +53,7 @@ import type {
   PreviewExtracted,
   PreviewResponse,
   QualityResult,
+  QuestionnaireSubmitResponse,
   SessionResult,
   SessionState,
   SubmitResponse,
@@ -519,6 +524,59 @@ captureRouter.post("/:token/proof-of-address", async (req: Request, res: Respons
   }
 });
 
+// POST /verify/:token/questionnaire  → respuestas del cuestionario custom (P2)
+// Sólo aplica si el workflow de la sesión referencia un questionnaire (snapshot
+// `questionnaire.questionnaireId`). Valida las respuestas contra las preguntas del
+// questionnaire (requeridas, tipos, opciones — fail-closed) y las PERSISTE (upsert
+// 1:1 por sesión). NO consume el token ni cambia de estado (es captura de datos, no
+// del pipeline). 400 si el workflow no lo pide / el questionnaire no existe; 422 si
+// la validación falla (no se persiste nada).
+captureRouter.post("/:token/questionnaire", async (req: Request, res: Response) => {
+  const session = await loadSession(req, res);
+  if (!session) return;
+  if (!requireCapturable(session, res)) return;
+  try {
+    const qId = questionnaireIdFromWorkflow(session.workflowSnapshot);
+    if (!qId) {
+      res.status(400).json({ error: "questionnaire_not_configured" });
+      return;
+    }
+    const questionnaire = await repos.questionnaires.getById(session.tenantId, qId);
+    if (!questionnaire) {
+      res.status(400).json({ error: "questionnaire_not_found" });
+      return;
+    }
+    // Validación FAIL-CLOSED contra las preguntas vigentes del questionnaire.
+    const result = validateQuestionnaireAnswers(questionnaire.questions, req.body?.answers);
+    if (!result.ok) {
+      res.status(422).json({ error: "questionnaire_invalid", errors: result.errors });
+      return;
+    }
+    await repos.questionnaires.saveAnswers({
+      tenantId: session.tenantId,
+      sessionId: session.id,
+      questionnaireId: questionnaire.id,
+      answers: result.answers,
+    });
+    await repos.auditLog.record({
+      tenantId: session.tenantId,
+      sessionId: session.id,
+      actor: "subject",
+      event: "questionnaire.answered",
+      detail: { questionnaireId: questionnaire.id, count: Object.keys(result.answers).length },
+      ip: req.ip ?? null,
+    });
+    await recordEvent(req, session, "questionnaire.answered", {
+      questionnaireId: questionnaire.id,
+      count: Object.keys(result.answers).length,
+    });
+    const resp: QuestionnaireSubmitResponse = { ok: true, state: session.state };
+    res.json(resp);
+  } catch (e) {
+    res.status(400).json({ error: "questionnaire_failed", detail: (e as Error).message });
+  }
+});
+
 // POST /verify/:token/doc-check  → pre-check INFORMATIVO de la cédula (UX)
 // Espejo del pre-check de la selfie: NO persiste, NO cambia estado, NO consume el
 // token. Verifica nitidez (Laplaciano), rostro en el frente y MRZ legible en el
@@ -867,6 +925,19 @@ captureRouter.get("/:token/status", async (req: Request, res: Response) => {
     return;
   }
   const tenant = await repos.tenants.getById(session.tenantId);
+  // P2: si el workflow exige cuestionario, resolvemos sus preguntas (live por id) para
+  // que la SPA inserte el paso "Preguntas". Fail-soft: si el questionnaire no existe
+  // (borrado tras snapshotear), NO exigimos el paso (no se traba el flujo).
+  let requiresQuestionnaire = false;
+  let questionnaire: CaptureStatusResponse["questionnaire"] = null;
+  const qId = questionnaireIdFromWorkflow(session.workflowSnapshot);
+  if (qId) {
+    const q = await repos.questionnaires.getById(session.tenantId, qId);
+    if (q && q.active && q.questions.length > 0) {
+      requiresQuestionnaire = true;
+      questionnaire = { id: q.id, name: q.name, questions: q.questions };
+    }
+  }
   const resp: CaptureStatusResponse = {
     state: session.state,
     reasons: session.result?.reasons,
@@ -875,6 +946,9 @@ captureRouter.get("/:token/status", async (req: Request, res: Response) => {
     redirectUrl: session.redirectUrl,
     // P1 #4: la SPA inserta el paso "Comprobante de domicilio" sólo si el workflow lo pide.
     requiresProofOfAddress: session.workflowSnapshot?.proofOfAddress?.required === true,
+    // P2: la SPA inserta el paso "Preguntas" sólo si el workflow referencia un questionnaire.
+    requiresQuestionnaire,
+    questionnaire,
     // White-label (P1 #5): branding YA resuelto (default Teko si el tenant no lo define).
     branding: resolveBranding(tenant?.branding),
   };

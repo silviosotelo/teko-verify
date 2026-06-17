@@ -45,6 +45,7 @@ import { computeChecks, applyReviewDecision } from "../pipeline";
 import { realPipelineDeps } from "../pipelineDeps";
 import { decision as decideVerdict } from "../modules/decision";
 import { assuranceFromDefinition } from "../lib/workflow";
+import { sanitizeQuestions, questionnaireIdFromWorkflow } from "../lib/questionnaire";
 import { can, permissionsFor, isAssignableRole, ASSIGNABLE_ROLES } from "../lib/rbac";
 import type { Permission } from "../types";
 import sharp from "sharp";
@@ -76,6 +77,8 @@ import type {
   Workflow,
   WorkflowDefinition,
   WorkflowResponse,
+  Questionnaire,
+  QuestionnaireResponse,
 } from "../types";
 import { WEBHOOK_EVENTS } from "../types";
 
@@ -758,11 +761,28 @@ adminRouter.get("/tenants/:id/sessions/:sessionId", async (req: Request, res: Re
     res.status(404).json({ error: "session_not_found" });
     return;
   }
-  const [checks, consents, evidence] = await Promise.all([
+  const [checks, consents, evidence, answers] = await Promise.all([
     repos.checks.listBySession(tenantId, session.id),
     repos.consents.listBySession(tenantId, session.id),
     repos.evidence.listBySession(tenantId, session.id),
+    repos.questionnaires.getAnswers(tenantId, session.id),
   ]);
+  // P2: arma el panel de cuestionario (preguntas + respuestas). Las preguntas salen
+  // del questionnaire referenciado por el workflow (live por id); si fue borrado se
+  // cae a las claves de las respuestas. null si la sesión no tuvo cuestionario.
+  let questionnaire: AdminSessionDetailResponse["questionnaire"] = null;
+  const qId = questionnaireIdFromWorkflow(session.workflowSnapshot) ?? answers?.questionnaireId ?? null;
+  if (qId || answers) {
+    const def = qId ? await repos.questionnaires.getById(tenantId, qId) : null;
+    if (def || answers) {
+      questionnaire = {
+        questionnaireId: def?.id ?? answers?.questionnaireId ?? null,
+        name: def?.name ?? null,
+        questions: def?.questions ?? [],
+        answers: answers?.answers ?? {},
+      };
+    }
+  }
   const resp: AdminSessionDetailResponse = {
     sessionId: session.id,
     tenantId,
@@ -775,6 +795,7 @@ adminRouter.get("/tenants/:id/sessions/:sessionId", async (req: Request, res: Re
     completedAt: session.completedAt,
     checks: checks.map((c) => ({ type: c.type, score: c.score, passed: c.passed, detail: c.detail })),
     consents: consents.map((c) => ({ version: c.version, acceptedAt: c.acceptedAt, ip: c.ip })),
+    questionnaire,
   };
   res.json(resp);
 });
@@ -1058,6 +1079,99 @@ adminRouter.put("/tenants/:id/workflows/:name", requirePermission("manage_workfl
   });
   res.json(toWorkflowResponse(created));
 });
+
+// ---- Questionnaires (formularios custom por workflow) — P2 --------------- //
+
+function toQuestionnaireResponse(q: Questionnaire): QuestionnaireResponse {
+  return {
+    id: q.id,
+    tenantId: q.tenantId,
+    name: q.name,
+    questions: q.questions,
+    version: q.version,
+    active: q.active,
+    createdAt: q.createdAt,
+    updatedAt: q.updatedAt,
+  };
+}
+
+// GET /admin/tenants/:id/questionnaires → cuestionarios del tenant.
+adminRouter.get("/tenants/:id/questionnaires", async (req: Request, res: Response) => {
+  const tenant = await repos.tenants.getById(req.params.id);
+  if (!tenant) {
+    res.status(404).json({ error: "tenant_not_found" });
+    return;
+  }
+  const questionnaires = await repos.questionnaires.listByTenant(tenant.id);
+  res.json({ questionnaires: questionnaires.map(toQuestionnaireResponse) });
+});
+
+// POST /admin/tenants/:id/questionnaires {name, questions} → crea un cuestionario.
+// Reusa el permiso manage_workflows (config del flujo de verificación). Fail-closed:
+// preguntas mal formadas / vacías → 400.
+adminRouter.post(
+  "/tenants/:id/questionnaires",
+  requirePermission("manage_workflows"),
+  async (req: Request, res: Response) => {
+    const tenant = await repos.tenants.getById(req.params.id);
+    if (!tenant) {
+      res.status(404).json({ error: "tenant_not_found" });
+      return;
+    }
+    const name = typeof req.body?.name === "string" ? req.body.name.trim() : "";
+    const questions = sanitizeQuestions(req.body?.questions);
+    if (!name || !questions) {
+      res.status(400).json({ error: "name_and_questions_required" });
+      return;
+    }
+    const created = await repos.questionnaires.create({ tenantId: tenant.id, name, questions });
+    await repos.auditLog.record({
+      tenantId: tenant.id,
+      actor: `admin:${req.adminOperator?.operatorId ?? "?"}`,
+      event: "questionnaire.created",
+      detail: { questionnaireId: created.id, name, questions: questions.length },
+      ip: req.ip ?? null,
+    });
+    res.status(201).json(toQuestionnaireResponse(created));
+  }
+);
+
+// PUT /admin/tenants/:id/questionnaires/:qid {name?, questions?, active?} → editar.
+adminRouter.put(
+  "/tenants/:id/questionnaires/:qid",
+  requirePermission("manage_workflows"),
+  async (req: Request, res: Response) => {
+    const tenant = await repos.tenants.getById(req.params.id);
+    if (!tenant) {
+      res.status(404).json({ error: "tenant_not_found" });
+      return;
+    }
+    const patch: { name?: string; questions?: import("../types").QuestionnaireQuestion[]; active?: boolean } = {};
+    if (typeof req.body?.name === "string") patch.name = req.body.name.trim();
+    if (req.body?.questions !== undefined) {
+      const questions = sanitizeQuestions(req.body.questions);
+      if (!questions) {
+        res.status(400).json({ error: "invalid_questions" });
+        return;
+      }
+      patch.questions = questions;
+    }
+    if (typeof req.body?.active === "boolean") patch.active = req.body.active;
+    const updated = await repos.questionnaires.update(tenant.id, req.params.qid, patch);
+    if (!updated) {
+      res.status(404).json({ error: "questionnaire_not_found" });
+      return;
+    }
+    await repos.auditLog.record({
+      tenantId: tenant.id,
+      actor: `admin:${req.adminOperator?.operatorId ?? "?"}`,
+      event: "questionnaire.updated",
+      detail: { questionnaireId: updated.id, version: updated.version },
+      ip: req.ip ?? null,
+    });
+    res.json(toQuestionnaireResponse(updated));
+  }
+);
 
 // ---- Webhooks (suscripciones + entregas) — P0 #2 ------------------------- //
 

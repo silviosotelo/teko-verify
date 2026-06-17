@@ -29,6 +29,8 @@ import type {
     TestVerifyResponse,
     Workflow,
     WorkflowDefinition,
+    Questionnaire,
+    QuestionnaireQuestion,
     WebhookEvent,
     WebhookEndpoint,
     WebhookDelivery,
@@ -290,6 +292,39 @@ export const tekoApi = {
             'PUT',
             `/tenants/${tenantId}/workflows/${encodeURIComponent(name)}`,
             { definition },
+        )
+    },
+
+    // ---- Questionnaires (formularios custom por workflow) — P2 ----
+    listQuestionnaires(tenantId: string) {
+        return request<{ questionnaires: Questionnaire[] }>(
+            'GET',
+            `/tenants/${tenantId}/questionnaires`,
+        )
+    },
+    createQuestionnaire(
+        tenantId: string,
+        body: { name: string; questions: QuestionnaireQuestion[] },
+    ) {
+        return request<Questionnaire>(
+            'POST',
+            `/tenants/${tenantId}/questionnaires`,
+            body,
+        )
+    },
+    updateQuestionnaire(
+        tenantId: string,
+        questionnaireId: string,
+        body: {
+            name?: string
+            questions?: QuestionnaireQuestion[]
+            active?: boolean
+        },
+    ) {
+        return request<Questionnaire>(
+            'PUT',
+            `/tenants/${tenantId}/questionnaires/${questionnaireId}`,
+            body,
         )
     },
 
