@@ -17,6 +17,7 @@ export * as consents from "./consents";
 export * as workflows from "./workflows";
 export * as webhookEndpoints from "./webhookEndpoints";
 export * as webhookDeliveries from "./webhookDeliveries";
+export * as sessionEvents from "./sessionEvents";
 
 import * as tenants from "./tenants";
 import * as apiKeys from "./apiKeys";
@@ -29,6 +30,7 @@ import * as consents from "./consents";
 import * as workflows from "./workflows";
 import * as webhookEndpoints from "./webhookEndpoints";
 import * as webhookDeliveries from "./webhookDeliveries";
+import * as sessionEvents from "./sessionEvents";
 
 /** Agrupador único para inyección/uso conveniente. */
 export const repos = {
@@ -43,4 +45,5 @@ export const repos = {
   workflows,
   webhookEndpoints,
   webhookDeliveries,
+  sessionEvents,
 } as const;

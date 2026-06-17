@@ -15,6 +15,7 @@ import type {
     ReviewDecisionResponse,
     ReviewQueueResponse,
     SessionDetail,
+    SessionEventsResponse,
     SessionState,
     Tenant,
     TenantPolicy,
@@ -178,6 +179,13 @@ export const tekoApi = {
         return request<SessionDetail>(
             'GET',
             `/tenants/${tenantId}/sessions/${sessionId}`,
+        )
+    },
+    // Timeline forense (P0 #3): eventos cronológicos + análisis Device & IP.
+    getSessionEvents(tenantId: string, sessionId: string) {
+        return request<SessionEventsResponse>(
+            'GET',
+            `/tenants/${tenantId}/sessions/${sessionId}/events`,
         )
     },
 

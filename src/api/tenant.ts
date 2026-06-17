@@ -14,6 +14,7 @@ import type { Request, Response } from "express";
 import { repos } from "../db/repos";
 import { authenticateTenant } from "./auth";
 import { generateLinkToken } from "../lib/crypto";
+import { requestContext } from "../lib/requestContext";
 import { webhookDispatcher } from "../webhooks/dispatcher";
 import { evidenceStore } from "../lib/evidenceStore";
 import { isMailerConfigured, isValidEmail, sendVerificationEmail } from "../lib/mailer";
@@ -134,6 +135,29 @@ tenantRouter.post("/sessions", async (req: Request, res: Response) => {
       },
       ip: req.ip ?? null,
     });
+
+    // Timeline forense (P0 #3): primer evento de la sesión. El contexto aquí es el
+    // del sistema del tenant que crea la verificación (server-to-server), no el del
+    // titular; los pasos del titular (consent/captura/decisión) lo registran luego
+    // desde el flujo de captura. Fail-open: nunca rompe la creación.
+    {
+      const ctx = requestContext(req);
+      await repos.sessionEvents.recordSafe({
+        tenantId: tenant.id,
+        sessionId: session.id,
+        type: "session.created",
+        ip: ctx.ip,
+        country: ctx.country,
+        userAgent: ctx.userAgent,
+        device: ctx.device,
+        meta: {
+          externalRef: externalRef ?? null,
+          assuranceRequired: wf.assuranceRequired,
+          workflowId: wf.workflowId,
+          workflowVersion: wf.workflowVersion,
+        },
+      });
+    }
 
     // Webhook session.created (fail-open): notifica a los destinos suscritos del
     // tenant que se creó la verificación. Nunca rompe la creación.

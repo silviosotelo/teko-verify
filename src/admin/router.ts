@@ -32,6 +32,8 @@ import {
 import { webhookDispatcher } from "../webhooks/dispatcher";
 import { adminLoginRateLimiter } from "../lib/rateLimit";
 import { mergePolicy } from "../lib/policy";
+import { requestContext } from "../lib/requestContext";
+import { analyzeDeviceIp } from "../lib/deviceIp";
 import { resolveTestSessionTtlSec } from "./testSessionTtl";
 import { decodeBase64Image } from "../lib/images";
 import { ensureRasterImage } from "../lib/raster";
@@ -413,6 +415,32 @@ adminRouter.get("/tenants/:id/sessions/:sessionId", async (req: Request, res: Re
   };
   res.json(resp);
 });
+
+// GET /admin/tenants/:id/sessions/:sessionId/events — timeline forense (P0 #3).
+// Devuelve los session_events (cronológico) + el análisis Device & IP derivado.
+// La nacionalidad para el cruce país≠nacionalidad sale del check `document`. Queda
+// detrás de adminGuard (auth Bearer) y scopeado por tenant (aislamiento).
+adminRouter.get(
+  "/tenants/:id/sessions/:sessionId/events",
+  async (req: Request, res: Response) => {
+    const tenantId = req.params.id;
+    const session = await repos.sessions.getById(tenantId, req.params.sessionId);
+    if (!session) {
+      res.status(404).json({ error: "session_not_found" });
+      return;
+    }
+    const [events, checks] = await Promise.all([
+      repos.sessionEvents.listBySession(tenantId, session.id),
+      repos.checks.listBySession(tenantId, session.id),
+    ]);
+    // Nacionalidad extraída del documento (para el cruce país del IP ≠ nacionalidad).
+    const docCheck = checks.find((c) => c.type === "document");
+    const detail = docCheck?.detail as { extracted?: { titular?: { nacionalidad?: string } } } | undefined;
+    const documentNationality = detail?.extracted?.titular?.nacionalidad ?? null;
+    const deviceIp = analyzeDeviceIp(events, { documentNationality });
+    res.json({ events, deviceIp });
+  }
+);
 
 // ---- Evidencia (imágenes) para la revisión del dashboard ------------------ //
 // Sirve la imagen de evidencia (selfie / doc_front / doc_back) por TIPO, nunca
@@ -873,6 +901,27 @@ adminRouter.post("/sessions/:id/review", canWrite, async (req: Request, res: Res
       { decision, reviewer: req.adminOperator?.operatorId ?? "?", reason },
       realPipelineDeps
     );
+    // Timeline forense (P0 #3): decisión humana de la cola de revisión. Contexto =
+    // request del operador. Fail-open: nunca rompe la decisión.
+    {
+      const ctx = requestContext(req);
+      await repos.sessionEvents.recordSafe({
+        tenantId: session.tenantId,
+        sessionId: session.id,
+        type: "review.decided",
+        ip: ctx.ip,
+        country: ctx.country,
+        userAgent: ctx.userAgent,
+        device: ctx.device,
+        meta: {
+          decision,
+          reason: reason ?? null,
+          reviewer: req.adminOperator?.operatorId ?? "?",
+          state: out.state,
+          loa: out.result?.loa ?? null,
+        },
+      });
+    }
     const resp: ReviewDecisionResponse = {
       sessionId: session.id,
       state: out.state,
@@ -1056,6 +1105,22 @@ adminRouter.post(
         detail: { assurance, email: email ?? null, ttlMinutes: ttlSec / 60 },
         ip: req.ip ?? null,
       });
+      // Timeline forense (P0 #3): primer evento de la sesión (contexto del operador
+      // que la crea). Fail-open. Mantiene el timeline consistente con las sesiones
+      // creadas vía API del tenant (que también registran session.created).
+      {
+        const ctx = requestContext(req);
+        await repos.sessionEvents.recordSafe({
+          tenantId: tenant.id,
+          sessionId: created.id,
+          type: "session.created",
+          ip: ctx.ip,
+          country: ctx.country,
+          userAgent: ctx.userAgent,
+          device: ctx.device,
+          meta: { assurance, via: "admin.test_session" },
+        });
+      }
       const verifyUrl = `${PUBLIC_BASE_URL}/verify/${linkToken}`;
 
       // Envío opcional del link por email (transaccional, fail-open).

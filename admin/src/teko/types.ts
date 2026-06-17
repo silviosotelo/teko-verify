@@ -157,6 +157,54 @@ export interface AuditEntry {
     createdAt: string
 }
 
+// ---- Timeline forense + Device & IP analysis (P0 #3) ----
+export type DeviceType = 'mobile' | 'tablet' | 'desktop' | 'bot' | 'unknown'
+
+export interface ParsedDevice {
+    os: string | null
+    browser: string | null
+    type: DeviceType
+    suspicious: boolean
+    raw: string | null
+}
+
+export interface SessionEvent {
+    id: string
+    sessionId: string
+    tenantId: string
+    type: string
+    ip: string | null
+    country: string | null
+    userAgent: string | null
+    device: ParsedDevice | Record<string, never>
+    meta: Record<string, unknown>
+    createdAt: string
+}
+
+export type RiskSeverity = 'info' | 'low' | 'medium' | 'high'
+
+export interface RiskSignal {
+    code: string
+    severity: RiskSeverity
+    detail: string
+}
+
+export interface DeviceIpAnalysis {
+    ip: string | null
+    country: string | null
+    userAgent: string | null
+    device: ParsedDevice | null
+    ips: string[]
+    countries: string[]
+    signals: RiskSignal[]
+    riskScore: number
+}
+
+export interface SessionEventsResponse {
+    events: SessionEvent[]
+    deviceIp: DeviceIpAnalysis
+}
+
 // ---- Workflows (configurables + versionados) — P0 #1 ----
 export type ReviewMode = 'auto' | 'always' | 'on_borderline'
 

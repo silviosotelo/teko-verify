@@ -606,6 +606,81 @@ export interface AuditEntry {
   createdAt: string;
 }
 
+// ---- session_events — timeline forense + Device & IP analysis (P0 #3) ------ //
+
+/** Tipo de dispositivo inferido del User-Agent. */
+export type DeviceType = "mobile" | "tablet" | "desktop" | "bot" | "unknown";
+
+/** Parseo liviano del User-Agent (os/browser/tipo + flag de sospecha). */
+export interface ParsedDevice {
+  os: string | null;
+  browser: string | null;
+  type: DeviceType;
+  /** UA reconocido como headless/automatizado (señal de riesgo). */
+  suspicious: boolean;
+  raw: string | null;
+}
+
+/**
+ * Taxonomía de eventos del ciclo de vida de una sesión que se persisten en el
+ * timeline forense. Es un string abierto en DB (type text) para no forzar una
+ * migración por cada evento nuevo; este union documenta los que emite hoy el flujo.
+ */
+export type SessionEventType =
+  | "session.created"
+  | "consent.accepted"
+  | "document.front.captured"
+  | "document.back.captured"
+  | "selfie.captured"
+  | "liveness.video_uploaded"
+  | "liveness.completed"
+  | "checks.computed"
+  | "decision.made"
+  | "review.decided";
+
+/** Una fila del timeline forense: paso del flujo + contexto de red/dispositivo. */
+export interface SessionEvent {
+  id: string;
+  sessionId: string;
+  tenantId: string;
+  type: string;
+  ip: string | null;
+  country: string | null;
+  userAgent: string | null;
+  device: ParsedDevice | Record<string, never>;
+  meta: Record<string, unknown>;
+  createdAt: string;
+}
+
+/** Severidad de una señal de riesgo de Device & IP. */
+export type RiskSeverity = "info" | "low" | "medium" | "high";
+
+/** Señal de riesgo detectada en el análisis Device & IP (informativa por defecto). */
+export interface RiskSignal {
+  code: string;
+  severity: RiskSeverity;
+  detail: string;
+}
+
+/**
+ * Resultado del análisis Device & IP de una sesión: el IP/país/device más reciente
+ * del flujo + las señales de riesgo derivadas de comparar los pasos entre sí (cambio
+ * de IP/país, país≠nacionalidad del documento, UA headless). Informativo: NO bloquea
+ * por sí solo (el workflow decide si pondera), pero queda registrado para el operador.
+ */
+export interface DeviceIpAnalysis {
+  ip: string | null;
+  country: string | null;
+  userAgent: string | null;
+  device: ParsedDevice | null;
+  /** IPs/países distintos vistos a lo largo del flujo (para el panel del admin). */
+  ips: string[];
+  countries: string[];
+  signals: RiskSignal[];
+  /** Score agregado 0..100 (suma ponderada de severidades). Mayor = más riesgo. */
+  riskScore: number;
+}
+
 /** consents — consentimiento explícito del titular (dato biométrico, §12). */
 export interface Consent {
   id: string;

@@ -21,6 +21,17 @@ import {
     TbEdit,
     TbDeviceMobile,
     TbShieldCheck,
+    TbClock,
+    TbWorld,
+    TbAlertTriangle,
+    TbFileText,
+    TbCamera,
+    TbScan,
+    TbGavel,
+    TbActivity,
+    TbCircleCheck,
+    TbDeviceDesktop,
+    TbRobot,
 } from 'react-icons/tb'
 import Card from '@/components/ui/Card'
 import Spinner from '@/components/ui/Spinner'
@@ -40,9 +51,13 @@ import { LoaBadge, PassPill } from '@/teko/badges'
 import { fmtDate, fmtScore } from '@/teko/format'
 import type {
     CheckType,
+    DeviceIpAnalysis,
     EvidenceType,
     ExtractedDocument,
+    ParsedDevice,
+    RiskSeverity,
     SessionDetail,
+    SessionEvent,
     SessionState,
 } from '@/teko/types'
 
@@ -352,56 +367,84 @@ function LivenessVideoCard({
 // Fila de módulos con checks (Overview · ID Verification · …)
 // ----------------------------------------------------------------------------
 
+// Pestañas navegables del detalle (P0 #3 añade Eventos + Device & IP funcionales).
+type TabKey = 'overview' | 'events' | 'device'
+
 type ModuleDef = {
     key: string
     label: string
     type: CheckType | null
-    overview?: boolean
-    device?: boolean
+    /** Pestaña navegable a la que salta el tab (overview/events/device). */
+    tab?: TabKey
+    /** Badge numérico opcional (nº de eventos / señales de riesgo). */
+    badge?: number
+    danger?: boolean
 }
 const MODULE_ROW: ModuleDef[] = [
-    { key: 'overview', label: 'Overview', type: null, overview: true },
+    { key: 'overview', label: 'Overview', type: null, tab: 'overview' },
     { key: 'document', label: 'ID Verification', type: 'document' },
     { key: 'liveness', label: 'Liveness', type: 'liveness' },
     { key: 'match', label: 'Face Match', type: 'match' },
     { key: 'quality', label: 'Calidad', type: 'quality' },
-    { key: 'device', label: 'Device & IP', type: null, device: true },
+    { key: 'events', label: 'Eventos', type: null, tab: 'events' },
+    { key: 'device', label: 'Device & IP', type: null, tab: 'device' },
 ]
 
 function ModuleTab({
     def,
     check,
+    active,
+    onSelect,
 }: {
     def: ModuleDef
     check?: { passed: boolean } | undefined
+    active: boolean
+    onSelect: () => void
 }) {
-    // Overview = ancla activa (sin check). Device & IP = atenuado (no tenemos dato).
-    if (def.overview) {
+    // Tabs navegables (overview/events/device): botón con underline activo + badge.
+    if (def.tab) {
+        const Icon =
+            def.tab === 'events'
+                ? TbClock
+                : def.tab === 'device'
+                  ? TbDeviceMobile
+                  : TbShieldCheck
         return (
-            <span className="inline-flex items-center gap-1.5 border-b-2 border-emerald-500 px-1 pb-2 text-sm font-semibold text-emerald-600 dark:text-emerald-400">
-                <TbShieldCheck className="text-base" />
-                {def.label}
-            </span>
-        )
-    }
-    if (def.device) {
-        return (
-            <span
-                title="Sin datos de dispositivo/IP en esta sesión"
-                className="inline-flex items-center gap-1.5 px-1 pb-2 text-sm font-medium text-gray-300 dark:text-gray-600"
+            <button
+                type="button"
+                onClick={onSelect}
+                className={`inline-flex items-center gap-1.5 px-1 pb-2 text-sm transition ${
+                    active
+                        ? 'border-b-2 border-emerald-500 font-semibold text-emerald-600 dark:text-emerald-400'
+                        : 'font-medium text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200'
+                }`}
             >
-                <TbDeviceMobile className="text-base" />
+                <Icon className="text-base" />
                 {def.label}
-            </span>
+                {typeof def.badge === 'number' && def.badge > 0 && (
+                    <span
+                        className={`ml-0.5 inline-flex h-4 min-w-4 items-center justify-center rounded-full px-1 text-[10px] font-bold ${
+                            def.danger
+                                ? 'bg-red-500 text-white'
+                                : 'bg-gray-200 text-gray-600 dark:bg-gray-600 dark:text-gray-100'
+                        }`}
+                    >
+                        {def.badge}
+                    </span>
+                )}
+            </button>
         )
     }
+    // Tabs de módulo (document/liveness/…): informativos; al click llevan a Overview.
     const ran = !!check
     const passed = check?.passed
     return (
-        <span
-            className={`inline-flex items-center gap-1.5 px-1 pb-2 text-sm font-medium ${
+        <button
+            type="button"
+            onClick={onSelect}
+            className={`inline-flex items-center gap-1.5 px-1 pb-2 text-sm font-medium transition ${
                 ran
-                    ? 'text-gray-600 dark:text-gray-300'
+                    ? 'text-gray-600 hover:text-gray-800 dark:text-gray-300 dark:hover:text-gray-100'
                     : 'text-gray-300 dark:text-gray-600'
             }`}
         >
@@ -419,7 +462,315 @@ function ModuleTab({
                 <span className="h-4 w-4 rounded-full border border-dashed border-gray-300 dark:border-gray-600" />
             )}
             {def.label}
-        </span>
+        </button>
+    )
+}
+
+// ----------------------------------------------------------------------------
+// Timeline de eventos (P0 #3) + panel Device & IP
+// ----------------------------------------------------------------------------
+
+/** Bandera emoji desde un código ISO alpha-2 (CF-IPCountry, p.ej. "PY"). */
+function cc2flag(cc?: string | null): string {
+    if (!cc) return ''
+    const up = cc.trim().toUpperCase()
+    if (!/^[A-Z]{2}$/.test(up)) return ''
+    const base = 0x1f1e6
+    return String.fromCodePoint(
+        base + (up.charCodeAt(0) - 65),
+        base + (up.charCodeAt(1) - 65),
+    )
+}
+
+/** Metadatos visuales por tipo de evento del timeline forense. */
+function eventMeta(type: string): {
+    icon: React.ComponentType<{ className?: string }>
+    label: string
+    color: string
+} {
+    const map: Record<
+        string,
+        {
+            icon: React.ComponentType<{ className?: string }>
+            label: string
+            color: string
+        }
+    > = {
+        'session.created': {
+            icon: TbActivity,
+            label: 'Sesión creada',
+            color: 'bg-gray-400',
+        },
+        'consent.accepted': {
+            icon: TbCircleCheck,
+            label: 'Consentimiento aceptado',
+            color: 'bg-emerald-500',
+        },
+        'document.front.captured': {
+            icon: TbFileText,
+            label: 'Documento · frente capturado',
+            color: 'bg-blue-500',
+        },
+        'document.back.captured': {
+            icon: TbFileText,
+            label: 'Documento · dorso capturado',
+            color: 'bg-blue-500',
+        },
+        'selfie.captured': {
+            icon: TbCamera,
+            label: 'Selfie capturada',
+            color: 'bg-indigo-500',
+        },
+        'liveness.video_uploaded': {
+            icon: TbCamera,
+            label: 'Video de liveness subido',
+            color: 'bg-indigo-500',
+        },
+        'liveness.completed': {
+            icon: TbScan,
+            label: 'Liveness completado',
+            color: 'bg-indigo-500',
+        },
+        'checks.computed': {
+            icon: TbScan,
+            label: 'Checks computados',
+            color: 'bg-violet-500',
+        },
+        'decision.made': {
+            icon: TbGavel,
+            label: 'Decisión emitida',
+            color: 'bg-amber-500',
+        },
+        'review.decided': {
+            icon: TbGavel,
+            label: 'Revisión manual decidida',
+            color: 'bg-amber-500',
+        },
+    }
+    return (
+        map[type] ?? {
+            icon: TbActivity,
+            label: type,
+            color: 'bg-gray-400',
+        }
+    )
+}
+
+function deviceLabel(d: ParsedDevice | Record<string, never> | null): string {
+    if (!d || !('type' in d)) return ''
+    const parts = [d.browser, d.os].filter(Boolean)
+    return parts.length ? parts.join(' · ') : d.type
+}
+
+const SEVERITY_STYLE: Record<RiskSeverity, string> = {
+    high: 'bg-red-50 text-red-700 ring-red-200 dark:bg-red-500/10 dark:text-red-300 dark:ring-red-500/30',
+    medium: 'bg-amber-50 text-amber-700 ring-amber-200 dark:bg-amber-500/10 dark:text-amber-300 dark:ring-amber-500/30',
+    low: 'bg-yellow-50 text-yellow-700 ring-yellow-200 dark:bg-yellow-500/10 dark:text-yellow-300 dark:ring-yellow-500/30',
+    info: 'bg-gray-100 text-gray-600 ring-gray-200 dark:bg-gray-700 dark:text-gray-300 dark:ring-gray-600',
+}
+
+/** Timeline cronológico de eventos forenses con device/IP/país/meta por paso. */
+function EventsTimeline({ events }: { events: SessionEvent[] }) {
+    if (events.length === 0) {
+        return (
+            <Card>
+                <p className="text-sm text-gray-400">
+                    Sin eventos registrados para esta sesión.
+                </p>
+            </Card>
+        )
+    }
+    return (
+        <Card>
+            <h6 className="mb-4 text-sm font-semibold heading-text">
+                Timeline de eventos
+            </h6>
+            <ol className="relative ml-2 border-l border-gray-200 dark:border-gray-700">
+                {events.map((e) => {
+                    const m = eventMeta(e.type)
+                    const Icon = m.icon
+                    const dev = deviceLabel(e.device)
+                    const metaKeys = Object.keys(e.meta || {})
+                    return (
+                        <li key={e.id} className="mb-6 ml-6">
+                            <span
+                                className={`absolute -left-3 flex h-6 w-6 items-center justify-center rounded-full text-white ring-4 ring-white dark:ring-gray-800 ${m.color}`}
+                            >
+                                <Icon className="text-sm" />
+                            </span>
+                            <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+                                <span className="text-sm font-semibold heading-text">
+                                    {m.label}
+                                </span>
+                                <span className="font-mono text-[11px] text-gray-400">
+                                    {fmtDate(e.createdAt)}
+                                </span>
+                            </div>
+                            <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
+                                {e.ip && (
+                                    <span className="inline-flex items-center gap-1 rounded bg-gray-100 px-1.5 py-0.5 font-mono dark:bg-gray-700">
+                                        <TbWorld className="text-[11px]" />
+                                        {e.ip}
+                                    </span>
+                                )}
+                                {e.country && (
+                                    <span className="inline-flex items-center gap-1 rounded bg-gray-100 px-1.5 py-0.5 dark:bg-gray-700">
+                                        {cc2flag(e.country)} {e.country}
+                                    </span>
+                                )}
+                                {dev && (
+                                    <span className="inline-flex items-center gap-1 rounded bg-gray-100 px-1.5 py-0.5 dark:bg-gray-700">
+                                        <TbDeviceMobile className="text-[11px]" />
+                                        {dev}
+                                    </span>
+                                )}
+                                {'type' in e.device && e.device.suspicious && (
+                                    <span className="inline-flex items-center gap-1 rounded bg-red-50 px-1.5 py-0.5 text-red-700 dark:bg-red-500/10 dark:text-red-300">
+                                        <TbRobot className="text-[11px]" />
+                                        UA sospechoso
+                                    </span>
+                                )}
+                            </div>
+                            {metaKeys.length > 0 && (
+                                <pre className="mt-2 overflow-x-auto rounded-md bg-gray-50 p-2 text-[11px] leading-relaxed text-gray-600 dark:bg-gray-900/40 dark:text-gray-300">
+                                    {JSON.stringify(e.meta, null, 2)}
+                                </pre>
+                            )}
+                        </li>
+                    )
+                })}
+            </ol>
+        </Card>
+    )
+}
+
+/** Panel Device & IP: IP, país (bandera), device parseado, señales de riesgo. */
+function DeviceIpPanel({ analysis }: { analysis: DeviceIpAnalysis | null }) {
+    if (!analysis) {
+        return (
+            <Card>
+                <p className="text-sm text-gray-400">
+                    Sin datos de dispositivo/IP en esta sesión.
+                </p>
+            </Card>
+        )
+    }
+    const d = analysis.device
+    const DeviceIcon =
+        d?.type === 'desktop'
+            ? TbDeviceDesktop
+            : d?.type === 'bot'
+              ? TbRobot
+              : TbDeviceMobile
+    return (
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+            <div className="lg:col-span-2 space-y-4">
+                <Card>
+                    <h6 className="mb-3 text-sm font-semibold heading-text">
+                        Dispositivo e IP
+                    </h6>
+                    <dl className="grid grid-cols-1 gap-x-8 gap-y-3 text-sm sm:grid-cols-2">
+                        <div className="flex items-center justify-between">
+                            <dt className="text-gray-400">IP</dt>
+                            <dd className="font-mono font-medium heading-text">
+                                {analysis.ip ?? '—'}
+                            </dd>
+                        </div>
+                        <div className="flex items-center justify-between">
+                            <dt className="text-gray-400">País</dt>
+                            <dd className="font-medium heading-text">
+                                {analysis.country
+                                    ? `${cc2flag(analysis.country)} ${analysis.country}`
+                                    : '—'}
+                            </dd>
+                        </div>
+                        <div className="flex items-center justify-between">
+                            <dt className="text-gray-400">Dispositivo</dt>
+                            <dd className="inline-flex items-center gap-1.5 font-medium heading-text">
+                                <DeviceIcon className="text-base text-gray-400" />
+                                {d?.type ?? '—'}
+                            </dd>
+                        </div>
+                        <div className="flex items-center justify-between">
+                            <dt className="text-gray-400">SO</dt>
+                            <dd className="font-medium heading-text">
+                                {d?.os ?? '—'}
+                            </dd>
+                        </div>
+                        <div className="flex items-center justify-between">
+                            <dt className="text-gray-400">Navegador</dt>
+                            <dd className="font-medium heading-text">
+                                {d?.browser ?? '—'}
+                            </dd>
+                        </div>
+                        <div className="flex items-center justify-between">
+                            <dt className="text-gray-400">IPs vistas</dt>
+                            <dd className="font-medium heading-text">
+                                {analysis.ips.length || 0}
+                            </dd>
+                        </div>
+                    </dl>
+                    {analysis.userAgent && (
+                        <div className="mt-3 border-t border-gray-100 pt-3 dark:border-gray-700">
+                            <div className="mb-1 text-xs font-medium uppercase tracking-wide text-gray-400">
+                                User-Agent
+                            </div>
+                            <p className="break-all font-mono text-[11px] text-gray-500 dark:text-gray-400">
+                                {analysis.userAgent}
+                            </p>
+                        </div>
+                    )}
+                </Card>
+            </div>
+            <div className="space-y-4">
+                <Card>
+                    <div className="mb-3 flex items-center justify-between">
+                        <h6 className="text-sm font-semibold heading-text">
+                            Señales de riesgo
+                        </h6>
+                        <span
+                            className={`inline-flex items-center gap-1 rounded-full px-2 py-1 text-xs font-bold ring-1 ${
+                                analysis.riskScore >= 50
+                                    ? SEVERITY_STYLE.high
+                                    : analysis.riskScore >= 25
+                                      ? SEVERITY_STYLE.medium
+                                      : analysis.riskScore > 0
+                                        ? SEVERITY_STYLE.low
+                                        : SEVERITY_STYLE.info
+                            }`}
+                        >
+                            <TbAlertTriangle className="text-[11px]" />
+                            {analysis.riskScore}
+                        </span>
+                    </div>
+                    {analysis.signals.length === 0 ? (
+                        <p className="inline-flex items-center gap-1.5 text-sm text-emerald-600 dark:text-emerald-400">
+                            <TbCircleCheck className="text-base" />
+                            Sin señales de riesgo detectadas.
+                        </p>
+                    ) : (
+                        <ul className="space-y-2">
+                            {analysis.signals.map((s) => (
+                                <li
+                                    key={s.code}
+                                    className={`rounded-lg px-3 py-2 ring-1 ${SEVERITY_STYLE[s.severity]}`}
+                                >
+                                    <div className="flex items-center justify-between">
+                                        <span className="text-xs font-bold uppercase tracking-wide">
+                                            {s.code}
+                                        </span>
+                                        <span className="text-[10px] font-semibold uppercase opacity-70">
+                                            {s.severity}
+                                        </span>
+                                    </div>
+                                    <p className="mt-0.5 text-xs">{s.detail}</p>
+                                </li>
+                            ))}
+                        </ul>
+                    )}
+                </Card>
+            </div>
+        </div>
     )
 }
 
@@ -480,6 +831,10 @@ const SessionDetailView = () => {
     const [loading, setLoading] = useState(true)
     const [error, setError] = useState<string | null>(null)
     const [pdOpen, setPdOpen] = useState(true)
+    // Timeline forense + Device & IP (P0 #3).
+    const [activeTab, setActiveTab] = useState<TabKey>('overview')
+    const [events, setEvents] = useState<SessionEvent[]>([])
+    const [deviceIp, setDeviceIp] = useState<DeviceIpAnalysis | null>(null)
     const [lightbox, setLightbox] = useState<{
         url: string
         label: string
@@ -505,6 +860,24 @@ const SessionDetailView = () => {
     useEffect(() => {
         loadSession()
         // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [currentId, sessionId])
+
+    // Carga el timeline forense + análisis Device & IP (fail-soft: un fallo aquí no
+    // rompe el detalle principal; las pestañas simplemente quedan vacías).
+    useEffect(() => {
+        if (!currentId || !sessionId) return
+        let alive = true
+        tekoApi
+            .getSessionEvents(currentId, sessionId)
+            .then((r) => {
+                if (!alive) return
+                setEvents(r.events)
+                setDeviceIp(r.deviceIp)
+            })
+            .catch(() => undefined)
+        return () => {
+            alive = false
+        }
     }, [currentId, sessionId])
 
     async function decideReview(decision: 'approve' | 'decline') {
@@ -694,17 +1067,40 @@ const SessionDetailView = () => {
                 {/* ---------- Fila de módulos con checks ---------- */}
                 <div className="overflow-x-auto border-t border-gray-100 px-4 dark:border-gray-700 sm:px-5">
                     <div className="flex min-w-max items-center gap-6 pt-3">
-                        {MODULE_ROW.map((def) => (
-                            <ModuleTab
-                                key={def.key}
-                                def={def}
-                                check={
-                                    def.type
-                                        ? checkByType(def.type)
-                                        : undefined
-                                }
-                            />
-                        ))}
+                        {MODULE_ROW.map((def) => {
+                            // Badges: nº de eventos (tab Eventos) / nº de señales de
+                            // riesgo (tab Device & IP, en rojo si las hay).
+                            const withBadge: ModuleDef =
+                                def.tab === 'events'
+                                    ? { ...def, badge: events.length }
+                                    : def.tab === 'device'
+                                      ? {
+                                            ...def,
+                                            badge:
+                                                deviceIp?.signals.length ?? 0,
+                                            danger:
+                                                (deviceIp?.signals.length ??
+                                                    0) > 0,
+                                        }
+                                      : def
+                            return (
+                                <ModuleTab
+                                    key={def.key}
+                                    def={withBadge}
+                                    check={
+                                        def.type
+                                            ? checkByType(def.type)
+                                            : undefined
+                                    }
+                                    active={
+                                        !!def.tab && def.tab === activeTab
+                                    }
+                                    onSelect={() =>
+                                        setActiveTab(def.tab ?? 'overview')
+                                    }
+                                />
+                            )
+                        })}
                     </div>
                 </div>
             </Card>
@@ -768,6 +1164,15 @@ const SessionDetailView = () => {
                 </Card>
             )}
 
+            {/* ---------- Pestaña Eventos (timeline forense) ---------- */}
+            {activeTab === 'events' && <EventsTimeline events={events} />}
+
+            {/* ---------- Pestaña Device & IP ---------- */}
+            {activeTab === 'device' && <DeviceIpPanel analysis={deviceIp} />}
+
+            {/* ---------- Pestaña Overview (contenido por defecto) ---------- */}
+            {activeTab === 'overview' && (
+              <>
             {/* ---------- Tira de miniaturas ---------- */}
             <Card className="mb-4">
                 <h6 className="mb-3 text-sm font-semibold heading-text">
@@ -1226,6 +1631,8 @@ const SessionDetailView = () => {
                     )}
                 </div>
             </div>
+              </>
+            )}
 
             {/* ---------- Lightbox ---------- */}
             <Dialog

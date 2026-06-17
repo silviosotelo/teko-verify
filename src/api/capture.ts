@@ -32,6 +32,9 @@ import { isCapturable, consentShouldTransition } from "./captureGuards";
 import { engine } from "../engine";
 import { qualityModule } from "../modules/quality";
 import { PaddleOcrClient } from "../modules/document";
+// Timeline forense (P0 #3): contexto de red/dispositivo por request + registro
+// FAIL-OPEN de eventos del ciclo de vida en session_events.
+import { requestContext } from "../lib/requestContext";
 import type {
   CaptureStatusResponse,
   ConfirmResponse,
@@ -68,6 +71,31 @@ async function emitInReviewIfNeeded(
       out.result
     )
     .catch(() => undefined);
+}
+
+/**
+ * Registra un evento del timeline forense (P0 #3) con el contexto de red/dispositivo
+ * del request (IP real desde CF-Connecting-IP, país desde CF-IPCountry, UA parseado).
+ * FAIL-OPEN: recordSafe nunca lanza — un fallo de registro JAMÁS rompe la captura.
+ * Se usa fire-and-forget envuelto (await pero no-throw garantizado por recordSafe).
+ */
+async function recordEvent(
+  req: Request,
+  session: VerificationSession,
+  type: string,
+  meta: Record<string, unknown> = {}
+): Promise<void> {
+  const ctx = requestContext(req);
+  await repos.sessionEvents.recordSafe({
+    tenantId: session.tenantId,
+    sessionId: session.id,
+    type,
+    ip: ctx.ip,
+    country: ctx.country,
+    userAgent: ctx.userAgent,
+    device: ctx.device,
+    meta,
+  });
 }
 
 /** Base pública para construir las URLs token-auth de las fotos de revisión. */
@@ -280,6 +308,9 @@ captureRouter.post("/:token/consent", async (req: Request, res: Response) => {
       detail: { version: req.body?.consentVersion ?? policy.consentVersion },
       ip: req.ip ?? null,
     });
+    await recordEvent(req, session, "consent.accepted", {
+      version: req.body?.consentVersion ?? policy.consentVersion,
+    });
     const resp: ConsentResponse = { ok: true, state: "capturing" };
     res.json(resp);
   } catch (e) {
@@ -333,6 +364,13 @@ captureRouter.post("/:token/selfie", async (req: Request, res: Response) => {
     } catch {
       quality = { passed: false, reasons: ["quality_error"] };
     }
+
+    await recordEvent(req, session, "selfie.captured", {
+      qualityPassed: quality.passed,
+      qualityReasons: quality.reasons,
+      frames: frames.length,
+      activeLiveness: activeLiveness ? { challenges: activeLiveness.challenges, passed: activeLiveness.passed } : null,
+    });
 
     const resp: UploadResponse = { ok: true, state: "capturing", quality };
     res.json(resp);
@@ -394,6 +432,10 @@ captureRouter.post(
         detail: { bytes: file.buffer.length, contentType: kind.contentType },
         ip: req.ip ?? null,
       });
+      await recordEvent(req, session, "liveness.video_uploaded", {
+        bytes: file.buffer.length,
+        contentType: kind.contentType,
+      });
       const resp: UploadResponse = { ok: true, state: session.state };
       res.json(resp);
     } catch (e) {
@@ -415,6 +457,8 @@ captureRouter.post("/:token/document", async (req: Request, res: Response) => {
     const back = decodeBase64Image(req.body?.back, { allowPdf: true });
     await evidenceStore.save(session.tenantId, session.id, "doc_front", front);
     await evidenceStore.save(session.tenantId, session.id, "doc_back", back);
+    await recordEvent(req, session, "document.front.captured", { bytes: front.length });
+    await recordEvent(req, session, "document.back.captured", { bytes: back.length });
     const resp: UploadResponse = { ok: true, state: "capturing" };
     res.json(resp);
   } catch (e) {
@@ -544,6 +588,19 @@ captureRouter.post("/:token/submit", async (req: Request, res: Response) => {
 
     await emitInReviewIfNeeded(session, out);
 
+    // Timeline forense (P0 #3): el submit corre el pipeline completo en un paso.
+    // Registramos checks.computed (corrió la fusión de módulos) y decision.made
+    // (estado terminal alcanzado + LoA + motivos). El contexto device/IP es el del
+    // request del titular que disparó el submit. Fail-open (recordEvent no lanza).
+    await recordEvent(req, session, "checks.computed", { via: "submit", state: out.state });
+    await recordEvent(req, session, "decision.made", {
+      via: "submit",
+      state: out.state,
+      decision: out.result?.decision ?? null,
+      loa: out.result?.loa ?? null,
+      reasons: out.result?.reasons ?? [],
+    });
+
     const resp: SubmitResponse = { ok: out.state !== "error", state: out.state };
     res.json(resp);
   } catch (e) {
@@ -629,6 +686,15 @@ captureRouter.post("/:token/preview", async (req: Request, res: Response) => {
     const decisionPreview = { loa: verdict.loa, wouldPass: verdict.verdict === "verified" };
     void quality; // quality ya está en checks; lo dejamos explícito para legibilidad.
 
+    // Timeline forense (P0 #3): los checks se computaron y la sesión quedó en review.
+    await recordEvent(req, session, "checks.computed", {
+      via: "preview",
+      docPassed: document.passed,
+      matchPassed: match?.passed,
+      livenessPassed: out.checks.liveness?.passed,
+      decisionPreview,
+    });
+
     const base = `${EVIDENCE_BASE_URL}/verify/${session.linkToken}/evidence`;
     const resp: PreviewResponse = {
       state: "review",
@@ -673,6 +739,13 @@ captureRouter.post("/:token/confirm", async (req: Request, res: Response) => {
     }
     const out = await finalizeFromChecks(session, tenant.policies, selfie, realPipelineDeps);
     await emitInReviewIfNeeded(session, out);
+    await recordEvent(req, session, "decision.made", {
+      via: "confirm",
+      state: out.state,
+      decision: out.result?.decision ?? null,
+      loa: out.result?.loa ?? null,
+      reasons: out.reasons ?? [],
+    });
     const resp: ConfirmResponse = {
       state: out.state,
       result: out.result,
