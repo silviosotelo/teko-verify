@@ -36,6 +36,14 @@ export type VerifyState =
   | "expired"
   | string
 
+export interface StatusBranding {
+  displayName?: string
+  logoUrl?: string | null
+  primaryColor?: string
+  welcomeText?: string | null
+  supportEmail?: string | null
+}
+
 export interface StatusResult {
   state: VerifyState
   reasons?: string[]
@@ -45,6 +53,11 @@ export interface StatusResult {
    * "Comprobante de domicilio" sólo cuando es true (adaptativo por workflow).
    */
   requiresProofOfAddress?: boolean
+  /**
+   * Branding del tenant (white-label P1 #5) YA resuelto por el backend. La SPA
+   * theme-a el flujo con `primaryColor` y muestra logo/nombre/textos propios.
+   */
+  branding?: StatusBranding
 }
 
 /**

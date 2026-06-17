@@ -8,7 +8,7 @@ import { pool } from "../pool";
 import type { Executor } from "../executor";
 import { iso } from "./mapping";
 import { generateWebhookSecret } from "../../lib/crypto";
-import type { Tenant, TenantPolicy, TenantStatus } from "../../types";
+import type { Tenant, TenantBranding, TenantPolicy, TenantStatus } from "../../types";
 
 interface TenantRow {
   id: string;
@@ -16,6 +16,7 @@ interface TenantRow {
   slug: string;
   status: TenantStatus;
   policies: TenantPolicy;
+  branding: TenantBranding;
   webhook_secret: string;
   created_at: Date;
   updated_at: Date;
@@ -28,6 +29,8 @@ function mapTenant(row: TenantRow): Tenant {
     slug: row.slug,
     status: row.status,
     policies: row.policies,
+    // `branding` la mapea pg desde JSONB; default '{}' para tenants sin white-label.
+    branding: row.branding ?? {},
     webhookSecret: row.webhook_secret,
     createdAt: iso(row.created_at),
     updatedAt: iso(row.updated_at),
@@ -39,12 +42,15 @@ export interface CreateTenantInput {
   slug: string;
   status?: TenantStatus;
   policies: TenantPolicy;
+  branding?: TenantBranding;
 }
 
 export interface UpdateTenantInput {
   name?: string;
   status?: TenantStatus;
   policies?: TenantPolicy;
+  /** White-label (P1 #5): branding YA saneado a persistir (reemplaza el actual). */
+  branding?: TenantBranding;
 }
 
 export async function create(
@@ -55,14 +61,15 @@ export async function create(
   // crear el tenant; nunca se expone al titular ni en TenantResponse.
   const webhookSecret = generateWebhookSecret();
   const res = await exec.query<TenantRow>(
-    `INSERT INTO tenants (name, slug, status, policies, webhook_secret)
-     VALUES ($1, $2, COALESCE($3, 'active'), $4::jsonb, $5)
+    `INSERT INTO tenants (name, slug, status, policies, branding, webhook_secret)
+     VALUES ($1, $2, COALESCE($3, 'active'), $4::jsonb, $5::jsonb, $6)
      RETURNING *`,
     [
       input.name,
       input.slug,
       input.status ?? null,
       JSON.stringify(input.policies),
+      JSON.stringify(input.branding ?? {}),
       webhookSecret,
     ]
   );
@@ -108,6 +115,7 @@ export async function update(
        name      = COALESCE($2, name),
        status    = COALESCE($3, status),
        policies  = COALESCE($4::jsonb, policies),
+       branding  = COALESCE($5::jsonb, branding),
        updated_at = now()
      WHERE id = $1
      RETURNING *`,
@@ -116,6 +124,7 @@ export async function update(
       patch.name ?? null,
       patch.status ?? null,
       patch.policies !== undefined ? JSON.stringify(patch.policies) : null,
+      patch.branding !== undefined ? JSON.stringify(patch.branding) : null,
     ]
   );
   return res.rows[0] ? mapTenant(res.rows[0]) : null;

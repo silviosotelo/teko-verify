@@ -135,12 +135,23 @@ export interface TenantPolicy {
     }
 }
 
+// ---- White-label / branding por tenant (P1 #5) ----
+export interface TenantBranding {
+    displayName?: string
+    logoUrl?: string
+    primaryColor?: string
+    welcomeText?: string
+    supportEmail?: string
+}
+
 export interface Tenant {
     id: string
     name: string
     slug: string
     status: TenantStatus
     policies: TenantPolicy
+    // White-label (P1 #5): '{}' = branding Teko por defecto.
+    branding?: TenantBranding
     createdAt: string
 }
 

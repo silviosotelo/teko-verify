@@ -63,6 +63,13 @@ const tekoRoute: Routes = [
         meta: { pageContainerType: 'contained' },
     },
     {
+        key: 'teko.customization',
+        path: '/customization',
+        component: lazy(() => import('@/views/teko/Customization')),
+        authority: [],
+        meta: { pageContainerType: 'contained' },
+    },
+    {
         key: 'teko.apiKeys',
         path: '/api-keys',
         component: lazy(() => import('@/views/teko/ApiKeys')),

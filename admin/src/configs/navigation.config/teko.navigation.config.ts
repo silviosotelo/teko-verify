@@ -85,6 +85,16 @@ const tekoNavigationConfig: NavigationTree[] = [
                 subMenu: [],
             },
             {
+                key: 'teko.customization',
+                path: '/customization',
+                title: 'Customization',
+                translateKey: '',
+                icon: 'tekoCustomization',
+                type: NAV_ITEM_TYPE_ITEM,
+                authority: [],
+                subMenu: [],
+            },
+            {
                 key: 'teko.apiKeys',
                 path: '/api-keys',
                 title: 'API Keys',

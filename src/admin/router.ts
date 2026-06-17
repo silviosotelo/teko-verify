@@ -18,9 +18,12 @@
  */
 import { Router } from "express";
 import type { NextFunction, Request, Response } from "express";
+import multer from "multer";
 import { repos } from "../db/repos";
 import { pool } from "../db/pool";
 import { evidenceStore } from "../lib/evidenceStore";
+import { sanitizeBranding } from "../lib/branding";
+import { brandingStore } from "../lib/brandingStore";
 import {
   generateApiKey,
   generateLinkToken,
@@ -258,21 +261,43 @@ function toTenantResponse(t: {
   slug: string;
   status: TenantResponse["status"];
   policies: TenantResponse["policies"];
+  branding?: TenantResponse["branding"];
   createdAt: string;
 }): TenantResponse {
-  return { id: t.id, name: t.name, slug: t.slug, status: t.status, policies: t.policies, createdAt: t.createdAt };
+  return {
+    id: t.id,
+    name: t.name,
+    slug: t.slug,
+    status: t.status,
+    policies: t.policies,
+    branding: t.branding ?? {},
+    createdAt: t.createdAt,
+  };
 }
+
+/** Upload multipart en memoria para el logo de marca (PNG/JPEG/WebP, cap 2 MiB). */
+const LOGO_MAX_BYTES = parseInt(process.env.TEKO_LOGO_MAX_BYTES || String(2 * 1024 * 1024), 10);
+const logoUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: LOGO_MAX_BYTES, files: 1 },
+});
 
 // ---- Tenants -------------------------------------------------------------- //
 
 adminRouter.post("/tenants", canWrite, async (req: Request, res: Response) => {
   try {
-    const { name, slug, policies } = req.body ?? {};
+    const { name, slug, policies, branding } = req.body ?? {};
     if (!name || !slug) {
       res.status(400).json({ error: "name_and_slug_required" });
       return;
     }
-    const tenant = await repos.tenants.create({ name, slug, policies: mergePolicy(policies) });
+    const tenant = await repos.tenants.create({
+      name,
+      slug,
+      policies: mergePolicy(policies),
+      // White-label opcional al crear (P1 #5): saneado, fail-closed. Ausente = '{}'.
+      branding: branding !== undefined ? sanitizeBranding(branding) : undefined,
+    });
     // P0 #1: siembra los 3 workflows default (default-l1/-l2/-l3) del tenant nuevo.
     await repos.workflows.ensureDefaults(tenant.id);
     await repos.auditLog.record({
@@ -308,14 +333,70 @@ adminRouter.patch("/tenants/:id", canWrite, async (req: Request, res: Response) 
     res.status(404).json({ error: "tenant_not_found" });
     return;
   }
-  const { name, status, policies } = req.body ?? {};
+  const { name, status, policies, branding } = req.body ?? {};
+  // White-label (P1 #5): el branding entrante se SANEA y se MEZCLA sobre el actual
+  // (parche aditivo: solo pisa los campos válidos presentes; conserva el resto).
+  const mergedBranding =
+    branding !== undefined
+      ? { ...existing.branding, ...sanitizeBranding(branding) }
+      : undefined;
   const updated = await repos.tenants.update(req.params.id, {
     name,
     status,
     policies: policies ? mergePolicy({ ...existing.policies, ...policies }) : undefined,
+    branding: mergedBranding,
   });
+  if (branding !== undefined) {
+    await repos.auditLog.record({
+      tenantId: req.params.id,
+      actor: `admin:${req.adminOperator?.operatorId ?? "?"}`,
+      event: "tenant.branding_updated",
+      detail: { fields: Object.keys(sanitizeBranding(branding)) },
+      ip: req.ip ?? null,
+    });
+  }
   res.json(toTenantResponse(updated!));
 });
+
+// POST /admin/tenants/:id/branding/logo  (multipart, campo `logo`) → white-label P1 #5
+// Sube el logo de marca: se normaliza a PNG on-prem (brandingStore) y se setea
+// branding.logoUrl = /branding/:id/logo?v=<ts> (cache-bust). Sirve público el GET.
+// MUTACIÓN → canWrite. Fail-closed: imagen inválida → 400.
+adminRouter.post(
+  "/tenants/:id/branding/logo",
+  canWrite,
+  logoUpload.single("logo"),
+  async (req: Request, res: Response) => {
+    const tenant = await repos.tenants.getById(req.params.id);
+    if (!tenant) {
+      res.status(404).json({ error: "tenant_not_found" });
+      return;
+    }
+    const file = (req as Request & { file?: { buffer: Buffer } }).file;
+    if (!file || !file.buffer || file.buffer.length < 50) {
+      res.status(400).json({ error: "logo_missing" });
+      return;
+    }
+    try {
+      await brandingStore.saveLogo(tenant.id, file.buffer);
+    } catch (e) {
+      res.status(400).json({ error: "logo_invalid", detail: (e as Error).message });
+      return;
+    }
+    const logoUrl = `/branding/${tenant.id}/logo?v=${Date.now()}`;
+    const updated = await repos.tenants.update(tenant.id, {
+      branding: { ...tenant.branding, logoUrl },
+    });
+    await repos.auditLog.record({
+      tenantId: tenant.id,
+      actor: `admin:${req.adminOperator?.operatorId ?? "?"}`,
+      event: "tenant.logo_uploaded",
+      detail: { bytes: file.buffer.length },
+      ip: req.ip ?? null,
+    });
+    res.json({ logoUrl, branding: updated?.branding ?? {} });
+  }
+);
 
 // ---- API keys ------------------------------------------------------------- //
 

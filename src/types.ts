@@ -641,6 +641,44 @@ export interface TenantPolicy {
   };
 }
 
+// ---- White-label / branding por tenant (P1 #5) --------------------------- //
+
+/**
+ * Branding por tenant (tenants.branding JSONB). TODOS los campos OPCIONALES: lo que
+ * el tenant no define cae al branding Teko por defecto (verde #16a34a). Un tenant sin
+ * branding propio se ve idéntico a hoy. Ver lib/branding.ts (resolve/sanitize).
+ */
+export interface TenantBranding {
+  /** Nombre mostrado en el header del flujo de captura (reemplaza "TEKO"). */
+  displayName?: string;
+  /** Logo: URL http(s) o ruta on-prem (/branding/:tenantId/logo). null/ausente = wordmark Teko. */
+  logoUrl?: string;
+  /** Color primario theme-able en hex #RRGGBB (reemplaza el verde Teko). */
+  primaryColor?: string;
+  /** Texto de bienvenida opcional en la intro. */
+  welcomeText?: string;
+  /** Email de soporte opcional (footer). */
+  supportEmail?: string;
+}
+
+/** Branding YA resuelto (default Teko aplicado) — lo que consume el front. */
+export interface ResolvedBranding {
+  displayName: string;
+  logoUrl: string | null;
+  primaryColor: string;
+  welcomeText: string | null;
+  supportEmail: string | null;
+}
+
+/** apps — agrupador OPCIONAL debajo del tenant (P1 #5 App layer liviana). */
+export interface App {
+  id: string;
+  tenantId: string;
+  name: string;
+  isDefault: boolean;
+  createdAt: string; // ISO 8601
+}
+
 // ---- Workflows (configurables + versionados) — P0 #1 --------------------- //
 
 /**
@@ -730,6 +768,8 @@ export interface Tenant {
   slug: string;
   status: TenantStatus;
   policies: TenantPolicy;
+  /** White-label por tenant (P1 #5). '{}' = branding Teko por defecto (verde). */
+  branding: TenantBranding;
   /** Secreto HMAC por tenant para firmar los webhooks (§8). Nunca se expone al titular. */
   webhookSecret: string;
   createdAt: string; // ISO 8601
@@ -1216,6 +1256,13 @@ export interface CaptureStatusResponse {
    * insertar (o no) el paso "Comprobante de domicilio" — adaptativo por workflow.
    */
   requiresProofOfAddress?: boolean;
+  /**
+   * Branding YA resuelto del tenant de la sesión (white-label P1 #5). SIEMPRE
+   * presente (default Teko aplicado): el front theme-a el flujo con `primaryColor`,
+   * muestra `logoUrl`/`displayName` en el header y `welcomeText` en la intro. Sin
+   * branding propio ⇒ verde Teko + wordmark "TEKO" (idéntico a hoy).
+   */
+  branding?: ResolvedBranding;
 }
 
 /** Evento SSE empujado al cliente de captura (patrón events.ts). */
@@ -1232,6 +1279,8 @@ export interface CreateTenantRequest {
   name: string;
   slug: string;
   policies?: Partial<TenantPolicy>;
+  /** White-label opcional al crear (P1 #5). Se sanea; ausente = branding Teko. */
+  branding?: TenantBranding;
 }
 
 export interface TenantResponse {
@@ -1240,14 +1289,18 @@ export interface TenantResponse {
   slug: string;
   status: TenantStatus;
   policies: TenantPolicy;
+  /** White-label por tenant (P1 #5) — crudo, para editar en "Customization". */
+  branding: TenantBranding;
   createdAt: string;
 }
 
-/** PATCH /admin/tenants/:id — actualizar políticas/estado. */
+/** PATCH /admin/tenants/:id — actualizar políticas/estado/branding. */
 export interface UpdateTenantRequest {
   name?: string;
   status?: TenantStatus;
   policies?: Partial<TenantPolicy>;
+  /** White-label (P1 #5): se mezcla sobre el branding actual y se sanea. */
+  branding?: TenantBranding;
 }
 
 /** POST /v1/tenants/:id/api-keys · POST /admin/tenants/:id/api-keys. */

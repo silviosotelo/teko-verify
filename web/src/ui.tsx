@@ -1,6 +1,27 @@
-import type { ButtonHTMLAttributes, ReactNode } from "react"
+import { createContext, useContext, type ButtonHTMLAttributes, type ReactNode } from "react"
+import { DEFAULT_BRANDING, type Branding } from "./branding"
 
 /** Componentes de UI compartidos — radios redondeados + verde Teko (estilo ecme/Behance). */
+
+/**
+ * Branding del tenant (white-label P1 #5) propagado a los componentes de marca.
+ * Default = branding Teko (verde + wordmark) hasta que /status resuelve el real.
+ */
+const BrandingContext = createContext<Branding>(DEFAULT_BRANDING)
+
+export function BrandingProvider({
+  value,
+  children,
+}: {
+  value: Branding
+  children: ReactNode
+}) {
+  return <BrandingContext.Provider value={value}>{children}</BrandingContext.Provider>
+}
+
+export function useBranding(): Branding {
+  return useContext(BrandingContext)
+}
 
 export function Button({
   variant = "primary",
@@ -195,16 +216,53 @@ export function OptionRow({
   )
 }
 
-/** Logo Teko (T·E·KO con la E en verde, como el HTML original). */
+/**
+ * Marca del header. White-label (P1 #5):
+ *   - Con logo propio del tenant → muestra el logo + el displayName.
+ *   - Con displayName propio (sin logo) → inicial en chip primario + nombre.
+ *   - Sin branding (default Teko) → wordmark "TEKO" con la E en el color primario,
+ *     idéntico a hoy.
+ */
 export function Brand() {
+  const b = useBranding()
+  const isTeko =
+    !b.logoUrl && (!b.displayName || b.displayName === DEFAULT_BRANDING.displayName)
+
+  if (isTeko) {
+    return (
+      <div className="mb-5 flex items-center gap-2.5">
+        <span className="flex size-10 items-center justify-center rounded-2xl bg-primary text-lg font-black tracking-wider text-white shadow-md shadow-primary/30">
+          T
+        </span>
+        <div className="leading-tight">
+          <div className="text-lg font-extrabold tracking-[0.2em] text-gray-900">
+            T<span className="text-primary">E</span>KO
+          </div>
+          <div className="-mt-0.5 text-[11px] text-gray-400">
+            identidad verificada
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  const initial = (b.displayName || "?").trim().charAt(0).toUpperCase()
   return (
     <div className="mb-5 flex items-center gap-2.5">
-      <span className="flex size-10 items-center justify-center rounded-2xl bg-primary text-lg font-black tracking-wider text-white shadow-md shadow-primary/30">
-        T
-      </span>
+      {b.logoUrl ? (
+        <img
+          src={b.logoUrl}
+          alt={b.displayName}
+          className="size-10 rounded-2xl object-contain shadow-md shadow-gray-900/10"
+        />
+      ) : (
+        <span className="flex size-10 items-center justify-center rounded-2xl bg-primary text-lg font-black text-white shadow-md shadow-primary/30">
+          {initial}
+        </span>
+      )}
       <div className="leading-tight">
-        <div className="text-lg font-extrabold tracking-[0.2em] text-gray-900">
-          T<span className="text-primary">E</span>KO
+        <div className="text-lg font-extrabold tracking-tight text-gray-900">
+          {b.displayName}
         </div>
         <div className="-mt-0.5 text-[11px] text-gray-400">
           identidad verificada

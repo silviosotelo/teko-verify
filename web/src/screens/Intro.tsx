@@ -13,7 +13,13 @@ import { VerifyHero, IconIdCard, IconFace, IconLock } from "../Icons"
  * consentimiento, pero NO saltea el registro: el aviso de Ley 7593 y el
  * registro server-side se mantienen (guard de consentimiento intacto).
  */
-export function Intro({ onDone }: { onDone: () => void }) {
+export function Intro({
+  onDone,
+  welcomeText,
+}: {
+  onDone: () => void
+  welcomeText?: string | null
+}) {
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState<string | null>(null)
 
@@ -42,8 +48,9 @@ export function Intro({ onDone }: { onDone: () => void }) {
           Verificá tu identidad
         </h1>
         <p className="mx-auto mt-2 max-w-xs text-center text-sm leading-relaxed text-gray-500">
-          Para confirmar que sos vos vamos a necesitar tu documento y una selfie.
-          Toma 2 a 3 minutos.
+          {welcomeText
+            ? welcomeText
+            : "Para confirmar que sos vos vamos a necesitar tu documento y una selfie. Toma 2 a 3 minutos."}
         </p>
 
         <ul className="mt-7 flex flex-col gap-5">

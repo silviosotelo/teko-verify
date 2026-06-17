@@ -28,6 +28,7 @@ import { tenantRouter } from "./api/tenant";
 import { captureRouter } from "./api/capture";
 import { adminRouter, bootstrapAdminOperator } from "./admin/router";
 import { webhookDispatcher } from "./webhooks/dispatcher";
+import { brandingStore } from "./lib/brandingStore";
 import {
   tenantRateLimiter,
   captureRateLimiter,
@@ -116,6 +117,21 @@ app.get("/health", async (_req: Request, res: Response) => {
     liveness: livenessModule.ready,
     db,
   });
+});
+
+// ===================== branding logo (white-label P1 #5) ================== //
+// Sirve el logo de marca del tenant (PNG normalizado on-prem). Público: el logo NO
+// es secreto y el flujo de captura (sin auth) lo referencia como <img src>. 404 si
+// el tenant no subió logo (el front cae al wordmark Teko). Antes de los estáticos.
+app.get("/branding/:tenantId/logo", async (req: Request, res: Response) => {
+  const buf = await brandingStore.readLogo(req.params.tenantId);
+  if (!buf) {
+    res.status(404).json({ error: "logo_not_found" });
+    return;
+  }
+  res.setHeader("Content-Type", "image/png");
+  res.setHeader("Cache-Control", "public, max-age=300");
+  res.send(buf);
 });
 
 // ===================== static frontends (captura/admin) =================== //

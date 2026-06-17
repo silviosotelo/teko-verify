@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react"
 import { TOKEN, getStatus, ApiError, type StatusResult, type DocumentType } from "./api"
 import { errorMessage } from "./messages"
-import { Brand, Card, Stepper } from "./ui"
+import { applyTheme, normalizeBranding, DEFAULT_BRANDING, type Branding } from "./branding"
+import { Brand, BrandingProvider, Card, Stepper } from "./ui"
 import { Spinner, CameraHero, IconSun, IconFace, IconNoGlasses } from "./Icons"
 import { Intro } from "./screens/Intro"
 import { ChooseDocument } from "./screens/ChooseDocument"
@@ -146,6 +147,8 @@ export function App() {
   // ¿El workflow exige comprobante de domicilio (P1 #4)? Lo trae GET /status. Cuando
   // es true se inserta el paso "Comprobante de domicilio" tras la captura del documento.
   const [requiresPoa, setRequiresPoa] = useState(false)
+  // Branding del tenant (white-label P1 #5). Default Teko hasta que /status resuelve.
+  const [branding, setBranding] = useState<Branding>(DEFAULT_BRANDING)
 
   // Rehidratación al montar (#3/#6).
   useEffect(() => {
@@ -159,6 +162,10 @@ export function App() {
       try {
         const s = await getStatus()
         if (!alive) return
+        // White-label (P1 #5): aplica el branding del tenant (color + logo/nombre).
+        const b = normalizeBranding(s.branding)
+        setBranding(b)
+        applyTheme(b.primaryColor)
         setRequiresPoa(s.requiresProofOfAddress === true)
         const target = stepForState(s.state)
         // Estados terminales/tip rehidratan directo al resultado con su payload.
@@ -215,8 +222,11 @@ export function App() {
   }
 
   return (
+    <BrandingProvider value={branding}>
     <Shell step={step}>
-      {step === "intro" && <Intro onDone={() => setStep("choose-doc")} />}
+      {step === "intro" && (
+        <Intro welcomeText={branding.welcomeText} onDone={() => setStep("choose-doc")} />
+      )}
       {step === "choose-doc" && (
         <ChooseDocument
           onDone={(dt) => {
@@ -271,5 +281,6 @@ export function App() {
         <Result status={status} onRetry={() => setStep("choose-doc")} />
       )}
     </Shell>
+    </BrandingProvider>
   )
 }

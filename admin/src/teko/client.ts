@@ -18,6 +18,7 @@ import type {
     SessionEventsResponse,
     SessionState,
     Tenant,
+    TenantBranding,
     TenantPolicy,
     TestSessionResponse,
     TestVerifyResponse,
@@ -134,9 +135,30 @@ export const tekoApi = {
             name?: string
             status?: string
             policies?: Partial<TenantPolicy>
+            branding?: TenantBranding
         },
     ) {
         return request<Tenant>('PATCH', `/tenants/${id}`, body)
+    },
+
+    // ---- White-label: logo de marca (P1 #5) ----
+    // Sube el logo (multipart, campo `logo`) → el backend lo normaliza on-prem y
+    // devuelve { logoUrl }. Bearer manual (request() es JSON-only).
+    async uploadBrandingLogo(tenantId: string, file: File) {
+        const token = getToken()
+        const form = new FormData()
+        form.append('logo', file)
+        const res = await fetch(`${BASE}/tenants/${tenantId}/branding/logo`, {
+            method: 'POST',
+            headers: token ? { Authorization: `Bearer ${token}` } : {},
+            body: form,
+        })
+        if (res.status === 401) {
+            redirectToLogin()
+            throw new ApiError(401, 'No autorizado')
+        }
+        if (!res.ok) throw new ApiError(res.status, `Error ${res.status}`)
+        return (await res.json()) as { logoUrl: string; branding: TenantBranding }
     },
 
     // ---- API keys ----

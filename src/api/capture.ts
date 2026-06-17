@@ -36,6 +36,7 @@ import { PaddleOcrClient } from "../modules/document";
 // Timeline forense (P0 #3): contexto de red/dispositivo por request + registro
 // FAIL-OPEN de eventos del ciclo de vida en session_events.
 import { requestContext } from "../lib/requestContext";
+import { resolveBranding } from "../lib/branding";
 import { isDocumentType } from "../types";
 import type {
   CaptureStatusResponse,
@@ -856,6 +857,8 @@ captureRouter.get("/:token/status", async (req: Request, res: Response) => {
     redirectUrl: session.redirectUrl,
     // P1 #4: la SPA inserta el paso "Comprobante de domicilio" sólo si el workflow lo pide.
     requiresProofOfAddress: session.workflowSnapshot?.proofOfAddress?.required === true,
+    // White-label (P1 #5): branding YA resuelto (default Teko si el tenant no lo define).
+    branding: resolveBranding(tenant?.branding),
   };
   res.json(resp);
 });
