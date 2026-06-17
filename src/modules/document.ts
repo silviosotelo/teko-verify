@@ -914,13 +914,14 @@ function fillMissingFront(dst: ExtractedDocument, src: ExtractedDocument): void 
 //
 // PaddleOCR devuelve cajas AXIS-ALIGNED (el orden de esquinas NO codifica dirección
 // de lectura), así que NO se puede discriminar 90 vs 270 por geometría pura. Por eso
-// el chooser es AUTO-VALIDANTE: sólo cuando el frente es claramente VERTICAL prueba
-// {90°, 270°}, corre el extractor REAL bajo cada candidato y se queda con el que
-// ancla MÁS campos requeridos. Un frente UPRIGHT (horizontal) usa ángulo 0 =
-// transformación IDENTIDAD → AnchorLines byte-idénticas → CERO regresión (y las 3
-// cédulas conocidas, todas upright, quedan intactas por construcción). No tratamos
-// 180° (el lote no tiene ninguno y agregarlo sólo sumaría riesgo de regresión en
-// upright). FAIL-CLOSED: si ningún candidato ancla campos, el resultado queda vacío.
+// el chooser es AUTO-VALIDANTE: cuando el frente es claramente VERTICAL prueba
+// {90°, 270°}; cuando es HORIZONTAL prueba {0°, 180°} (upright vs cabeza-abajo). En
+// ambos corre el extractor REAL bajo cada candidato y se queda con el que ancla MÁS
+// campos requeridos. El 0° (identidad) gana SIEMPRE los empates en horizontal →
+// AnchorLines byte-idénticas → CERO regresión (un upright nunca cae a 180°, y las 3
+// cédulas conocidas, todas upright, quedan intactas por construcción). El 180° sólo
+// gana si ancla ESTRICTAMENTE más campos que el 0° — el caso cabeza-abajo real.
+// FAIL-CLOSED: si ningún candidato ancla campos, el resultado queda vacío.
 // ---------------------------------------------------------------------------
 
 /** Rota un punto (x,y) por `angleDeg` ∈ {0,90,180,270} (sentido matemático CCW). */
@@ -991,27 +992,41 @@ function requiredFieldCount(e: ExtractedDocument): number {
 }
 
 /**
- * Devuelve las líneas del frente en su orientación de LECTURA. Si el frente NO se
- * ve vertical → ángulo 0 (identidad, las mismas líneas). Si se ve vertical, prueba
- * {90°,270°}, corre el extractor REAL bajo cada candidato y devuelve las líneas del
- * que ancló MÁS campos requeridos (auto-validante; PaddleOCR no codifica dirección
- * de lectura). Empate o cero campos en ambos → 90° por defecto (la rotación que más
- * frecuentemente endereza el lote); el extractor downstream igual fail-closea.
+ * Devuelve las líneas del frente en su orientación de LECTURA probando el conjunto
+ * de rotaciones {0,90,180,270} que corresponde a la geometría detectada: si el texto
+ * se ve VERTICAL prueba {90°,270°}; si se ve HORIZONTAL prueba {0°,180°} (upright vs
+ * cabeza-abajo). Corre el extractor REAL bajo cada candidato y devuelve las líneas del
+ * que ancló MÁS campos requeridos (auto-validante; PaddleOCR no codifica dirección de
+ * lectura). El primer candidato gana los empates: 0° (identidad) en horizontal — así
+ * un upright nunca se reorienta, CERO regresión — y 90° en vertical. Si ningún
+ * candidato ancla, devuelve el de mayor score igual y el extractor downstream fail-closea.
  *
  * Devuelve `{ lines, angle }` para que el Inspector pueda rotar también la imagen
  * de overlay por el MISMO ángulo y que las cajas dibujadas calcen.
  */
 function orientFrontLines(frontLines: OcrLine[]): { lines: OcrLine[]; angle: number } {
-  if (!looksVertical(frontLines)) return { lines: frontLines, angle: 0 };
-  let best = { lines: rotateOcrLines(frontLines, 90), angle: 90, score: -1 };
-  for (const angle of [90, 270]) {
+  // Conjunto de candidatos según la geometría de las cajas:
+  //   - Texto VERTICAL (alto≫ancho) → la imagen está rotada 90° en píxeles; el
+  //     enderezamiento es {90,270} (sentido desconocido: PaddleOCR no codifica
+  //     dirección de lectura, así que probamos ambos).
+  //   - Texto HORIZONTAL → o bien UPRIGHT (0°) o bien CABEZA-ABAJO (180°). Probamos
+  //     {0,180}. El 0° va PRIMERO y la comparación es estricta (`>`), de modo que un
+  //     upright (que ancla todo a 0°) NUNCA cae a 180° → CERO regresión, y la rama
+  //     0° devuelve `frontLines` por identidad (`rotateOcrLines(...,0)` no copia).
+  // En ambos casos corremos el extractor REAL bajo cada candidato y nos quedamos con
+  // el que ancla MÁS campos requeridos (auto-validante). El primer candidato gana los
+  // empates (identidad-preferente). FAIL-CLOSED: si ninguno ancla, igual devolvemos el
+  // de mayor score (0 en horizontal, 90 en vertical) y el downstream queda vacío.
+  const candidates = looksVertical(frontLines) ? [90, 270] : [0, 180];
+  let best: { lines: OcrLine[]; angle: number; score: number } | null = null;
+  for (const angle of candidates) {
     const rotated = rotateOcrLines(frontLines, angle);
     const probe = emptyExtracted();
     extractFrontInto(rotated, probe);
     const score = requiredFieldCount(probe);
-    if (score > best.score) best = { lines: rotated, angle, score };
+    if (best === null || score > best.score) best = { lines: rotated, angle, score };
   }
-  return { lines: best.lines, angle: best.angle };
+  return { lines: best!.lines, angle: best!.angle };
 }
 
 /**

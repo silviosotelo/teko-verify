@@ -328,6 +328,51 @@ describe("document — frente ROTADO 90° (texto vertical, ESQUIVEL D. CI 650800
 });
 
 // ===========================================================================
+// FRENTE CABEZA-ABAJO (rotado 180°). Cajas REALES capturadas del sidecar sobre
+// la cédula SOTELO MACHUCA (CI 4895448) tras rotar la imagen 180° con PIL y pasarla
+// por /admin/ocr-debug (variant=raw) en el server (34): el recognizer de PaddleOCR
+// lee el TEXTO bien (auto-rota 180 a nivel de línea) pero entrega las cajas en su
+// posición de píxel INVERTIDA → cada valor cae ARRIBA de su etiqueta → `lineBelow`
+// lo descarta → fechaNac/sexo/lugar VACÍOS pese a leerse con score ~0.99. El chooser
+// (rama horizontal {0,180}) debe detectar que 180° ancla MÁS campos que 0° y enderezar.
+// Sin el fix de 180 este test queda ROJO (devolvía identidad → angle 0 → campos vacíos).
+// ===========================================================================
+
+/** OCR REAL del frente CABEZA-ABAJO (cajas exactas del sidecar sobre la imagen rotada 180°). */
+const UPSIDEDOWN_FRONT: OcrLine[] = [
+  lineBox("ASUNCION", 0.99, 804, 77, 1047, 124),
+  lineBox("N° 4895448", 0.94, 1225, 111, 1512, 171),
+  lineBox("LUGAR DE NACIMIENTO", 0.99, 750, 126, 1060, 166),
+  lineBox("MASCULINO", 1.0, 412, 183, 679, 229),
+  lineBox("13-11-1997", 0.99, 830, 175, 1045, 223),
+  lineBox("SEXO", 1.0, 623, 234, 695, 268),
+  lineBox("FECHA DE NACIMIENTO", 0.99, 755, 227, 1057, 264),
+  lineBox("SILVIO ANDRES", 0.96, 704, 567, 1045, 606),
+  lineBox("Cedula de Identidad Civil", 0.98, 659, 845, 1154, 893),
+  lineBox("REPUBLICA DEL PARAGUAY", 0.97, 270, 908, 1157, 966),
+];
+
+describe("document — frente CABEZA-ABAJO 180° (SOTELO MACHUCA CI 4895448)", () => {
+  it("detecta y endereza la orientación 180° (angle=180)", () => {
+    // Rama horizontal {0,180}: 0° ancla casi nada (valores arriba de su etiqueta);
+    // 180° endereza y ancla MÁS campos requeridos → el chooser elige 180.
+    expect(extractFrontDebug(UPSIDEDOWN_FRONT).angle).toBe(180);
+  });
+
+  it("fechaNacimiento se ancla tras enderezar 180° (estaba ARRIBA de su etiqueta)", () => {
+    expect(extractFrontDebug(UPSIDEDOWN_FRONT).extracted.titular.fechaNacimiento).toBe(
+      "1997-11-13",
+    );
+  });
+
+  it("la CI suelta se recupera tras enderezar", () => {
+    expect(extractFrontDebug(UPSIDEDOWN_FRONT).extracted.documento.numeroCedula).toBe(
+      "4895448",
+    );
+  });
+});
+
+// ===========================================================================
 // MRZ TD1 (dorso de la cédula PY). Vectores: el canónico ICAO 9303 (ANNA
 // ERIKSSON) y un dorso PY REAL capturado del sidecar (SOTELO MACHUCA). Verifica
 // parseo de campos, dígitos verificadores (7-3-1), normalización de sexo,
