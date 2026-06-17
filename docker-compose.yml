@@ -32,6 +32,9 @@ services:
       # Evidencia: alinear con el volumen teko-evidence (montado en /data/evidence).
       # Sin esto el default /data/teko/evidence cae en la capa efímera y se pierde en cada rebuild.
       TEKO_EVIDENCE_DIR: "/data/evidence"
+      # Logo de marca (white-label P1 #5): bajo el MISMO volumen persistido que la
+      # evidencia, para que el logo no caiga en la capa efímera (se perdería en rebuild).
+      TEKO_BRANDING_DIR: "/data/evidence/branding"
       # SMTP (Office365) para el envío nativo del link de verificación por email.
       # Los VALORES (incl. SMTP_PASSWORD) viven SOLO en el .env junto al compose del
       # server (NO se commitean): aquí sólo se referencian las vars. Si faltan, el
