@@ -68,7 +68,14 @@ export type CheckType =
    * verificada, que el documento sea reciente y que haya domicilio. Señal/score (NO
    * rechazo duro): el ruteo a revisión humana lo decide el workflow.
    */
-  | "proof_of_address";
+  | "proof_of_address"
+  /**
+   * Estimación de edad facial del selfie (P2). Check CONFIGURABLE: corre un modelo de
+   * edad (FairFace ResNet-34, CC BY 4.0) sobre el rostro y devuelve la edad estimada +
+   * rango. Señal/score: el ruteo (flag/review) o el rechazo (`onUnderage:reject` si la
+   * edad estimada < `minAge`) lo decide el workflow. NO lo consume `decision()`.
+   */
+  | "age_estimation";
 
 /**
  * Tipo de evidencia almacenada — §5 (evidence.tipo).
@@ -451,6 +458,13 @@ export interface PipelineChecks {
    * `proofOfAddress.onFail`. Sólo corre con `proofOfAddress.required`.
    */
   proofOfAddress?: ProofOfAddressResult;
+  /**
+   * Estimación de edad facial del selfie (P2). NO la consume `decision()` (es
+   * señal/score): el ruteo a revisión (`onUnderage:review`) o el rechazo duro
+   * (`onUnderage:reject` cuando la edad estimada < `minAge`) lo aplica el pipeline.
+   * Sólo corre con `ageEstimation.required`.
+   */
+  ageEstimation?: AgeEstimationResult;
 }
 
 // ============================================================================ //
@@ -632,6 +646,42 @@ export interface ProofOfAddressResult {
   /** Confianza media del OCR (0..1) — informativo. */
   ocrConfidence?: number;
   /** Si el OCR no pudo correr / lanzó (fail-closed → passed=false). */
+  error?: string;
+}
+
+// ============================================================================ //
+// 2.quinquies MÓDULO AGE ESTIMATION — estimación de edad facial (P2)
+// ============================================================================ //
+
+/**
+ * Resultado del módulo `ageEstimation` — se persiste como check `age_estimation`
+ * (detail JSONB). Corre un modelo de edad facial (FairFace ResNet-34, CC BY 4.0) sobre
+ * el rostro del selfie y devuelve la EDAD ESTIMADA puntual + el RANGO (bucket argmax) +
+ * la CONFIANZA. `estimatedAge` es un estimado estadístico (valor esperado sobre los
+ * buckets), NO una edad legal: el gate `minAge` es un control de riesgo, no prueba de
+ * mayoría de edad.
+ *
+ * NO es rechazo duro por sí solo: es señal/score (igual que aml/face_search). `decision()`
+ * no lo consume; el workflow decide vía `ageEstimation.onUnderage` (flag|review|reject).
+ * FAIL-CLOSED: si el modelo no corre o no hay rostro, `passed=false` + `error` (una edad
+ * NUNCA se acredita en silencio; con `onUnderage:reject` el faltante ⇒ rechazo).
+ */
+export interface AgeEstimationResult {
+  /** Edad estimada puntual en años (valor esperado sobre la distribución de buckets). */
+  estimatedAge: number;
+  /** Rango/bucket de mayor probabilidad (p.ej. "30-39"; "" si fail-closed). */
+  range: string;
+  /** Confianza 0..1 del bucket de mayor probabilidad. */
+  confidence: number;
+  /** Distribución completa por bucket (auditable). Ausente si fail-closed. */
+  buckets?: Array<{ label: string; prob: number }>;
+  /** Edad mínima exigida por el workflow (auditable). undefined = sólo reporta. */
+  minAge?: number;
+  /** ¿La edad estimada cae por debajo de `minAge`? (false si no hay minAge). */
+  underage: boolean;
+  /** Veredicto del check: !underage (y modelo/rostro OK). */
+  passed: boolean;
+  /** Si el modelo no corrió / no hubo rostro (fail-closed → passed=false). */
   error?: string;
 }
 
@@ -826,6 +876,18 @@ export interface WorkflowDefinition {
     onFail?: "review" | "flag";
   };
   /**
+   * Estimación de edad facial del selfie (P2). `required` = el check corre. `minAge` =
+   * edad mínima exigida; si la edad estimada cae por debajo, `onUnderage` decide:
+   * 'flag' (default) sólo persiste el hallazgo; 'review' rutea a la cola de revisión
+   * humana; 'reject' es rechazo DURO de la sesión. Sin `minAge` el check sólo REPORTA la
+   * edad (no gatea). FAIL-CLOSED: con 'reject', un modelo ausente / sin rostro ⇒ rechazo.
+   */
+  ageEstimation?: {
+    required: boolean;
+    minAge?: number;
+    onUnderage?: "flag" | "review" | "reject";
+  };
+  /**
    * Cuestionario custom (P2). Referencia a un `questionnaires.id` del tenant. Si está
    * presente (y `required` no es false), el flujo de captura EXIGE que el solicitante
    * responda el set de preguntas antes de finalizar; las respuestas se persisten en la
@@ -966,7 +1028,8 @@ export type CheckDetail =
   | MatchResult
   | AmlResult
   | FaceSearchResult
-  | ProofOfAddressResult;
+  | ProofOfAddressResult
+  | AgeEstimationResult;
 
 /** verification_checks — resultado granular por módulo, auditable (§5). */
 export interface VerificationCheck {

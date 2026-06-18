@@ -24,6 +24,7 @@ import { engine } from "./engine";
 import { pool } from "./db/pool";
 import { qualityModule } from "./modules/quality";
 import { livenessModule } from "./modules/liveness";
+import { ageEstimationModule } from "./modules/ageEstimation";
 import { tenantRouter } from "./api/tenant";
 import { captureRouter } from "./api/capture";
 import { adminRouter, bootstrapAdminOperator } from "./admin/router";
@@ -115,6 +116,7 @@ app.get("/health", async (_req: Request, res: Response) => {
     engine: engine.ready,
     quality: qualityModule.ready,
     liveness: livenessModule.ready,
+    ageEstimation: ageEstimationModule.ready,
     db,
   });
 });
@@ -207,7 +209,11 @@ async function main(): Promise<void> {
   // 2) Engine (obligatorio): si no carga, el servicio no arranca (fail-closed).
   await engine.init();
   // 3) Modelos ML nuevos (no-throw; fail-closed adentro de cada módulo).
-  await Promise.all([qualityModule.init(), livenessModule.init()]);
+  await Promise.all([
+    qualityModule.init(),
+    livenessModule.init(),
+    ageEstimationModule.init(),
+  ]);
   // 3.5) Bootstrap fail-closed del primer operador admin (si está configurado por env).
   //      Sin esto y con admin_operators vacía, el dashboard queda sin acceso.
   await bootstrapAdminOperator().catch((e) => {
@@ -229,7 +235,8 @@ async function main(): Promise<void> {
     // eslint-disable-next-line no-console
     console.log(
       `[teko-verify] listening on :${cfg.PORT} | engine=${engine.ready} ` +
-        `quality=${qualityModule.ready} liveness=${livenessModule.ready}`
+        `quality=${qualityModule.ready} liveness=${livenessModule.ready} ` +
+        `ageEstimation=${ageEstimationModule.ready}`
     );
   });
 }

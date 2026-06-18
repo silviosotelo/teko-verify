@@ -65,6 +65,16 @@ export const PAD_MODEL_2 =
 export const GLASSES_MODEL =
   process.env.TEKO_GLASSES_MODEL || "/app/models/face_attrib_net.onnx";
 
+/**
+ * Estimación de edad facial (P2): FairFace ResNet-34 (dchen236/FairFace, LICENCIA
+ * **CC BY 4.0** — uso comercial permitido con atribución; ver docs/specs/age-estimation.md).
+ * Exportado a ONNX desde los pesos oficiales (res34_fair_align_multi_7_20190809.pt).
+ * Multi-tarea: 18 logits = [raza(7), género(2), EDAD(9)]; sólo se usa la cabeza de EDAD.
+ * Entrada 224x224 RGB, normalización ImageNet, NCHW. Self-host en el volumen del 34.
+ */
+export const AGE_MODEL =
+  process.env.TEKO_AGE_MODEL || "/app/models/age_fairface_res34.onnx";
+
 // ---------------------------------------------------------------------------
 // Sidecar OCR (PaddleOCR, Python) — POST /ocr
 // ---------------------------------------------------------------------------

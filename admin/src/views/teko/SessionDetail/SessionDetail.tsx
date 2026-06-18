@@ -52,6 +52,7 @@ import { useTenant } from '@/teko/TenantContext'
 import { LoaBadge, PassPill } from '@/teko/badges'
 import { fmtDate, fmtScore } from '@/teko/format'
 import type {
+    AgeEstimationResult,
     AmlResult,
     CheckType,
     DeviceIpAnalysis,
@@ -1592,6 +1593,9 @@ const SessionDetailView = () => {
     const proofOfAddressResult = checkByType('proof_of_address')?.detail as
         | ProofOfAddressResult
         | undefined
+    const ageResult = checkByType('age_estimation')?.detail as
+        | AgeEstimationResult
+        | undefined
     const reasons = data.result?.reasons ?? []
     const fullName =
         [form.firstName, form.lastName].filter(Boolean).join(' ').trim() ||
@@ -1877,6 +1881,58 @@ const SessionDetailView = () => {
                     </div>
                 )}
             </Card>
+
+            {/* ---------- Estimación de edad (P2) ---------- */}
+            {ageResult && (
+                <Card className="mb-4">
+                    <div className="flex items-center justify-between">
+                        <h6 className="text-sm font-semibold heading-text">
+                            Estimación de edad
+                        </h6>
+                        <PassPill passed={ageResult.passed} />
+                    </div>
+                    {ageResult.error ? (
+                        <p className="mt-3 text-sm text-amber-600 dark:text-amber-400">
+                            No disponible ({ageResult.error}). Por seguridad el
+                            check no acredita una edad (fail-closed).
+                        </p>
+                    ) : (
+                        <div className="mt-3 flex flex-wrap items-end gap-6">
+                            <div>
+                                <div className="text-3xl font-semibold heading-text">
+                                    {Math.round(ageResult.estimatedAge)}
+                                    <span className="ml-1 text-base font-normal text-gray-400">
+                                        años (est.)
+                                    </span>
+                                </div>
+                                <div className="text-xs text-gray-400">
+                                    Rango {ageResult.range || '—'} · confianza{' '}
+                                    {(ageResult.confidence * 100).toFixed(0)}%
+                                </div>
+                            </div>
+                            {ageResult.minAge !== undefined && (
+                                <div className="text-sm">
+                                    <span className="text-gray-400">
+                                        Edad mínima
+                                    </span>{' '}
+                                    <span className="font-mono">
+                                        {ageResult.minAge}
+                                    </span>
+                                    {ageResult.underage && (
+                                        <span className="ml-2 inline-flex items-center rounded-full bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-700 dark:bg-amber-500/10 dark:text-amber-300">
+                                            menor de edad estimado
+                                        </span>
+                                    )}
+                                </div>
+                            )}
+                        </div>
+                    )}
+                    <p className="mt-3 text-[11px] text-gray-400">
+                        Estimado estadístico (FairFace, CC BY 4.0) sobre el
+                        rostro del selfie — no es una prueba legal de edad.
+                    </p>
+                </Card>
+            )}
 
             {/* ---------- Video de liveness activo ---------- */}
             {hasLivenessVideo && (

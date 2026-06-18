@@ -82,6 +82,19 @@ export type CheckType =
     | 'aml'
     | 'face_search'
     | 'proof_of_address'
+    | 'age_estimation'
+
+// ---- Age estimation — estimación de edad facial (P2) ----
+export interface AgeEstimationResult {
+    estimatedAge: number
+    range: string
+    confidence: number
+    buckets?: Array<{ label: string; prob: number }>
+    minAge?: number
+    underage: boolean
+    passed: boolean
+    error?: string
+}
 
 // ---- Proof of Address — comprobante de domicilio (P1 #4) ----
 export interface ProofOfAddressResult {

@@ -111,6 +111,8 @@ export function shouldRouteToReview(
     faceSearchDuplicate?: boolean;
     /** Comprobante de domicilio (P1 #4): el check NO pasó (nombre/fecha/domicilio). */
     proofOfAddressFailed?: boolean;
+    /** Estimación de edad (P2): la edad estimada cayó por debajo de minAge (o fail-closed). */
+    ageUnderage?: boolean;
   }
 ): boolean {
   if (!def) return false;
@@ -144,6 +146,16 @@ export function shouldRouteToReview(
   ) {
     return true;
   }
+  // Ruteo por ESTIMACIÓN DE EDAD (P2): una edad estimada por debajo de minAge (o un
+  // fail-closed) con onUnderage:'review' va a revisión SIEMPRE. Con 'flag' (default)
+  // sólo se persiste; con 'reject' es rechazo duro (lo aplica el pipeline, no acá).
+  if (
+    def.ageEstimation?.required &&
+    def.ageEstimation.onUnderage === "review" &&
+    scores.ageUnderage === true
+  ) {
+    return true;
+  }
   const review = def.review;
   if (!review) return false;
   if (review.mode === "always") return true;
@@ -156,4 +168,21 @@ export function shouldRouteToReview(
     );
   }
   return false;
+}
+
+/**
+ * ¿La estimación de edad (P2) fuerza un RECHAZO DURO de la sesión? Sólo cuando el
+ * workflow exige el check con `onUnderage:'reject'` Y la edad estimada cayó por debajo
+ * de `minAge` (o el check fail-closed: modelo ausente / sin rostro → `passed=false`).
+ * FAIL-CLOSED: required+reject sin resultado (undefined) ⇒ rechaza (un menor nunca pasa
+ * por un modelo ausente). Pura/sin I/O: la consume el pipeline en su decisión terminal.
+ */
+export function ageEstimationRejects(
+  def: WorkflowDefinition | null | undefined,
+  age: { passed: boolean } | null | undefined
+): boolean {
+  if (!def?.ageEstimation?.required) return false;
+  if (def.ageEstimation.onUnderage !== "reject") return false;
+  if (!age) return true; // fail-closed: el check debía correr y no hay resultado.
+  return !age.passed; // underage o error.
 }

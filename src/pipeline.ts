@@ -30,6 +30,7 @@ import type { Engine } from "./engine";
 import type { Executor } from "./db/executor";
 import sharp from "sharp";
 import type {
+  AgeEstimationResult,
   AmlInput,
   AmlResult,
   DocumentResult,
@@ -52,7 +53,11 @@ import type {
 import { decision as decideVerdict } from "./modules/decision";
 import { match as matchEmbeddings } from "./modules/match";
 import { ensureRasterImage } from "./lib/raster";
-import { applyWorkflowToPolicy, shouldRouteToReview } from "./lib/workflow";
+import {
+  ageEstimationRejects,
+  applyWorkflowToPolicy,
+  shouldRouteToReview,
+} from "./lib/workflow";
 
 /**
  * Normaliza las imágenes de DOCUMENTO a raster decodificable por sharp: si docFront/
@@ -155,6 +160,16 @@ export interface PipelineModules {
       nameThreshold?: number;
     }
   ): Promise<ProofOfAddressResult>;
+  /**
+   * Estimación de edad facial del selfie (P2). Opcional: sólo se invoca si el workflow
+   * tiene `ageEstimation.required`. Corre un modelo de edad (FairFace ResNet-34) sobre el
+   * rostro y devuelve la edad estimada + rango. `opts.minAge` viene del workflow. Fail-closed.
+   */
+  ageEstimation?(
+    selfie: Buffer,
+    engine: Engine,
+    opts?: { minAge?: number }
+  ): Promise<AgeEstimationResult>;
 }
 
 /**
@@ -192,7 +207,8 @@ export interface PipelineRepos {
           | "match"
           | "aml"
           | "face_search"
-          | "proof_of_address";
+          | "proof_of_address"
+          | "age_estimation";
         score?: number | null;
         passed: boolean;
         detail:
@@ -202,7 +218,8 @@ export interface PipelineRepos {
           | MatchResult
           | AmlResult
           | FaceSearchResult
-          | ProofOfAddressResult;
+          | ProofOfAddressResult
+          | AgeEstimationResult;
       },
       exec: Executor
     ): Promise<unknown>;
@@ -220,7 +237,8 @@ export interface PipelineRepos {
           | "match"
           | "aml"
           | "face_search"
-          | "proof_of_address";
+          | "proof_of_address"
+          | "age_estimation";
         passed: boolean;
         detail:
           | QualityResult
@@ -229,7 +247,8 @@ export interface PipelineRepos {
           | MatchResult
           | AmlResult
           | FaceSearchResult
-          | ProofOfAddressResult;
+          | ProofOfAddressResult
+          | AgeEstimationResult;
       }>
     >;
     /** Borra los checks de una sesión (idempotencia de /preview). */
@@ -502,6 +521,37 @@ async function runProofOfAddress(
   }
 }
 
+/**
+ * Corre la ESTIMACIÓN DE EDAD (P2) SI el workflow la exige (`ageEstimation.required`).
+ * Devuelve undefined cuando no aplica. FAIL-CLOSED: si el módulo no está cableado o
+ * lanza, NO se silencia como "edad OK" — devuelve un resultado `passed:false` + `error`,
+ * de modo que con `onUnderage:'review'|'reject'` la sesión igual rutee/rechace. El gate
+ * `minAge` lo evalúa el módulo (underage = estimatedAge < minAge).
+ */
+async function runAgeEstimation(
+  deps: PipelineDeps,
+  session: VerificationSession,
+  selfie: Buffer
+): Promise<AgeEstimationResult | undefined> {
+  const cfg = session.workflowSnapshot?.ageEstimation;
+  if (!cfg?.required) return undefined;
+  const failClosed = (error: string): AgeEstimationResult => ({
+    estimatedAge: 0,
+    range: "",
+    confidence: 0,
+    minAge: cfg.minAge,
+    underage: false,
+    passed: false,
+    error,
+  });
+  if (!deps.modules.ageEstimation) return failClosed("age_estimation_unavailable");
+  try {
+    return await deps.modules.ageEstimation(selfie, deps.engine, { minAge: cfg.minAge });
+  } catch (e) {
+    return failClosed(e instanceof Error ? e.message : String(e));
+  }
+}
+
 function nowIso(): string {
   return new Date().toISOString();
 }
@@ -693,6 +743,9 @@ export async function processSession(
     // workflow lo exige y el titular subió el comprobante. Ver runProofOfAddress.
     const proofOfAddress = await runProofOfAddress(deps, session, document, images.proofOfAddress);
 
+    // ESTIMACIÓN DE EDAD (señal/score) — P2. Corre si el workflow lo exige. Ver runAgeEstimation.
+    const ageEstimation = await runAgeEstimation(deps, session, images.selfie);
+
     // === 5) DECISION (fusión + LoA) ======================================= //
     const checks: PipelineChecks = {
       quality,
@@ -702,8 +755,21 @@ export async function processSession(
       aml,
       faceSearch,
       proofOfAddress,
+      ageEstimation,
     };
-    const verdict = decideVerdict(checks, policy);
+    // RECHAZO DURO por EDAD (P2): si el workflow pide ageEstimation con onUnderage:'reject'
+    // y la edad estimada cae bajo minAge (o fail-closed), la sesión se RECHAZA aunque la
+    // escalera de LoA diera verified. Toma precedencia sobre el ruteo a revisión (fail-closed).
+    const ageHardReject = ageEstimationRejects(session.workflowSnapshot, ageEstimation);
+    const verdictRaw = decideVerdict(checks, policy);
+    const verdict =
+      ageHardReject && verdictRaw.verdict === "verified"
+        ? {
+            verdict: "rejected" as const,
+            loa: "L0" as const,
+            reasons: [...verdictRaw.reasons, "age_below_minimum"],
+          }
+        : verdictRaw;
 
     // Persistencia atómica de checks + (si verified) identity + evidence + audit.
     const result: SessionResult = {
@@ -725,12 +791,14 @@ export async function processSession(
     // resuelve luego. Sólo aplica con snapshot de workflow (sesiones nuevas);
     // sin snapshot → comportamiento idéntico al actual (auto-decisión).
     if (
+      !ageHardReject &&
       shouldRouteToReview(session.workflowSnapshot, {
         match: matchRes?.cosine,
         liveness: liveness?.score,
         amlDecision: aml?.decision,
         faceSearchDuplicate: faceSearch?.duplicateSuspected,
         proofOfAddressFailed: proofOfAddress ? !proofOfAddress.passed : undefined,
+        ageUnderage: ageEstimation ? !ageEstimation.passed : undefined,
       })
     ) {
       return await goToReview(deps, session, result, { checks, images });
@@ -1041,6 +1109,10 @@ export async function computeChecks(
     // workflow lo exige y el titular subió el comprobante. Ver runProofOfAddress.
     const proofOfAddress = await runProofOfAddress(deps, session, document, images.proofOfAddress);
 
+    // ESTIMACIÓN DE EDAD (señal/score) — P2. Se computa y persiste para mostrarse en la
+    // revisión; el rechazo duro por edad (onUnderage:reject) lo aplica /confirm (finalize).
+    const ageEstimation = await runAgeEstimation(deps, session, images.selfie);
+
     const checks: PipelineChecks = {
       quality,
       document,
@@ -1049,6 +1121,7 @@ export async function computeChecks(
       aml,
       faceSearch,
       proofOfAddress,
+      ageEstimation,
     };
 
     // Persistencia: checks (reemplazando previos) + evidencia + recortes → estado 'review'.
@@ -1114,6 +1187,9 @@ export async function finalizeFromChecks(
     const proofOfAddress = byType.get("proof_of_address")?.detail as
       | ProofOfAddressResult
       | undefined;
+    const ageEstimation = byType.get("age_estimation")?.detail as
+      | AgeEstimationResult
+      | undefined;
     if (!quality || !document) {
       // Sin checks base no se puede decidir → fail-closed (rechazo).
       const result: SessionResult = { decision: "rejected", loa: "L0", reasons: ["missing_checks"] };
@@ -1141,8 +1217,20 @@ export async function finalizeFromChecks(
       aml,
       faceSearch,
       proofOfAddress,
+      ageEstimation,
     };
-    const verdict = decideVerdict(checks, policy);
+    // RECHAZO DURO por EDAD (P2): mismo criterio que processSession (onUnderage:reject +
+    // edad < minAge o fail-closed). Toma precedencia sobre verified y sobre el ruteo a revisión.
+    const ageHardReject = ageEstimationRejects(session.workflowSnapshot, ageEstimation);
+    const verdictRaw = decideVerdict(checks, policy);
+    const verdict =
+      ageHardReject && verdictRaw.verdict === "verified"
+        ? {
+            verdict: "rejected" as const,
+            loa: "L0" as const,
+            reasons: [...verdictRaw.reasons, "age_below_minimum"],
+          }
+        : verdictRaw;
     const result: SessionResult = {
       decision: verdict.verdict,
       loa: verdict.loa,
@@ -1154,12 +1242,14 @@ export async function finalizeFromChecks(
     // Ruteo a revisión humana (P0 #1): igual que en processSession, pero los checks
     // ya fueron persistidos por computeChecks → goToReview no los re-persiste.
     if (
+      !ageHardReject &&
       shouldRouteToReview(session.workflowSnapshot, {
         match: match?.cosine,
         liveness: liveness?.score,
         amlDecision: aml?.decision,
         faceSearchDuplicate: faceSearch?.duplicateSuspected,
         proofOfAddressFailed: proofOfAddress ? !proofOfAddress.passed : undefined,
+        ageUnderage: ageEstimation ? !ageEstimation.passed : undefined,
       })
     ) {
       return await goToReview(deps, session, result, {});
@@ -1315,6 +1405,19 @@ async function persistAllChecks(
         score: checks.proofOfAddress.nameSimilarity,
         passed: checks.proofOfAddress.passed,
         detail: checks.proofOfAddress,
+      },
+      tx
+    );
+  }
+  if (checks.ageEstimation) {
+    await deps.repos.checks.create(
+      {
+        tenantId,
+        sessionId,
+        type: "age_estimation",
+        score: checks.ageEstimation.estimatedAge,
+        passed: checks.ageEstimation.passed,
+        detail: checks.ageEstimation,
       },
       tx
     );

@@ -4,6 +4,7 @@
  */
 import { describe, it, expect } from "vitest";
 import {
+  ageEstimationRejects,
   applyWorkflowToPolicy,
   assuranceFromDefinition,
   defaultWorkflowName,
@@ -116,6 +117,61 @@ describe("shouldRouteToReview — política de revisión", () => {
     it("aml.required:false → ignora amlDecision", () => {
       const def: WorkflowDefinition = { aml: { required: false, onMatch: "review" } };
       expect(shouldRouteToReview(def, { amlDecision: "potential_match" })).toBe(false);
+    });
+  });
+
+  describe("ruteo por ESTIMACIÓN DE EDAD (P2)", () => {
+    it("ageEstimation.onUnderage:'review' + underage → revisión, aunque review.mode sea auto", () => {
+      const def: WorkflowDefinition = {
+        ageEstimation: { required: true, minAge: 18, onUnderage: "review" },
+        review: { mode: "auto" },
+      };
+      expect(shouldRouteToReview(def, { ageUnderage: true })).toBe(true);
+    });
+    it("ageEstimation.onUnderage:'review' + edad OK → no rutea (por edad)", () => {
+      const def: WorkflowDefinition = {
+        ageEstimation: { required: true, minAge: 18, onUnderage: "review" },
+      };
+      expect(shouldRouteToReview(def, { ageUnderage: false })).toBe(false);
+    });
+    it("ageEstimation.onUnderage:'flag' + underage → NO rutea (sólo persiste)", () => {
+      const def: WorkflowDefinition = {
+        ageEstimation: { required: true, minAge: 18, onUnderage: "flag" },
+      };
+      expect(shouldRouteToReview(def, { ageUnderage: true })).toBe(false);
+    });
+    it("ageEstimation.onUnderage:'reject' NO rutea a revisión (lo aplica el pipeline)", () => {
+      const def: WorkflowDefinition = {
+        ageEstimation: { required: true, minAge: 18, onUnderage: "reject" },
+      };
+      expect(shouldRouteToReview(def, { ageUnderage: true })).toBe(false);
+    });
+  });
+
+  describe("ageEstimationRejects (rechazo duro por edad, P2)", () => {
+    const def: WorkflowDefinition = {
+      ageEstimation: { required: true, minAge: 18, onUnderage: "reject" },
+    };
+    it("required+reject + check fallido (underage/error) → rechaza", () => {
+      expect(ageEstimationRejects(def, { passed: false })).toBe(true);
+    });
+    it("required+reject + check OK → NO rechaza", () => {
+      expect(ageEstimationRejects(def, { passed: true })).toBe(false);
+    });
+    it("required+reject + sin resultado (undefined) → fail-closed rechaza", () => {
+      expect(ageEstimationRejects(def, undefined)).toBe(true);
+    });
+    it("onUnderage:'review' (no reject) → NO rechaza duro", () => {
+      const r: WorkflowDefinition = {
+        ageEstimation: { required: true, minAge: 18, onUnderage: "review" },
+      };
+      expect(ageEstimationRejects(r, { passed: false })).toBe(false);
+    });
+    it("ageEstimation.required:false → nunca rechaza", () => {
+      const r: WorkflowDefinition = {
+        ageEstimation: { required: false, onUnderage: "reject" },
+      };
+      expect(ageEstimationRejects(r, { passed: false })).toBe(false);
     });
   });
 });

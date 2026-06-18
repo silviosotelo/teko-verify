@@ -18,6 +18,7 @@ import { screen as amlScreen } from "./modules/aml";
 import { createLocalAmlProvider } from "./modules/amlProvider";
 import { runFaceSearch as faceSearch1N } from "./modules/faceSearch";
 import { runProofOfAddress } from "./modules/proofOfAddress";
+import { ageEstimationModule } from "./modules/ageEstimation";
 import type { DocCropper, PipelineDeps, PipelineModules } from "./pipeline";
 
 /**
@@ -108,6 +109,9 @@ const modules: PipelineModules = {
   // Comprobante de domicilio (P1 #4): OCR (PaddleOCR sidecar por default) → extracción
   // heurística → validación nombre/fecha/domicilio contra la identidad. On-prem.
   proofOfAddress: (image, opts) => runProofOfAddress(image, opts),
+  // Estimación de edad facial (P2): FairFace ResNet-34 (CC BY 4.0) sobre el rostro de la
+  // selfie. On-prem: la imagen nunca sale del server; sólo la edad estimada se persiste.
+  ageEstimation: (selfie, eng, opts) => ageEstimationModule.run(selfie, eng, opts),
 };
 
 /** Dependencias reales listas para inyectar en processSession(). */
