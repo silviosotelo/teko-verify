@@ -496,6 +496,104 @@ export const tekoApi = {
     }) {
         return request<OcrDebugResponse>('POST', '/ocr-debug', body)
     },
+
+    // ---- Analytics (métricas diarias) ----
+    analytics(
+        tenantId: string,
+        params?: { from?: string; to?: string },
+    ) {
+        const q = new URLSearchParams()
+        if (params?.from) q.set('from', params.from)
+        if (params?.to) q.set('to', params.to)
+        const qs = q.toString()
+        return request<{
+            daily: Array<{
+                date: string
+                created: number
+                completed: number
+                approved: number
+                declined: number
+                avgDuration: number
+            }>
+            latencyByModule: Record<string, { avg: number; p50: number; p95: number }>
+            approvalRate: number
+            totalSessions: number
+        }>('GET', `/tenants/${tenantId}/analytics${qs ? `?${qs}` : ''}`)
+    },
+
+    // ---- Compliance reports ----
+    compliance(tenantId: string) {
+        return request<{
+            summary: Record<string, unknown>
+            generatedAt: string
+        }>('GET', `/tenants/${tenantId}/compliance`)
+    },
+
+    // ---- Email templates ----
+    listEmailTemplates(tenantId: string) {
+        return request<{ templates: Array<{ type: string; subject: string; body: string; active: boolean }> }>(
+            'GET', `/tenants/${tenantId}/email-templates`,
+        )
+    },
+    upsertEmailTemplate(
+        tenantId: string,
+        body: { type: string; subject: string; body: string; active?: boolean },
+    ) {
+        return request<{ type: string; subject: string; body: string; active: boolean }>(
+            'POST', `/tenants/${tenantId}/email-templates`, body,
+        )
+    },
+    deleteEmailTemplate(tenantId: string, type: string) {
+        return request<{ deleted: boolean }>(
+            'DELETE', `/tenants/${tenantId}/email-templates/${encodeURIComponent(type)}`,
+        )
+    },
+
+    // ---- Rate limits por tenant ----
+    updateTenantRateLimits(
+        tenantId: string,
+        body: { v1?: number; verify?: number; admin?: number },
+    ) {
+        return request<{ rateLimits: Record<string, number> }>(
+            'PATCH', `/tenants/${tenantId}/rate-limits`, body,
+        )
+    },
+
+    // ---- Face gallery ----
+    addFaceToGallery(tenantId: string, body: { identityId: string; faceUrl?: string }) {
+        return request<{ identityId: string; added: boolean }>(
+            'POST', `/tenants/${tenantId}/gallery`, body,
+        )
+    },
+    removeFaceFromGallery(tenantId: string, identityId: string) {
+        return request<{ identityId: string; removed: boolean }>(
+            'DELETE', `/tenants/${tenantId}/gallery/${identityId}`,
+        )
+    },
+
+    // ---- Bulk session operations ----
+    bulkSessionAction(
+        tenantId: string,
+        body: {
+            action: 'approve' | 'decline' | 'delete'
+            sessionIds: string[]
+            reason?: string
+        },
+    ) {
+        return request<{ affected: number }>(
+            'POST', `/tenants/${tenantId}/sessions/bulk`, body,
+        )
+    },
+
+    // ---- Audit CSV export ----
+    auditCsvUrl(tenantId: string) {
+        return `/admin/tenants/${tenantId}/audit.csv`
+    },
+
+    // ---- Session export PDF ----
+    sessionExportPdfUrl(tenantId: string, sessionId: string) {
+        return `/admin/tenants/${tenantId}/sessions/${sessionId}/export-pdf`
+    },
 }
 
 export { ApiError }
