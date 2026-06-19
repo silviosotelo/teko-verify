@@ -60,6 +60,7 @@ import {
     PiGridFourDuotone,
     PiCursorClickDuotone,
     PiTextAaDuotone,
+    PiGaugeDuotone,
 } from 'react-icons/pi'
 import type { JSX } from 'react'
 
@@ -103,6 +104,7 @@ const navigationIcon: NavigationIcons = {
     PiCurrencyCircleDollarDuotone: <PiCurrencyCircleDollarDuotone />,
     PiCreditCardDuotone: <PiCreditCardDuotone />,
     PiWalletDuotone: <PiWalletDuotone />,
+    PiGaugeDuotone: <PiGaugeDuotone />,
 
     // Aliases for misspelled-but-used keys
     PiEnvelopesDuotone: <PiEnvelopeDuotone />,
