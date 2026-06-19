@@ -236,6 +236,11 @@ app.get("/verify/:token", (_req: Request, res: Response) => {
 const ADMIN_DIST = process.env.TEKO_ADMIN_DIST || path.resolve(__dirname, "..", "admin", "dist");
 if (fs.existsSync(ADMIN_DIST)) {
   // 1) Estáticos del dashboard (assets compilados ganan sobre el fallback).
+  //    Cache-Control: no-cache para evitar cache de bundles viejos tras deploys.
+  app.use("/admin-ui", (req, res, next) => {
+    res.set("Cache-Control", "no-cache");
+    next();
+  });
   app.use("/admin-ui", express.static(ADMIN_DIST));
   // 2) SPA fallback: cualquier ruta /admin-ui/* que NO sea un asset existente
   //    devuelve index.html (routing client-side con basename /admin-ui). Este
