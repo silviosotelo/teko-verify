@@ -3,24 +3,25 @@ ssh = paramiko.SSHClient()
 ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
 ssh.connect('192.168.41.34', username='soporte', password='Soporte24', timeout=10)
 
-# Verify CSS serves correctly
-stdin, stdout, stderr = ssh.exec_command('curl -sI http://localhost:4400/admin-ui/assets/index-D258vUK8.css 2>/dev/null | grep -i content-type')
-print('CSS:', stdout.read().decode())
+# Check kernel APIs icon in UserProfileDropdown
+stdin, stdout, stderr = ssh.exec_command("grep -o 'PiPhoneDuotone' /home/soporte/teko/admin/dist/assets/UserProfileDropdown-CEGWqDUP.js")
+print('PiPhoneDuotone in UserProfile:', stdout.read().decode()[:80])
 
-# Verify JS serves correctly
-stdin, stdout, stderr = ssh.exec_command('curl -sI http://localhost:4400/admin-ui/assets/index-Bkwi16Gj.js 2>/dev/null | grep -i content-type')
-print('JS:', stdout.read().decode())
+# Check if the ApiKeys chunk has new features
+stdin, stdout, stderr = ssh.exec_command("grep -o 'createOpen' /home/soporte/teko/admin/dist/assets/index-C9dS2LYI.js")
+print('createOpen:', stdout.read().decode()[:80])
 
-# Verify no PiPhoneDuotone reference in main bundle
-stdin, stdout, stderr = ssh.exec_command('curl -s http://localhost:4400/admin-ui/assets/index-Bkwi16Gj.js 2>/dev/null | grep -c "PiPhoneDuotone"')
-print('PiPhoneDuotone refs:', stdout.read().decode())
+# Check if the main bundle has Compliance
+stdin, stdout, stderr = ssh.exec_command("grep -o 'Compliance' /home/soporte/teko/admin/dist/assets/index-CTo-yjRk.js")
+print('Compliance:', stdout.read().decode()[:80])
 
-# Verify admin-ui root
-stdin, stdout, stderr = ssh.exec_command('curl -sI http://localhost:4400/admin-ui/ 2>/dev/null | head -5')
-print('Admin UI:', stdout.read().decode())
+# Check CSS serving
+stdin, stdout, stderr = ssh.exec_command("curl -sI http://localhost:4400/admin-ui/assets/index-DpQx0XEH.css 2>/dev/null | grep -i 'content-type'")
+print('CSS content-type:', stdout.read().decode())
 
-# Health
-stdin, stdout, stderr = ssh.exec_command('curl -s http://localhost:4400/health')
-print('Health:', stdout.read().decode())
+# Check JS serving  
+stdin, stdout, stderr = ssh.exec_command("curl -sI http://localhost:4400/admin-ui/assets/index-CTo-yjRk.js 2>/dev/null | grep -i 'content-type'")
+print('JS content-type:', stdout.read().decode())
 
 ssh.close()
+print('DONE')
