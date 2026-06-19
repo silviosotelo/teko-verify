@@ -142,7 +142,7 @@ async function testOcrSidecarHealth(): Promise<"ok" | "error"> {
     const ocrUrl = cfg.OCR_SIDECAR_URL;
     if (!ocrUrl) return "ok";
     const url = new URL("/health", ocrUrl);
-    const res = await fetch(url.toString(), { method: "HEAD", signal: AbortSignal.timeout(3000) });
+    const res = await fetch(url.toString(), { method: "GET", signal: AbortSignal.timeout(5000) });
     return res.ok ? "ok" : "error";
   } catch {
     return "error";

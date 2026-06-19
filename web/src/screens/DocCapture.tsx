@@ -138,6 +138,14 @@ export function DocCapture({
       // Cédula: confirmar avanza al dorso (camino histórico).
       return (
         <>
+          {uploading ? (
+            <Card><div className="flex flex-col items-center gap-3 py-10 text-center">
+              <span className="size-10 animate-spin rounded-full border-4 border-primary border-t-transparent" />
+              <span className="text-sm font-semibold text-gray-800">Subiendo tus fotos…</span>
+              <span className="text-xs text-gray-400">Estamos procesando el documento, no cierres esta ventana</span>
+            </div></Card>
+          ) : (
+            <>
           {isPassport && uploadErr && (
             <Card>
               <p className="text-sm text-error" role="alert">
@@ -158,6 +166,8 @@ export function DocCapture({
             <p className="mt-2 text-center text-xs text-gray-400">
               Subiendo tu pasaporte…
             </p>
+          )}
+            </>
           )}
         </>
       )
@@ -192,6 +202,14 @@ export function DocCapture({
     case "review-back":
       return (
         <>
+          {uploading ? (
+            <Card><div className="flex flex-col items-center gap-3 py-10 text-center">
+              <span className="size-10 animate-spin rounded-full border-4 border-primary border-t-transparent" />
+              <span className="text-sm font-semibold text-gray-800">Subiendo tus fotos…</span>
+              <span className="text-xs text-gray-400">Estamos procesando el documento, no cierres esta ventana</span>
+            </div></Card>
+          ) : (
+            <>
           {uploadErr && (
             <Card>
               <p className="text-sm text-error" role="alert">
@@ -205,10 +223,7 @@ export function DocCapture({
             onConfirm={() => void submitDoc(front!, back!)}
             onRetake={() => setPhase("capture-back")}
           />
-          {uploading && (
-            <p className="mt-2 text-center text-xs text-gray-400">
-              Subiendo tus fotos…
-            </p>
+          </>
           )}
         </>
       )

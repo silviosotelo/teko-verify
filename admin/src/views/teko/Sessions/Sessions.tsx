@@ -14,11 +14,10 @@ import { tekoApi } from '@/teko/client'
 import { useTenant } from '@/teko/TenantContext'
 import { StateBadge, LoaBadge } from '@/teko/badges'
 import { fmtDate } from '@/teko/format'
-import type { SessionRow, SessionState } from '@/teko/types'
+import type { SessionRow, SessionState, LoA } from '@/teko/types'
 import { motion } from 'framer-motion'
-import {
-    PiMagnifyingGlass,
-    
+import { PiMagnifyingGlass,
+    PiPlus,
     PiDownload,
     PiEye,
     PiUsers,
@@ -26,6 +25,7 @@ import {
     PiXCircle,
     PiClockClockwise,
     PiWarningCircle,
+    PiLink,
 } from 'react-icons/pi'
 
 const { THead, TBody, Tr, Th, Td } = Table
@@ -56,6 +56,11 @@ const SessionsView = () => {
     const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc')
     const [page, setPage] = useState(1)
     const limit = 20
+    const [createOpen, setCreateOpen] = useState(false)
+    const [createEmail, setCreateEmail] = useState('')
+    const [createLoa, setCreateLoa] = useState('L2')
+    const [creating, setCreating] = useState(false)
+    const [createResult, setCreateResult] = useState<{ link: string; emailSent: boolean } | null>(null)
 
     useEffect(() => {
         if (!currentId) return
@@ -144,6 +149,9 @@ const SessionsView = () => {
                     </p>
                 </div>
                 <div className="flex items-center gap-2">
+                    <Button variant="solid" size="sm" icon={<PiPlus />} onClick={() => { setCreateOpen(true); setCreateResult(null); setCreateEmail(''); setCreateLoa('L2') }}>
+                        Nueva sesión
+                    </Button>
                     <Button variant="ghost" size="sm" onClick={handleExport} className="gap-1">
                         <PiDownload />
                         Exportar CSV
@@ -377,6 +385,61 @@ const SessionsView = () => {
                     />
                 </div>
             )}
+
+            <Dialog isOpen={createOpen} onClose={() => setCreateOpen(false)} width={500}>
+                {createResult ? (
+                    <div>
+                        <h5 className="font-semibold mb-4">Sesión creada</h5>
+                        <Alert showIcon type={createResult.emailSent ? 'success' : 'warning'} className="mb-4">
+                            {createResult.emailSent
+                                ? 'Link de verificación enviado por email.'
+                                : 'Sesión creada pero el email no pudo enviarse (revisá SMTP).'}
+                        </Alert>
+                        <div className="text-sm space-y-2">
+                            <div className="flex justify-between py-2 border-b"><span className="text-gray-500">Link de verificación</span></div>
+                            <div className="bg-gray-100 dark:bg-gray-700 p-3 rounded-lg font-mono text-xs break-all select-all">
+                                {createResult.link}
+                            </div>
+                        </div>
+                        <Button variant="default" className="mt-4" onClick={() => { setCreateOpen(false); setCreateResult(null) }}>
+                            Cerrar
+                        </Button>
+                    </div>
+                ) : (
+                    <form onSubmit={async (e) => {
+                        e.preventDefault()
+                        if (!currentId) return
+                        setCreating(true)
+                        try {
+                            const res = await tekoApi.testSession(currentId, createLoa as LoA, createEmail || undefined)
+                            setCreateResult({ link: res.verifyUrl, emailSent: res.emailSent ?? false })
+                        } catch (e: unknown) {
+                            Alert && Alert({ showIcon: true, type: 'danger' as string, children: (e as Error).message })
+                        } finally { setCreating(false) }
+                    }}>
+                        <h5 className="font-semibold mb-4">Nueva sesión de verificación</h5>
+                        <div className="space-y-4">
+                            <div>
+                                <label className="mb-1 block text-sm font-medium">Email del solicitante</label>
+                                <Input type="email" value={createEmail} onChange={(e) => setCreateEmail(e.target.value)} placeholder="solicitante@ejemplo.com" />
+                                <p className="text-xs text-gray-400 mt-1">Opcional: si se ingresa, se envía el link por email</p>
+                            </div>
+                            <div>
+                                <label className="mb-1 block text-sm font-medium">Nivel de aseguramiento</label>
+                                <select className="w-full border rounded-md px-3 py-2 text-sm" value={createLoa} onChange={(e) => setCreateLoa(e.target.value)}>
+                                    <option value="L1">L1 - Solo documento</option>
+                                    <option value="L2">L2 - Documento + Match facial</option>
+                                    <option value="L3">L3 - Documento + Match + Liveness</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div className="mt-6 flex justify-end gap-2">
+                            <Button variant="default" onClick={() => setCreateOpen(false)}>Cancelar</Button>
+                            <Button variant="solid" type="submit" loading={creating} icon={<PiLink />}>Crear sesión</Button>
+                        </div>
+                    </form>
+                )}
+            </Dialog>
         </div>
     )
 }
