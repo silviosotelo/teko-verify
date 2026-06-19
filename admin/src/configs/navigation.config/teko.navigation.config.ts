@@ -36,17 +36,6 @@ const tekoNavigationConfig: NavigationTree[] = [
                 subMenu: [],
             },
             {
-                key: 'teko.sessionDetail',
-                path: '/sessions/:sessionId',
-                title: 'Detalle de Sesión',
-                translateKey: '',
-                icon: 'tekoSessions',
-                type: NAV_ITEM_TYPE_ITEM,
-                authority: [],
-                subMenu: [],
-                hidden: true,
-            },
-            {
                 key: 'teko.reviewQueue',
                 path: '/review-queue',
                 title: 'Cola de Revisión',
