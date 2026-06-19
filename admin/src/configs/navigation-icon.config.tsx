@@ -223,7 +223,7 @@ const navigationIcon: NavigationIcons = {
     PiDesktopDuotone: <PiDesktopDuotone />,
     PiListChecksDuotone: <PiListChecksDuotone />,
     PiShareNetworkDuotone: <PiShareNetworkDuotone />,
-    PiEnvelopesDuotone: <PiEnvelopesDuotone />,
+    PiEnvelopesDuotone: <PiEnvelopeDuotone />,
     PiPhoneDuotone: <PiPhoneDuotone />,
     PiHardDiscDuotone: <PiHardDiscDuotone />,
     PiCurrencyCircleDollarDuotone: <PiCurrencyCircleDollarDuotone />,
