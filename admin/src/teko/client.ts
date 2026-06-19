@@ -560,14 +560,14 @@ export const tekoApi = {
     },
 
     // ---- Face gallery ----
-    addFaceToGallery(tenantId: string, body: { identityId: string; faceUrl?: string }) {
-        return request<{ identityId: string; added: boolean }>(
+    addFaceToGallery(tenantId: string, body: { faceEmbedding: string; identityId: string; name?: string; reason?: string }) {
+        return request<{ id: string; identityId: string; name?: string; reason?: string; addedBy: string }>(
             'POST', `/tenants/${tenantId}/gallery`, body,
         )
     },
     removeFaceFromGallery(tenantId: string, identityId: string) {
         return request<{ identityId: string; removed: boolean }>(
-            'DELETE', `/tenants/${tenantId}/gallery/${identityId}`,
+            'DELETE', `/tenants/${tenantId}/gallery/${encodeURIComponent(identityId)}`,
         )
     },
 
