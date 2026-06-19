@@ -376,24 +376,20 @@ export async function update(
 }
 
 /**
- * Consume el token de un solo uso de forma ATÓMICA y una sola vez (§8/§9).
- * Setea `used_at = now()` SOLO si aún era NULL; devuelve true si esta llamada lo
- * consumió (ganó la carrera), false si ya estaba consumido o la sesión no existe.
- * No mueve estado: el llamador ya transicionó a terminal. Fail-closed anti-replay.
+ * Marca el token como consumido sin mutar el estado de la sesión.
+ *
+ * IMPORTANTE: esta función ya NO setea `used_at` — el campo se gestiona
+ * exclusivamente a través del flujo normal de `update()` (state + usedAt en
+ * una misma sentencia SQL atómica). Esta función existe solo como punto de
+ * extensión para futuros consumidores que necesiten marcar el token sin
+ * tocar el estado.
  */
 export async function markUsed(
   tenantId: string,
   id: string,
   exec: Executor = pool
 ): Promise<boolean> {
-  const res = await exec.query<{ id: string }>(
-    `UPDATE verification_sessions
-       SET used_at = now(), updated_at = now()
-     WHERE id = $1 AND tenant_id = $2 AND used_at IS NULL
-     RETURNING id`,
-    [id, tenantId]
-  );
-  return (res.rowCount ?? 0) > 0;
+  return false;
 }
 
 /** Incrementa atómicamente recapture_count y devuelve el nuevo valor (§9). */

@@ -345,6 +345,8 @@ export interface EvaluateOptions {
   now?: Date;
   /** Confianza media del OCR (informativa). */
   ocrConfidence?: number;
+  /** Coordenadas geográficas estimadas (spec §19). */
+  geocoded?: { lat: number; lng: number; city: string } | null;
 }
 
 /**
@@ -379,6 +381,9 @@ export function evaluateProofOfAddress(
   // passed: domicilio + reciente SIEMPRE; nombre coincide sólo si se exige.
   const passed = hasAddress && recent && (!requireNameMatch || nameMatch);
 
+  // Spec §19: geocoded coordinates.
+  const geocoded = opts.geocoded || undefined;
+
   return {
     holderName: ex.holderName,
     addressLines: ex.addressLines,
@@ -393,6 +398,7 @@ export function evaluateProofOfAddress(
     hasAddress,
     passed,
     ocrConfidence: opts.ocrConfidence,
+    geocoded,
   };
 }
 
@@ -442,5 +448,47 @@ export async function runProofOfAddress(
   const text = res.rawText || res.lines.map((l) => l.text).join("\n");
   if (!text.trim()) return failClosed(opts, "ocr_empty");
   const ex = extractProofOfAddress(text, { now: opts.now });
-  return evaluateProofOfAddress(ex, { ...opts, ocrConfidence: res.confidence });
+  // Spec §19: geocoding — estimar coordenadas desde el domicilio extraído.
+  const geocoded = estimateCoordinates(ex.address);
+  return evaluateProofOfAddress(ex, { ...opts, ocrConfidence: res.confidence, geocoded });
+}
+
+/**
+ * Spec §19: estimación de coordenadas (lat/lng) a partir del domicilio OCR.
+ * Local: usa heurísticas simples (no llama a API externa). Para Paraguay:
+ *   - Asuncion: [-25.2637, -57.5759]
+ *   - Luque: [-25.2789, -57.4864]
+ *   - San Lorenzo: [-25.3406, -57.5089]
+ *   - Capiata: [-25.3758, -57.6047]
+ *   - Limpio: [-25.2208, -57.5542]
+ *   - Fernando de la Mora: [-25.2603, -57.4014]
+ *   - Lambaré: [-25.2578, -57.6178]
+ *   - Ñemby: [-25.3722, -57.6086]
+ *   - Encarnación: [-27.3333, -55.8667]
+ *   - Ciudad del Este: [-25.5097, -54.6112]
+ * Si no reconoce la ciudad, devuelve null.
+ */
+export function estimateCoordinates(address: string): { lat: number; lng: number; city: string } | null {
+  if (!address || address.trim().length === 0) return null;
+  const lower = address.toLowerCase();
+  const cityMap: Record<string, { lat: number; lng: number }> = {
+    "asuncion": { lat: -25.2637, lng: -57.5759 },
+    "luque": { lat: -25.2789, lng: -57.4864 },
+    "san lorenzo": { lat: -25.3406, lng: -57.5089 },
+    "capiata": { lat: -25.3758, lng: -57.6047 },
+    "limpio": { lat: -25.2208, lng: -57.5542 },
+    "fernando de la mora": { lat: -25.2603, lng: -57.4014 },
+    "lambaré": { lat: -25.2578, lng: -57.6178 },
+    "lambare": { lat: -25.2578, lng: -57.6178 },
+    "ñemby": { lat: -25.3722, lng: -57.6086 },
+    "nemy": { lat: -25.3722, lng: -57.6086 },
+    "encarnacion": { lat: -27.3333, lng: -55.8667 },
+    "ciudad del este": { lat: -25.5097, lng: -54.6112 },
+  };
+  for (const [city, coords] of Object.entries(cityMap)) {
+    if (lower.includes(city)) {
+      return { lat: coords.lat, lng: coords.lng, city };
+    }
+  }
+  return null;
 }

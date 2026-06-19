@@ -36,6 +36,9 @@ import type { FaceSearchMatch, FaceSearchResult } from "../types";
 import { cosineSimilarity } from "./match";
 import { FACE_SEARCH_THRESHOLD } from "../config";
 
+/** TTL (ms) para la caché de galería de face search. */
+export const GALLERY_CACHE_TTL = 60_000; // 60 segundos
+
 /** Una entrada de la galería de identidades verificadas (embedding ya decodificado). */
 export interface GalleryEntry {
   identityId: string;
@@ -123,9 +126,93 @@ export function searchFaces(
  * Fuente de la galería de embeddings. La impl real lee `verified_identities` del
  * tenant (decodificando el bytea a Float32Array); un provider in-memory la fija en
  * los tests. Mantener este seam evita acoplar el módulo al singleton de repos.
+ *
+ * La implementación de producción (`CachingGalleryProvider`) envuelve cualquier
+ * provider y aplica caché TTL de 60s para evitar leer la DB en cada request.
  */
 export interface FaceGalleryProvider {
   gallery(tenantId: string, excludeSessionId?: string): Promise<GalleryEntry[]>;
+}
+
+/**
+ * Envoltorio con caché TTL sobre cualquier FaceGalleryProvider.
+ * Las primeras llamadas cargan desde el provider subyacente; las subsiguientes
+ * devuelven datos en memoria hasta que expira el TTL (60s por defecto).
+ */
+export class CachingGalleryProvider implements FaceGalleryProvider {
+  private inner: FaceGalleryProvider;
+  private cache: {
+    embeddings: Float32Array[];
+    ids: string[];
+    cis: string[];
+    names: string[];
+    sessionIds: string[];
+    expiresAt: number;
+    tenantId: string;
+  } | null = null;
+  private readonly ttl: number;
+
+  constructor(inner: FaceGalleryProvider, ttlMs?: number) {
+    this.inner = inner;
+    this.ttl = ttlMs ?? GALLERY_CACHE_TTL;
+  }
+
+  async gallery(tenantId: string, excludeSessionId?: string): Promise<GalleryEntry[]> {
+    // Si el tenant no cambió y la caché no expiró, devolver datos en memoria.
+    if (
+      this.cache &&
+      this.cache.tenantId === tenantId &&
+      Date.now() < this.cache.expiresAt
+    ) {
+      return this.cache.embeddings.map((emb, i) => ({
+        identityId: this.cache!.ids[i],
+        sessionId: this.cache!.sessionIds[i],
+        ci: this.cache!.cis[i],
+        name: this.cache!.names[i],
+        embedding: emb,
+      }));
+    }
+
+    // Cache miss: cargar desde el provider subyacente.
+    const entries = await this.inner.gallery(tenantId, excludeSessionId);
+
+    // Validar dimensiones y convertir a arrays separados para acceso rápido.
+    const embeddings: Float32Array[] = [];
+    const ids: string[] = [];
+    const cis: string[] = [];
+    const names: string[] = [];
+    const sessionIds: string[] = [];
+
+    for (const e of entries) {
+      if (excludeSessionId && e.sessionId === excludeSessionId) continue;
+      if (!e.embedding || e.embedding.length === 0) continue;
+      embeddings.push(e.embedding);
+      ids.push(e.identityId);
+      cis.push(e.ci);
+      names.push(e.name);
+      sessionIds.push(e.sessionId);
+    }
+
+    this.cache = {
+      embeddings,
+      ids,
+      cis,
+      names,
+      sessionIds,
+      tenantId,
+      expiresAt: Date.now() + this.ttl,
+    };
+
+    // Devolver un subconjunto excluyendo la sesión actual.
+    const cached = this.cache!;
+    return embeddings.map((emb, i) => ({
+      identityId: cached.ids[i],
+      sessionId: cached.sessionIds[i],
+      ci: cached.cis[i],
+      name: cached.names[i],
+      embedding: emb,
+    }));
+  }
 }
 
 /** Input del orquestador: la cara a buscar + el contexto de la sesión consultada. */

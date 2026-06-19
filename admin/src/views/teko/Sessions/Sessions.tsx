@@ -1,15 +1,32 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router'
 import Card from '@/components/ui/Card'
+import Badge from '@/components/ui/Badge'
+import Button from '@/components/ui/Button'
 import Spinner from '@/components/ui/Spinner'
 import Alert from '@/components/ui/Alert'
+import Input from '@/components/ui/Input'
 import Select from '@/components/ui/Select'
 import Table from '@/components/ui/Table'
+import Pagination from '@/components/ui/Pagination'
+import Dialog from '@/components/ui/Dialog'
 import { tekoApi } from '@/teko/client'
 import { useTenant } from '@/teko/TenantContext'
 import { StateBadge, LoaBadge } from '@/teko/badges'
 import { fmtDate } from '@/teko/format'
 import type { SessionRow, SessionState } from '@/teko/types'
+import { motion } from 'framer-motion'
+import {
+    PiMagnifyingGlass,
+    
+    PiDownload,
+    PiEye,
+    PiUsers,
+    PiCheckCircle,
+    PiXCircle,
+    PiClockClockwise,
+    PiWarningCircle,
+} from 'react-icons/pi'
 
 const { THead, TBody, Tr, Th, Td } = Table
 
@@ -32,8 +49,13 @@ const SessionsView = () => {
     const [rows, setRows] = useState<SessionRow[]>([])
     const [total, setTotal] = useState(0)
     const [stateFilter, setStateFilter] = useState<SessionState | ''>('')
+    const [searchQuery, setSearchQuery] = useState('')
     const [loading, setLoading] = useState(true)
     const [error, setError] = useState<string | null>(null)
+    const [sortField, setSortField] = useState<'createdAt' | 'id'>('createdAt')
+    const [sortDir, setSortDir] = useState<'asc' | 'desc'>('desc')
+    const [page, setPage] = useState(1)
+    const limit = 20
 
     useEffect(() => {
         if (!currentId) return
@@ -42,15 +64,65 @@ const SessionsView = () => {
         tekoApi
             .listSessions(currentId, {
                 state: stateFilter || undefined,
-                limit: 100,
+                limit,
+                offset: (page - 1) * limit,
             })
             .then((r) => {
-                setRows(r.sessions)
-                setTotal(r.total)
+                let sessions = [...(r.sessions ?? [])]
+
+                // Client-side search filter
+                if (searchQuery) {
+                    const q = searchQuery.toLowerCase()
+                    sessions = sessions.filter(
+                        (s) =>
+                            s.id.toLowerCase().includes(q) ||
+                            (s.externalRef &&
+                                s.externalRef.toLowerCase().includes(q)),
+                    )
+                }
+
+                // Sort
+                sessions.sort((a, b) => {
+                    const aVal = a[sortField]
+                    const bVal = b[sortField]
+                    const cmp = aVal < bVal ? -1 : aVal > bVal ? 1 : 0
+                    return sortDir === 'asc' ? cmp : -cmp
+                })
+
+                setRows(sessions)
+                setTotal(sessions.length)
             })
             .catch((e) => setError((e as Error).message))
             .finally(() => setLoading(false))
-    }, [currentId, stateFilter])
+    }, [currentId, stateFilter, searchQuery, sortField, sortDir, page])
+
+    const handleSort = (field: 'createdAt' | 'id') => {
+        if (sortField === field) {
+            setSortDir((d) => (d === 'asc' ? 'desc' : 'asc'))
+        } else {
+            setSortField(field)
+            setSortDir('desc')
+        }
+    }
+
+    const handleExport = () => {
+        const csvHeader = 'ID,External Ref,State,LoA,Created,Completed,Decision\n'
+        const csvRows = rows
+            .map(
+                (s) =>
+                    `${s.id},"${s.externalRef || ''}",${s.state},${s.result?.loa || ''},${s.createdAt},${s.completedAt || ''},"${s.result?.decision || ''}"`,
+            )
+            .join('\n')
+        const blob = new Blob([csvHeader + csvRows], {
+            type: 'text/csv',
+        })
+        const url = URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        a.href = url
+        a.download = `sessions-${new Date().toISOString().slice(0, 10)}.csv`
+        a.click()
+        URL.revokeObjectURL(url)
+    }
 
     if (tLoading) {
         return (
@@ -71,18 +143,85 @@ const SessionsView = () => {
                             : 'Verificaciones del tenant'}
                     </p>
                 </div>
-                <div className="w-56">
+                <div className="flex items-center gap-2">
+                    <Button variant="ghost" size="sm" onClick={handleExport} className="gap-1">
+                        <PiDownload />
+                        Exportar CSV
+                    </Button>
+                </div>
+            </div>
+
+            {/* Summary Cards */}
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-3 mb-6">
+                {[
+                    {
+                        label: 'Total',
+                        value: total,
+                        icon: <PiUsers />,
+                        color: 'primary',
+                    },
+                    {
+                        label: 'Verificadas',
+                        value: rows.filter((s) => s.state === 'verified').length,
+                        icon: <PiCheckCircle />,
+                        color: 'success',
+                    },
+                    {
+                        label: 'Rechazadas',
+                        value: rows.filter((s) => s.state === 'rejected').length,
+                        icon: <PiXCircle />,
+                        color: 'danger',
+                    },
+                    {
+                        label: 'Pendientes',
+                        value: rows.filter((s) => ['created', 'capturing', 'processing'].includes(s.state)).length,
+                        icon: <PiClockClockwise />,
+                        color: 'warning',
+                    },
+                    {
+                        label: 'En Revisión',
+                        value: rows.filter((s) => s.state === 'in_review').length,
+                        icon: <PiWarningCircle />,
+                        color: 'orange',
+                    },
+                ].map((stat) => (
+                    <Card key={stat.label} className="text-center">
+                        <div className={`text-2xl mb-1 ${
+                            stat.color === 'success' ? 'text-success' :
+                            stat.color === 'danger' ? 'text-danger' :
+                            stat.color === 'warning' ? 'text-warning' :
+                            stat.color === 'orange' ? 'text-orange-500' :
+                            'text-primary'
+                        }`}>{stat.icon}</div>
+                        <div className="text-2xl font-bold">{stat.value}</div>
+                        <div className="text-xs text-gray-400">{stat.label}</div>
+                    </Card>
+                ))}
+            </div>
+
+            {/* Filters */}
+            <div className="flex flex-wrap items-center gap-3 mb-4">
+                <div className="flex-1 min-w-[200px]">
+                    <Input
+                        size="sm"
+                        placeholder="Buscar por ID o referencia externa..."
+                        value={searchQuery}
+                        onChange={(e) => {
+                            setSearchQuery(e.target.value)
+                            setPage(1)
+                        }}
+                        prefix={<PiMagnifyingGlass />}
+                    />
+                </div>
+                <div className="w-48">
                     <Select
                         size="sm"
                         options={STATE_OPTIONS}
-                        value={STATE_OPTIONS.find(
-                            (o) => o.value === stateFilter,
-                        )}
-                        onChange={(opt) =>
-                            setStateFilter(
-                                (opt?.value as SessionState | '') ?? '',
-                            )
-                        }
+                        value={STATE_OPTIONS.find((o) => o.value === stateFilter)}
+                        onChange={(opt) => {
+                            setStateFilter((opt?.value as SessionState | '') ?? '')
+                            setPage(1)
+                        }}
                     />
                 </div>
             </div>
@@ -100,28 +239,64 @@ const SessionsView = () => {
                     </div>
                 ) : rows.length === 0 ? (
                     <div className="py-16 text-center text-sm text-gray-400">
-                        No hay sesiones para este filtro.
+                        No hay sesiones que coincidan con los filtros aplicados.
                     </div>
                 ) : (
                     <Table>
                         <THead>
                             <Tr>
+                                <Th className="w-10">
+                                    <input type="checkbox" className="rounded" />
+                                </Th>
+                                <Th
+                                    className="cursor-pointer select-none hover:text-primary"
+                                    onClick={() => handleSort('createdAt')}
+                                >
+                                    <span className="flex items-center gap-1">
+                                        Creada
+                                        {sortField === 'createdAt' && (
+                                            <span className="text-xs">{sortDir === 'asc' ? ' ↑' : ' ↓'}</span>
+                                        )}
+                                    </span>
+                                </Th>
                                 <Th>Estado</Th>
                                 <Th>LoA</Th>
-                                <Th>Ref. externa</Th>
-                                <Th>Creada</Th>
-                                <Th>Sesión</Th>
+                                <Th>Ref. Externa</Th>
+                                <Th>Decisión</Th>
+                                <Th
+                                    className="cursor-pointer select-none hover:text-primary"
+                                    onClick={() => handleSort('id')}
+                                >
+                                    <span className="flex items-center gap-1">
+                                        ID
+                                        {sortField === 'id' && (
+                                            <span className="text-xs">{sortDir === 'asc' ? ' ↑' : ' ↓'}</span>
+                                        )}
+                                    </span>
+                                </Th>
+                                <Th>Acciones</Th>
                             </Tr>
                         </THead>
                         <TBody>
-                            {rows.map((s) => (
-                                <Tr
+                            {rows.map((s, i) => (
+                                <motion.tr
                                     key={s.id}
-                                    className="cursor-pointer hover:bg-gray-50 dark:hover:bg-gray-700"
-                                    onClick={() =>
-                                        navigate(`/sessions/${s.id}`)
-                                    }
+                                    initial={{ opacity: 0, x: -10 }}
+                                    animate={{ opacity: 1, x: 0 }}
+                                    transition={{ delay: i * 0.02 }}
+                                    className="hover:bg-gray-50 dark:hover:bg-gray-700/50"
                                 >
+                                    <Td>
+                                        <input type="checkbox" className="rounded" />
+                                    </Td>
+                                    <Td className="whitespace-nowrap text-sm text-gray-500">
+                                        {fmtDate(s.createdAt)}
+                                        {s.completedAt && (
+                                            <div className="text-xs text-gray-400">
+                                                → {fmtDate(s.completedAt)}
+                                            </div>
+                                        )}
+                                    </Td>
                                     <Td>
                                         <StateBadge state={s.state} />
                                     </Td>
@@ -133,22 +308,73 @@ const SessionsView = () => {
                                             }
                                         />
                                     </Td>
-                                    <Td>{s.externalRef || '—'}</Td>
-                                    <Td className="whitespace-nowrap text-gray-500">
-                                        {fmtDate(s.createdAt)}
+                                    <Td className="text-sm">
+                                        {s.externalRef || (
+                                            <span className="text-gray-300 dark:text-gray-600">—</span>
+                                        )}
+                                    </Td>
+                                    <Td>
+                                        {s.result?.decision ? (
+                                            <Badge
+                                                variant="solid"
+                                                color={
+                                                    s.result.decision ===
+                                                    'verified'
+                                                        ? 'success'
+                                                        : s.result.decision ===
+                                                          'needs_recapture'
+                                                          ? 'warning'
+                                                          : 'danger'
+                                                }
+                                            >
+                                                {s.result.decision ===
+                                                'verified'
+                                                    ? 'Verificada'
+                                                    : s.result.decision ===
+                                                      'needs_recapture'
+                                                      ? 'Recaptura'
+                                                      : 'Rechazada'}
+                                            </Badge>
+                                        ) : (
+                                            <span className="text-gray-300 dark:text-gray-600 text-sm">
+                                                —
+                                            </span>
+                                        )}
                                     </Td>
                                     <Td className="font-mono text-xs text-gray-400">
                                         {s.id.slice(0, 8)}…
                                     </Td>
-                                </Tr>
+                                    <Td>
+                                        <Button
+                                            variant="ghost"
+                                            size="sm"
+                                            onClick={() =>
+                                                navigate(`/sessions/${s.id}`)
+                                            }
+                                            className="gap-1 h-8"
+                                        >
+                                            <PiEye />
+                                            Ver
+                                        </Button>
+                                    </Td>
+                                </motion.tr>
                             ))}
                         </TBody>
                     </Table>
                 )}
             </Card>
             {!loading && rows.length > 0 && (
-                <div className="mt-3 text-xs text-gray-400">
-                    {rows.length} de {total} sesiones.
+                <div className="mt-4 flex items-center justify-between">
+                    <span className="text-xs text-gray-400">
+                        Mostrando {rows.length} de {total} sesiones
+                    </span>
+                    <Pagination
+                        current={page}
+                        total={total}
+                        pageSize={limit}
+                        onChange={(p) => setPage(p)}
+                        showSizeChanger={false}
+                    />
                 </div>
             )}
         </div>

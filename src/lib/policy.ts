@@ -17,6 +17,10 @@ export function defaultPolicy(): TenantPolicy {
     maxRecaptureAttempts: 3,
     linkTokenTtlSeconds: TOKEN_TTL_MIN * 60,
     thresholds: {},
+    rateLimitV1: 0,
+    rateLimitVerify: 0,
+    rateLimitAdmin: 0,
+    ocrLanguage: "spa",
   };
 }
 

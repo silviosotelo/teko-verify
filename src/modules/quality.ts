@@ -164,9 +164,11 @@ export class QualityModule {
   }
 
   /**
-   * Evalúa calidad sobre la selfie. `face`/`alignedRgb112` ya vienen del engine
-   * (el pipeline detecta una sola vez y reusa). Si no hay cara, faceOk=false.
-   */
+    * Evalúa calidad sobre la selfie. `face`/`alignedRgb112` ya vienen del engine
+    * (el pipeline detecta una sola vez y reusa). Si no hay cara, faceOk=false.
+    * Spec §18: multi-face detection — si se detectan >1 caras, se añade una señal
+    * "multiple_faces" que no bloquea pero alerta al operador.
+    */
   async run(
     image: Buffer,
     engine: Engine,
@@ -175,6 +177,11 @@ export class QualityModule {
     const reasons: string[] = [];
     const faces = await engine.detect(image);
     const face = engine.bestFace(faces);
+
+    // Spec §18: multi-face detection — señal si hay más de una cara.
+    if (faces.length > 1) {
+      reasons.push("multiple_faces");
+    }
 
     if (!face) {
       return {

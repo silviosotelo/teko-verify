@@ -19,6 +19,7 @@ import type { CorsOptions } from "cors";
 import helmet from "helmet";
 import fs from "fs";
 import path from "path";
+import { randomUUID } from "crypto";
 import * as cfg from "./config";
 import { engine } from "./engine";
 import { pool } from "./db/pool";
@@ -35,6 +36,7 @@ import {
   captureRateLimiter,
   adminRateLimiter,
 } from "./lib/rateLimit";
+import { scheduleRetentionCleanup } from "./lib/cleanup";
 
 const app = express();
 app.set("trust proxy", true); // detrás del túnel Cloudflare (X-Forwarded-For) §11
@@ -84,7 +86,7 @@ const corsOptions: CorsOptions = {
 };
 app.use(cors(corsOptions));
 
-app.use(express.json({ limit: process.env.TEKO_JSON_LIMIT || "25mb" }));
+app.use(express.json({ limit: process.env.TEKO_BODY_LIMIT || process.env.TEKO_JSON_LIMIT || "5mb" }));
 
 // =============================== rate-limit =============================== //
 // In-memory por IP/tenant/token (§8). El limiter estricto del login admin va
@@ -98,26 +100,103 @@ app.use("/v1", tenantRouter);
 app.use("/verify", captureRouter);
 app.use("/admin", adminRouter);
 
+// =============================== correlation ID middleware ================== //
+app.use((req: Request, res: Response, next: NextFunction) => {
+  const raw = req.headers["x-request-id"];
+  const id = typeof raw === "string" ? raw : Array.isArray(raw) ? raw[0] : randomUUID();
+  (req as Request & { requestId: string }).requestId = id;
+  res.setHeader("X-Request-ID", id);
+  next();
+});
+
 // =============================== health =================================== //
-app.get("/health", async (_req: Request, res: Response) => {
-  let db = false;
+const startTime = Date.now();
+
+function consoleLog(...args: unknown[]): void {
+  console.log(`[${(new Date()).toISOString()}]`, ...args);
+}
+
+function consoleWarn(...args: unknown[]): void {
+  console.warn(`[${(new Date()).toISOString()}]`, ...args);
+}
+
+function consoleError(...args: unknown[]): void {
+  console.error(`[${(new Date()).toISOString()}]`, ...args);
+}
+
+function checkStatus(ready: boolean): "ok" | "error" {
+  return ready ? "ok" : "error";
+}
+
+async function testDbHealth(): Promise<"ok" | "error"> {
   try {
     await pool.query("SELECT 1");
-    db = true;
+    return "ok";
   } catch {
-    db = false;
+    return "error";
   }
-  // No se exponen thresholds (match/liveness/glassesMax) sin auth: son parámetros
-  // de seguridad calibrables; revelarlos facilita evadir el gating (§8/§13).
+}
+
+async function testOcrSidecarHealth(): Promise<"ok" | "error"> {
+  try {
+    const ocrUrl = cfg.OCR_SIDECAR_URL;
+    if (!ocrUrl) return "ok";
+    const url = new URL("/health", ocrUrl);
+    const res = await fetch(url.toString(), { method: "HEAD", signal: AbortSignal.timeout(3000) });
+    return res.ok ? "ok" : "error";
+  } catch {
+    return "error";
+  }
+}
+
+async function testDiskSpace(): Promise<"ok" | "error"> {
+  try {
+    const evidenceDir = process.env.TEKO_EVIDENCE_DIR || path.resolve(__dirname, "..", "evidence");
+    if (!fs.existsSync(evidenceDir)) return "ok";
+    const stats = fs.statSync(evidenceDir);
+    if (!stats.isDirectory()) return "ok";
+    const { execSync } = await import("child_process");
+    const isWin = process.platform === "win32";
+    let freeBytes: number;
+    if (isWin) {
+      const out = execSync(`wmic logicaldisk where "DeviceID='${evidenceDir.charAt(0)}:'" get FreeSpace`, { encoding: "utf-8" });
+      freeBytes = parseInt(out.split("\n").find((l) => /\d/.test(l))?.trim() || "0", 10);
+    } else {
+      const out = execSync(`df -B1 "${evidenceDir}" 2>/dev/null | tail -1`, { encoding: "utf-8" });
+      freeBytes = parseInt(out.trim().split(/\s+/)[3] || "0", 10);
+    }
+    if (freeBytes < 1024 * 1024 * 1024) return "error";
+    return "ok";
+  } catch {
+    return "error";
+  }
+}
+
+app.get("/health", async (req: Request, res: Response) => {
+  const checks = {
+    engine: checkStatus(engine.ready),
+    quality: checkStatus(qualityModule.ready),
+    liveness: checkStatus(livenessModule.ready),
+    ageEstimation: checkStatus(ageEstimationModule.ready),
+    database: await testDbHealth(),
+    ocrSidecar: await testOcrSidecarHealth(),
+    diskSpace: await testDiskSpace(),
+  };
+
+  const criticalChecks = ["engine", "database"] as const;
+  const allChecks = Object.values(checks) as string[];
+  const failedCritical = criticalChecks.some((k) => checks[k] === "error");
+  const anyFailed = allChecks.includes("error");
+
+  let status: "ok" | "degraded" | "error" = "ok";
+  if (failedCritical) status = "error";
+  else if (anyFailed) status = "degraded";
+
   res.json({
-    status: "ok",
-    service: "teko-verify",
-    port: cfg.PORT,
-    engine: engine.ready,
-    quality: qualityModule.ready,
-    liveness: livenessModule.ready,
-    ageEstimation: ageEstimationModule.ready,
-    db,
+    status,
+    uptime: Math.floor((Date.now() - startTime) / 1000),
+    timestamp: new Date().toISOString(),
+    checks,
   });
 });
 
@@ -200,7 +279,7 @@ app.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
     return;
   }
   // eslint-disable-next-line no-console
-  console.error("[teko-verify] unhandled error:", (err as Error)?.message);
+  consoleError("[teko-verify] unhandled error:", (err as Error)?.message);
   res.status(500).json({ error: "internal_error" });
 });
 
@@ -231,9 +310,11 @@ async function main(): Promise<void> {
     })
     .catch(() => undefined);
 
+  // 3.7) Programa la limpieza de retención (spec §12). Solo si TEKO_CLEANUP_ENABLED=true.
+  scheduleRetentionCleanup(pool);
+
   app.listen(cfg.PORT, "0.0.0.0", () => {
-    // eslint-disable-next-line no-console
-    console.log(
+    consoleLog(
       `[teko-verify] listening on :${cfg.PORT} | engine=${engine.ready} ` +
         `quality=${qualityModule.ready} liveness=${livenessModule.ready} ` +
         `ageEstimation=${ageEstimationModule.ready}`
@@ -242,9 +323,28 @@ async function main(): Promise<void> {
 }
 
 main().catch((e) => {
-  // eslint-disable-next-line no-console
-  console.error("[teko-verify] fatal:", e);
+  consoleError("[teko-verify] fatal:", e);
   process.exit(1);
 });
+
+// =============================== graceful shutdown ========================== //
+async function shutdown(): Promise<void> {
+  consoleLog("SIGTERM received, shutting down gracefully...");
+  const server = app.listen(0, () => {
+    server.close(async () => {
+      consoleLog("HTTP server closed");
+      await pool.end();
+      consoleLog("PG pool ended");
+      process.exit(0);
+    });
+    setTimeout(() => {
+      consoleError("Forced shutdown after timeout");
+      process.exit(1);
+    }, 30000);
+  });
+}
+
+process.on("SIGTERM", shutdown);
+process.on("SIGINT", shutdown);
 
 export { app };

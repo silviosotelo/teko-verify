@@ -6,6 +6,9 @@
  *
  * Implementa el contrato `EvidenceStore` del pipeline. El job de retención (§11)
  * borra por tenant/sesión según policy.
+ *
+ * Batch writes: `saveBatch` y `saveCropsBatch` reducen las operaciones de disco
+ * de N writes individuales a N writes secuenciales en un solo paso (perf #3).
  */
 import { createHash } from "crypto";
 import { promises as fsp } from "fs";
@@ -177,6 +180,73 @@ export class DiskEvidenceStore {
   /** Borra toda la evidencia de una sesión (retención/supresión §12). */
   async purge(tenantId: string, sessionId: string): Promise<void> {
     await fsp.rm(dirFor(tenantId, sessionId), { recursive: true, force: true });
+  }
+
+  /**
+   * Escribe múltiples evidencias en secuencia (batch write).
+   * Reduce overhead de mkdir/permisos al crear el directorio una vez.
+   * Cada item se procesa (resize→jpeg→hash→write) y se devuelve el resultado.
+   * Fail-safe: un fallo individual no interrumpe el batch; se registra el error
+   * en el resultado con `error` en lugar de `storagePath`/`sha256`.
+   */
+  async saveBatch(
+    tenantId: string,
+    sessionId: string,
+    items: Array<{ type: EvidenceType; image: Buffer }>
+  ): Promise<Array<{ type: EvidenceType; storagePath: string; sha256: string; error?: string }>> {
+    const dir = dirFor(tenantId, sessionId);
+    await fsp.mkdir(dir, { recursive: true });
+
+    const results: Array<{ type: EvidenceType; storagePath: string; sha256: string; error?: string }> = [];
+
+    for (const item of items) {
+      try {
+        const jpg = await sharp(item.image)
+          .resize(1600, 1600, { fit: "inside", withoutEnlargement: true })
+          .jpeg({ quality: 88 })
+          .toBuffer();
+        const sha256 = createHash("sha256").update(jpg).digest("hex");
+        const file = path.join(dir, `${item.type}.jpg`);
+        await fsp.writeFile(file, jpg);
+        results.push({ type: item.type, storagePath: file, sha256 });
+      } catch (e) {
+        results.push({ type: item.type, storagePath: "", sha256: "", error: (e as Error).message });
+      }
+    }
+
+    return results;
+  }
+
+  /**
+   * Escribe múltiples recortes de evidencia en secuencia (batch crop write).
+   * Misma semántica que saveBatch pero para crops (crop_<type>.jpg, resize 1200).
+   */
+  async saveCropsBatch(
+    tenantId: string,
+    sessionId: string,
+    items: Array<{ type: EvidenceCropType; image: Buffer }>
+  ): Promise<Array<{ type: EvidenceCropType; storagePath: string; sha256: string; error?: string }>> {
+    const dir = dirFor(tenantId, sessionId);
+    await fsp.mkdir(dir, { recursive: true });
+
+    const results: Array<{ type: EvidenceCropType; storagePath: string; sha256: string; error?: string }> = [];
+
+    for (const item of items) {
+      try {
+        const jpg = await sharp(item.image)
+          .resize(1200, 1200, { fit: "inside", withoutEnlargement: true })
+          .jpeg({ quality: 90 })
+          .toBuffer();
+        const sha256 = createHash("sha256").update(jpg).digest("hex");
+        const file = path.join(dir, `crop_${item.type}.jpg`);
+        await fsp.writeFile(file, jpg);
+        results.push({ type: item.type, storagePath: file, sha256 });
+      } catch (e) {
+        results.push({ type: item.type, storagePath: "", sha256: "", error: (e as Error).message });
+      }
+    }
+
+    return results;
   }
 }
 

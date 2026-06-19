@@ -11,6 +11,11 @@
  *   const expected = "sha256=" + hmacSHA256Hex(secret, `${xTimestamp}.${rawBody}`)
  *   timingSafeEqual(expected, xSignature)  &&  abs(now - xTimestamp) <= 300
  * El `rawBody` DEBE ser los bytes exactos recibidos (no re-serializar el JSON).
+ *
+ * v2 (spec §14): firma con versión explícita en el header.
+ *   - v1: `sha256=<hex>` en X-Signature (sin timestamp en el header de verificación).
+ *   - v2: `sha256v2=<hex>` en X-Signature + X-Timestamp obligatorio.
+ *     El input HMAC cambia: `${version}.${timestamp}.${body}` (version = "2").
  */
 import { createHmac, timingSafeEqual } from "crypto";
 
@@ -45,21 +50,44 @@ export function signPayload(secret: string, timestamp: number, body: string): st
   return createHmac("sha256", secret).update(`${timestamp}.${body}`).digest("hex");
 }
 
-/** Valor del header X-Signature: `sha256=<hexhmac>`. */
+/**
+ * Firma HMAC-SHA256 v2: input `${version}.${timestamp}.${body}`.
+ * La versión "2" se incluye en el HMAC para evitar replay entre versiones.
+ */
+export function signPayloadV2(secret: string, timestamp: number, body: string): string {
+  return createHmac("sha256", secret).update(`2.${timestamp}.${body}`).digest("hex");
+}
+
+/** Valor del header X-Signature: `sha256=<hexhmac>` (v1). */
 export function signatureHeader(secret: string, timestamp: number, body: string): string {
   return `sha256=${signPayload(secret, timestamp, body)}`;
+}
+
+/** Valor del header X-Signature: `sha256v2=<hexhmac>` (v2). */
+export function signatureHeaderV2(secret: string, timestamp: number, body: string): string {
+  return `sha256v2=${signPayloadV2(secret, timestamp, body)}`;
+}
+
+/**
+ * Determina la versión de firma a partir del header X-Signature recibido.
+ * "sha256v2=" → v2, "sha256=" → v1, hex pelado → v1 (compat).
+ */
+export function detectSignatureVersion(signature: string): 1 | 2 {
+  if (signature.startsWith("sha256v2=")) return 2;
+  return 1;
 }
 
 /**
  * Verifica una firma de webhook en TIEMPO CONSTANTE + ventana anti-replay.
  * Fail-closed: cualquier formato inválido o desfase de reloj → false (nunca lanza).
  * `nowSec` inyectable para tests; por defecto el reloj real.
+ * Soporta v1 y v2 (si signature empieza con "sha256v2=").
  */
 export function verifySignature(opts: {
   secret: string;
   timestamp: number;
   body: string;
-  signature: string; // valor recibido del header X-Signature ("sha256=..." o hex pelado)
+  signature: string; // valor recibido del header X-Signature ("sha256=...", "sha256v2=..." o hex pelado)
   windowSec?: number;
   nowSec?: number;
 }): boolean {
@@ -68,8 +96,17 @@ export function verifySignature(opts: {
     const window = opts.windowSec ?? REPLAY_WINDOW_SEC;
     if (!Number.isFinite(opts.timestamp)) return false;
     if (Math.abs(now - opts.timestamp) > window) return false; // replay / reloj
-    const expected = signPayload(opts.secret, opts.timestamp, opts.body);
-    const received = opts.signature.replace(/^sha256=/, "");
+
+    const version = detectSignatureVersion(opts.signature);
+
+    let expected: string;
+    if (version === 2) {
+      expected = signPayloadV2(opts.secret, opts.timestamp, opts.body);
+    } else {
+      expected = signPayload(opts.secret, opts.timestamp, opts.body);
+    }
+
+    const received = opts.signature.replace(/^sha256v2=/, "").replace(/^sha256=/, "");
     const a = Buffer.from(expected, "hex");
     const b = Buffer.from(received, "hex");
     if (a.length === 0 || a.length !== b.length) return false;

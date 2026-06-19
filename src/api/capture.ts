@@ -962,13 +962,11 @@ captureRouter.get("/:token/events", async (req: Request, res: Response) => {
     res.status(404).end();
     return;
   }
-  res.set({
-    "Content-Type": "text/event-stream",
-    "Cache-Control": "no-cache, no-transform",
-    Connection: "keep-alive",
-    "X-Accel-Buffering": "no",
-  });
-  (res as Response & { flushHeaders?: () => void }).flushHeaders?.();
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
+  res.flushHeaders();
   res.write(": connected\n\n");
 
   // Poll ligero del estado y empuje SSE; termina al llegar a estado terminal.

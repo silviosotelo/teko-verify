@@ -246,8 +246,9 @@ tenantRouter.delete("/sessions/:id", async (req: Request, res: Response) => {
     res.status(404).json({ error: "session_not_found" });
     return;
   }
-  // Borra ficheros de evidencia y la fila de sesión (CASCADE arrastra checks/identity/evidence/consents).
+  const evidenceTypes = await repos.evidence.listBySession(tenant.id, session.id);
   await evidenceStore.purge(tenant.id, session.id);
+  await repos.evidence.removeBySession(tenant.id, session.id);
   const deleted = await repos.sessions.remove(tenant.id, session.id);
   await repos.auditLog.record({
     tenantId: tenant.id,
@@ -260,7 +261,7 @@ tenantRouter.delete("/sessions/:id", async (req: Request, res: Response) => {
   const resp: DeleteSessionResponse = {
     sessionId: session.id,
     deleted,
-    purged: ["selfie", "doc_front", "doc_back", "frames"],
+    purged: evidenceTypes.map((e) => e.type),
   };
   res.json(resp);
 });

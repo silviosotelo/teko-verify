@@ -1,163 +1,135 @@
 import { useState } from 'react'
-import NavList from './NavList'
-import Drawer from '@/components/ui/Drawer'
-import classNames from '@/utils/classNames'
-import useScrollTop from '@/utils/hooks/useScrollTop'
-import { MODE_DARK, MODE_LIGHT } from '@/constants/theme.constant'
-import { TbMenu2 } from 'react-icons/tb'
+import Button from '@/components/ui/Button'
+import { motion } from 'framer-motion'
+import { useNavigate } from 'react-router'
+import { PiMoon, PiSun, PiSignIn, PiList } from 'react-icons/pi'
 import type { Mode } from '@/@types/theme'
 
-type NavigationProps = {
+const NavigationBar = ({
+    toggleMode,
+    mode,
+}: {
     toggleMode: () => void
     mode: Mode
-}
-
-const navMenu = [
-    {
-        title: 'Features',
-        value: 'features',
-        to: 'features',
-    },
-    {
-        title: 'Demos',
-        value: 'demos',
-        to: 'demos',
-    },
-    {
-        title: 'Components',
-        value: 'components',
-        to: 'components',
-    },
-    {
-        title: 'Documentations',
-        value: 'documentations',
-        href: 'https://ecme-react.themenate.net/guide/documentation/introduction',
-    },
-]
-
-const Navigation = ({ toggleMode, mode }: NavigationProps) => {
-    const { isSticky } = useScrollTop()
-
-    const [isOpen, setIsOpen] = useState(false)
-
-    const openDrawer = () => {
-        setIsOpen(true)
-    }
-
-    const onDrawerClose = () => {
-        setIsOpen(false)
-    }
+}) => {
+    const navigate = useNavigate()
+    const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
 
     return (
-        <div
-            style={{ transition: 'all 0.2s ease-in-out' }}
-            className={classNames(
-                'w-full fixed inset-x-0 z-[40]',
-                isSticky ? 'top-4' : 'top-0',
-            )}
-        >
-            <div
-                className={classNames(
-                    'flex flex-row self-start items-center justify-between py-3 max-w-7xl mx-auto px-4 rounded-xl relative z-[60] w-full transition duration-200',
-                    isSticky
-                        ? 'bg-white dark:bg-gray-800 shadow-lg'
-                        : 'bg-transparent dark:bg-transparent',
-                )}
-            >
-                <button
-                    className="flex lg:hidden items-center gap-4"
-                    onClick={openDrawer}
+        <nav className="fixed top-0 left-0 right-0 z-50 bg-white/80 dark:bg-gray-900/80 backdrop-blur-lg border-b border-gray-200 dark:border-gray-800">
+            <div className="max-w-7xl mx-auto px-4 py-3 flex items-center justify-between">
+                <div
+                    className="flex items-center gap-2 cursor-pointer"
+                    onClick={() => navigate('/dashboard')}
                 >
-                    <TbMenu2 size={24} />
-                </button>
-                <Drawer
-                    title="Navigation"
-                    isOpen={isOpen}
-                    width={250}
-                    placement="left"
-                    onClose={onDrawerClose}
-                    onRequestClose={onDrawerClose}
-                >
-                    <div className="flex flex-col gap-4">
-                        <NavList tabs={navMenu} onTabClick={onDrawerClose} />
-                    </div>
-                </Drawer>
-                <a href="/">
-                    {mode === MODE_LIGHT && (
-                        <img
-                            src="/img/logo/logo-light-full.png"
-                            width={120}
-                            height={40}
-                            alt="logo"
-                        />
-                    )}
-                    {mode === MODE_DARK && (
-                        <img
-                            src="/img/logo/logo-dark-full.png"
-                            width={120}
-                            height={40}
-                            alt="logo"
-                        />
-                    )}
-                </a>
-                <div className="lg:flex flex-row flex-1 absolute inset-0 hidden items-center justify-center text-sm text-zinc-600 font-medium hover:text-zinc-800 transition duration-200 [perspective:1000px] overflow-auto sm:overflow-visible no-visible-scrollbar">
-                    <NavList tabs={navMenu} />
+                    <span className="text-2xl">🛡️</span>
+                    <span className="font-bold text-lg">
+                        Teko{' '}
+                        <span className="bg-gradient-to-r from-emerald-600 to-teal-500 bg-clip-text text-transparent">
+                            Verify
+                        </span>
+                    </span>
                 </div>
-                <div className="flex items-center gap-2">
-                    <button
-                        className="relative flex cursor-pointer items-center justify-center rounded-xl p-2 text-neutral-500 hover:shadow-input dark:text-neutral-500"
-                        onClick={toggleMode}
+
+                <div className="hidden md:flex items-center gap-6">
+                    <a
+                        href="#features"
+                        className="text-sm hover:text-emerald-500 transition-colors"
                     >
-                        <svg
-                            className="lucide lucide-sun rotate-0 scale-100 transition-all dark:-rotate-90 dark:scale-0"
-                            fill="none"
-                            height="16"
-                            stroke="currentColor"
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                            strokeWidth="2"
-                            viewBox="0 0 24 24"
-                            width="16"
-                            xmlns="http://www.w3.org/2000/svg"
-                        >
-                            <circle cx="12" cy="12" r="4" />
-                            <path d="M12 2v2" />
-                            <path d="M12 20v2" />
-                            <path d="m4.93 4.93 1.41 1.41" />
-                            <path d="m17.66 17.66 1.41 1.41" />
-                            <path d="M2 12h2" />
-                            <path d="M20 12h2" />
-                            <path d="m6.34 17.66-1.41 1.41" />
-                            <path d="m19.07 4.93-1.41 1.41" />
-                        </svg>
-                        <svg
-                            className="lucide lucide-moon absolute rotate-90 scale-0 transition-all dark:rotate-0 dark:scale-100"
-                            fill="none"
-                            height="16"
-                            stroke="currentColor"
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                            strokeWidth="2"
-                            viewBox="0 0 24 24"
-                            width="16"
-                            xmlns="http://www.w3.org/2000/svg"
-                        >
-                            <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z" />
-                        </svg>
-                        <span className="sr-only">Toggle theme</span>
+                        Funcionalidades
+                    </a>
+                    <a
+                        href="#techstack"
+                        className="text-sm hover:text-emerald-500 transition-colors"
+                    >
+                        Tech Stack
+                    </a>
+                    <a
+                        href="#components"
+                        className="text-sm hover:text-emerald-500 transition-colors"
+                    >
+                        Guías
+                    </a>
+                    <a
+                        href="#footer"
+                        className="text-sm hover:text-emerald-500 transition-colors"
+                    >
+                        Contacto
+                    </a>
+                </div>
+
+                <div className="flex items-center gap-3">
+                    <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={toggleMode}
+                        className="w-10 h-10 p-0 rounded-lg"
+                    >
+                        {mode === 'light' ? (
+                            <PiMoon className="text-lg" />
+                        ) : (
+                            <PiSun className="text-lg" />
+                        )}
+                    </Button>
+                    <Button
+                        variant="solid"
+                        size="sm"
+                        onClick={() => navigate('/sign-in')}
+                        className="flex items-center gap-2"
+                    >
+                        <PiSignIn />
+                        <span className="hidden sm:inline">Iniciar Sesión</span>
+                    </Button>
+                    <button
+                        className="md:hidden w-10 h-10 flex items-center justify-center"
+                        onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
+                    >
+                        <PiList className="text-xl" />
                     </button>
-                    <div className="border border-gray-200 dark:border-gray-700 rounded-full inline-flex items-center justify-center gap-2 py-1 px-2 bg-white dark:bg-gray-800">
-                        <img
-                            src="/img/landing/tech/vite.png"
-                            alt="vite"
-                            className="w-6 h-6"
-                        />
-                        <span className="heading-text">Vite</span>
-                    </div>
                 </div>
             </div>
-        </div>
+
+            {mobileMenuOpen && (
+                <motion.div
+                    initial={{ opacity: 0, height: 0 }}
+                    animate={{ opacity: 1, height: 'auto' }}
+                    exit={{ opacity: 0, height: 0 }}
+                    className="md:hidden border-t border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900"
+                >
+                    <div className="px-4 py-3 flex flex-col gap-3">
+                        <a
+                            href="#features"
+                            className="text-sm py-2"
+                            onClick={() => setMobileMenuOpen(false)}
+                        >
+                            Funcionalidades
+                        </a>
+                        <a
+                            href="#techstack"
+                            className="text-sm py-2"
+                            onClick={() => setMobileMenuOpen(false)}
+                        >
+                            Tech Stack
+                        </a>
+                        <a
+                            href="#components"
+                            className="text-sm py-2"
+                            onClick={() => setMobileMenuOpen(false)}
+                        >
+                            Guías
+                        </a>
+                        <a
+                            href="#footer"
+                            className="text-sm py-2"
+                            onClick={() => setMobileMenuOpen(false)}
+                        >
+                            Contacto
+                        </a>
+                    </div>
+                </motion.div>
+            )}
+        </nav>
     )
 }
 
-export default Navigation
+export default NavigationBar

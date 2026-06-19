@@ -12,6 +12,8 @@
  *     falló por EBADNAME a causa de un `\r` colado en SMTP_HOST.
  *   - Config leída perezosamente (no a nivel de módulo) para que sea testeable y
  *     para que el contenedor pueda arrancar sin SMTP.
+ *   - Templates: spec §17 — los templates de email se leen de `tenants.email_templates`
+ *     (JSONB) y se interpolan con variables antes de enviar.
  */
 import nodemailer, { type Transporter } from "nodemailer";
 
@@ -93,6 +95,18 @@ function escapeHtml(s: string): string {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
+}
+
+/**
+ * Interpola variables en un template de email.
+ * Reemplaza `{variable}` con el valor correspondiente del map.
+ */
+export function interpolateTemplate(template: string, vars: Record<string, string>): string {
+  let result = template;
+  for (const [key, value] of Object.entries(vars)) {
+    result = result.replace(new RegExp(`\\{${key}\\}`, "g"), escapeHtml(value));
+  }
+  return result;
 }
 
 /** Cuerpo HTML del email de verificación — estilo Teko (verde), en español. */
@@ -190,6 +204,52 @@ export async function sendVerificationEmail(to: string, verifyUrl: string): Prom
   } catch (e) {
     // eslint-disable-next-line no-console
     console.error(`[mailer] fallo al enviar a ${to.trim()}: ${(e as Error).message}`);
+    return false;
+  }
+}
+
+/**
+ * Envía un email genérico con template personalizado.
+ * Los templates se leen de `tenants.email_templates` (JSONB).
+ * @param to Destinatario.
+ * @param template Subject + body HTML con variables tipo `{verifyUrl}`.
+ * @param vars Mapa de variables a interpolar.
+ * @param cfg Config SMTP (usa la default si no se provee).
+ */
+export async function sendTemplatedEmail(
+  to: string,
+  template: { subject: string; html: string; text?: string },
+  vars: Record<string, string>,
+  cfg?: SmtpConfig
+): Promise<boolean> {
+  const smtpCfg = cfg || loadSmtpConfig();
+  if (!smtpCfg) {
+    // eslint-disable-next-line no-console
+    console.warn("[mailer] SMTP no configurado: se omite el envío con template (fail-open)");
+    return false;
+  }
+  if (!isValidEmail(to)) {
+    // eslint-disable-next-line no-console
+    console.warn("[mailer] email destino inválido: se omite el envío con template");
+    return false;
+  }
+  try {
+    const transporter = getTransporter(smtpCfg);
+    const info = await transporter.sendMail({
+      from: `"${smtpCfg.fromName}" <${smtpCfg.fromEmail}>`,
+      to: to.trim(),
+      subject: interpolateTemplate(template.subject, vars),
+      text: template.text
+        ? interpolateTemplate(template.text, vars)
+        : "(sin versión texto plano)",
+      html: interpolateTemplate(template.html, vars),
+    });
+    // eslint-disable-next-line no-console
+    console.log(`[mailer] email template enviado a ${to.trim()} (messageId=${info.messageId})`);
+    return true;
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.error(`[mailer] fallo al enviar template a ${to.trim()}: ${(e as Error).message}`);
     return false;
   }
 }

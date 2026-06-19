@@ -1,0 +1,23 @@
+import paramiko
+ssh = paramiko.SSHClient()
+ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+try:
+    ssh.connect('192.168.41.34', username='soporte', password='Soporte24', timeout=10)
+    print('Connected as soporte')
+    stdin, stdout, stderr = ssh.exec_command('whoami && id')
+    print('User:', stdout.read().decode())
+    stdin, stdout, stderr = ssh.exec_command('docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Image}}"')
+    print('Docker:')
+    print(stdout.read().decode())
+    print('Stderr:', stderr.read().decode())
+    stdin, stdout, stderr = ssh.exec_command('ls -la /usr/share/nginx/html/ 2>&1')
+    print('Nginx html:')
+    print(stdout.read().decode())
+    stdin, stdout, stderr = ssh.exec_command('df -h / | tail -1')
+    print('Disk:', stdout.read().decode())
+    stdin, stdout, stderr = ssh.exec_command('sudo systemctl is-active nginx 2>&1; sudo systemctl is-active docker 2>&1')
+    print('Services:', stdout.read().decode())
+    ssh.close()
+    print('SUCCESS')
+except Exception as e:
+    print(f'ERROR: {e}')

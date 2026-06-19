@@ -39,6 +39,7 @@ import type {
   OcrLine,
 } from "../types";
 import { OCR_SIDECAR_URL } from "../config";
+import { CI_MAX_AGE_YEARS } from "../config";
 
 // ---------------------------------------------------------------------------
 // Puertos inyectables (contratos mínimos) — implementaciones reales más abajo.
@@ -80,13 +81,17 @@ export interface BarcodeReader {
 
 /** Cliente PaddleOCR vía sidecar HTTP (POST {OCR_SIDECAR_URL}/ocr). */
 export class PaddleOcrClient implements OcrClient {
-  constructor(private baseUrl: string = OCR_SIDECAR_URL) {}
+  constructor(
+    private baseUrl: string = OCR_SIDECAR_URL,
+    /** Idioma(s) para PaddleOCR (spec §15). Default "spa". */
+    private lang: string = "spa"
+  ) {}
 
   async recognize(image: Buffer): Promise<OcrResult> {
     const res = await fetch(`${this.baseUrl}/ocr`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ image: image.toString("base64") }),
+      body: JSON.stringify({ image: image.toString("base64"), lang: this.lang }),
     });
     if (!res.ok) {
       throw new Error(`OCR sidecar HTTP ${res.status}`);
@@ -107,7 +112,7 @@ export class PaddleOcrClient implements OcrClient {
     const res = await fetch(`${this.baseUrl}/ocr-enhanced`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ image: image.toString("base64") }),
+      body: JSON.stringify({ image: image.toString("base64"), lang: this.lang }),
     });
     if (!res.ok) {
       throw new Error(`OCR sidecar HTTP ${res.status}`);
@@ -1704,8 +1709,17 @@ function norm(s: string): string {
 }
 
 /** Fin-del-día de una fecha ISO ≥ ahora (vigente todo el día de vencimiento). */
-function notExpired(iso: string): boolean {
-  return iso !== "" && new Date(`${iso}T23:59:59.999Z`) >= new Date();
+function notExpired(iso: string, maxAgeYears = 0): boolean {
+  if (iso === "") return false;
+  const expiry = new Date(`${iso}T23:59:59.999Z`);
+  if (expiry < new Date()) return false;
+  // Spec §16: cédula PY es válida hasta los 75 años de edad.
+  if (maxAgeYears > 0) {
+    const birthDate = new Date(`${iso}T00:00:00Z`);
+    const ageAtExpiry = (expiry.getTime() - birthDate.getTime()) / (365.25 * 24 * 60 * 60 * 1000);
+    if (ageAtExpiry > maxAgeYears) return false;
+  }
+  return true;
 }
 
 /**
@@ -2257,17 +2271,23 @@ export interface DocumentDeps {
   barcodeReader: BarcodeReader;
   engine: Engine;
   /**
-   * Preprocesa el FRENTE SÓLO para la LECTURA OCR de campos: endereza (doc-crop,
-   * deskew/perspectiva del sidecar) + amplía (resize-up). El texto enderezado y
-   * ampliado es mucho más legible para PaddleOCR en capturas de celular
-   * comprimidas/chicas (caso real: apellido no leído). OPCIONAL — si no se
-   * inyecta, el OCR corre sobre el frente crudo (comportamiento histórico).
-   * FAIL-OPEN: ante cualquier error debe devolver el buffer original.
-   *
-   * IMPORTANTE: NO toca el recorte de la foto del titular (`cropDocFace`), que
-   * sigue corriendo sobre el frente CRUDO para no degradar el match facial.
-   */
+    * Preprocesa el FRENTE SÓLO para la LECTURA OCR de campos: endereza (doc-crop,
+    * deskew/perspectiva del sidecar) + amplía (resize-up). El texto enderezado y
+    * ampliado es mucho más legible para PaddleOCR en capturas de celular
+    * comprimidas/chicas (caso real: apellido no leído). OPCIONAL — si no se
+    * inyecta, el OCR corre sobre el frente crudo (comportamiento histórico).
+    * FAIL-OPEN: ante cualquier error debe devolver el buffer original.
+    *
+    * IMPORTANTE: NO toca el recorte de la foto del titular (`cropDocFace`), que
+    * sigue corriendo sobre el frente CRUDO para no degradar el match facial.
+    */
   preprocessFront?: (front: Buffer) => Promise<Buffer>;
+  /**
+    * Edad máxima en años para la validez del documento (spec §16).
+    * Para cédula PY: 75 años (la CI es válida hasta esa edad).
+    * 0 = no aplicar límite de edad.
+    */
+  maxDocumentAgeYears?: number;
 }
 
 /**
@@ -2590,7 +2610,7 @@ export class DocumentModule {
       !!extracted.documentoFisico.fechaVencimiento;
     const passed =
       requiredPresent &&
-      notExpired(extracted.documentoFisico.fechaVencimiento) &&
+      notExpired(extracted.documentoFisico.fechaVencimiento, deps.maxDocumentAgeYears ?? 0) &&
       docFaceCrop !== null;
 
     return {
@@ -2610,11 +2630,12 @@ export const documentModule = new DocumentModule();
 
 /** Dependencias reales por defecto (on-prem). El engine se inyecta desde el server. */
 export function defaultDocumentDeps(engine: Engine): DocumentDeps {
-  const ocr = new PaddleOcrClient();
+  const ocr = new PaddleOcrClient(OCR_SIDECAR_URL, process.env.TEKO_OCR_LANG || "spa");
   return {
     ocr,
     mrzReader: new OcrMrzReader(),
     barcodeReader: new ZxingBarcodeReader(),
     engine,
+    maxDocumentAgeYears: CI_MAX_AGE_YEARS,
   };
 }

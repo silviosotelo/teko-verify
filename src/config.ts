@@ -222,3 +222,49 @@ export const REFERENCE_POINTS: Array<[number, number]> = [
   [41.5493, 92.3655], // boca izquierda
   [70.7299, 92.2041], // boca derecha
 ];
+
+// ---------------------------------------------------------------------------
+// Webhook circuit breaker (spec §13)
+// ---------------------------------------------------------------------------
+
+/**
+ * Número de fallos consecutivos antes de abrir el circuit breaker.
+ * Al abrirse, los webhooks se skippean por el período de cooldown.
+ */
+export const CIRCUIT_BREAKER_FAILURE_THRESHOLD = parseInt(
+  process.env.TEKO_CIRCUIT_BREAKER_FAILURES || "5",
+  10
+);
+
+/**
+ * Duración del estado OPEN del circuit breaker (segundos).
+ * Después de este tiempo, se prueba con un intento half-open.
+ */
+export const CIRCUIT_BREAKER_COOLDOWN_SEC = parseInt(
+  process.env.TEKO_CIRCUIT_BREAKER_COOLDOWN || "300",
+  10
+);
+
+// ---------------------------------------------------------------------------
+// Multi-language OCR (spec §15)
+// ---------------------------------------------------------------------------
+
+/**
+ * Idioma(s) para OCR multi-idioma. Default "spa" (español).
+ * Valores: "spa", "eng", "spa+eng", "por", "por+eng", "spa+por".
+ * Se pasa al sidecar PaddleOCR como parámetro de idioma.
+ */
+export const OCR_LANG = process.env.TEKO_OCR_LANG || "spa";
+
+// ---------------------------------------------------------------------------
+// Document expiry validation (spec §16)
+// ---------------------------------------------------------------------------
+
+/**
+ * Edad máxima en años para la validez de la cédula de identidad paraguaya.
+ * Según la ley, la CI para es válida hasta los 75 años de edad.
+ */
+export const CI_MAX_AGE_YEARS = parseInt(
+  process.env.TEKO_CI_MAX_AGE_YEARS || "75",
+  10
+);

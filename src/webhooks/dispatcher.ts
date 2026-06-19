@@ -13,6 +13,10 @@
  *   - FIRMA: X-Signature (sha256 del cuerpo canónico con timestamp) + X-Timestamp,
  *     con el secreto del destino (endpoint.secret) o, para el callbackUrl legacy de
  *     la sesión, el secreto del tenant.
+ *   - CIRCUIT BREAKER (spec §13): tras N fallos consecutivos, se abre el circuito
+ *     por un período de cooldown. Durante el estado OPEN, los webhooks se skippean
+ *     (no se crean entregas) para no sobrecargar un destino caído. Se prueba
+ *     half-open cada cooldown segundos.
  *
  * Inyectable (DispatcherDeps) para tests sin DB/HTTP/timers reales.
  */
@@ -31,7 +35,12 @@ import {
   eventMatches,
   RETRY_BACKOFF_MS,
   signatureHeader,
+  signatureHeaderV2,
 } from "./signing";
+import {
+  CIRCUIT_BREAKER_FAILURE_THRESHOLD,
+  CIRCUIT_BREAKER_COOLDOWN_SEC,
+} from "../config";
 
 export interface HttpResult {
   status: number;
@@ -83,6 +92,93 @@ export interface DispatcherDeps {
 
 const TIMESTAMP_HEADER = "X-Timestamp";
 
+/** Estado del circuit breaker por URL. */
+interface CircuitBreakerState {
+  failures: number;
+  lastFailureAt: number;
+  state: "closed" | "open" | "half-open";
+}
+
+/**
+ * Circuit breaker liviano por URL: tras N fallos consecutivos, abre el circuito
+ * por un período de cooldown.
+ */
+class CircuitBreaker {
+  private states = new Map<string, CircuitBreakerState>();
+
+  constructor(
+    private failureThreshold: number,
+    private cooldownSec: number
+  ) {}
+
+  /** ¿Puede enviar a esta URL? false si el circuito está abierto. */
+  canSend(url: string): boolean {
+    const state = this.states.get(url);
+    if (!state) return true; // cerrado por defecto
+    if (state.state === "closed") return true;
+    if (state.state === "half-open") return true; // prueba un intento
+    // open: verificar si pasó el cooldown
+    const elapsed = Date.now() - state.lastFailureAt;
+    if (elapsed >= this.cooldownSec * 1000) {
+      state.state = "half-open";
+      return true;
+    }
+    return false;
+  }
+
+  /** Registra un fallo exitoso (HTTP no-2xx o error de red). */
+  recordFailure(url: string): void {
+    const existing = this.states.get(url) ?? {
+      failures: 0,
+      lastFailureAt: 0,
+      state: "closed" as const,
+    };
+    const state: CircuitBreakerState = {
+      failures: existing.failures + 1,
+      lastFailureAt: Date.now(),
+      state: existing.failures + 1 >= this.failureThreshold ? "open" : "closed",
+    };
+    this.states.set(url, state);
+  }
+
+  /** Registra un éxito: resetea el contador de fallos. */
+  recordSuccess(url: string): void {
+    this.states.set(url, { failures: 0, lastFailureAt: 0, state: "closed" });
+  }
+
+  /** Fuerza el circuito a half-open (para reintento manual). */
+  forceHalfOpen(url: string): void {
+    const state = this.states.get(url);
+    if (state) {
+      state.state = "half-open";
+    }
+  }
+
+  /** Limpia estados viejos (open pero con cooldown expirado). */
+  cleanup(): void {
+    for (const [url, state] of this.states) {
+      if (state.state === "open") {
+        const elapsed = Date.now() - state.lastFailureAt;
+        if (elapsed >= this.cooldownSec * 1000) {
+          state.state = "half-open";
+        }
+      }
+    }
+  }
+}
+
+let _circuitBreaker: CircuitBreaker | null = null;
+
+function getCircuitBreaker(): CircuitBreaker {
+  if (!_circuitBreaker) {
+    _circuitBreaker = new CircuitBreaker(
+      CIRCUIT_BREAKER_FAILURE_THRESHOLD,
+      CIRCUIT_BREAKER_COOLDOWN_SEC
+    );
+  }
+  return _circuitBreaker;
+}
+
 function buildPayload(
   eventId: string,
   event: WebhookEvent,
@@ -109,10 +205,11 @@ export class WebhookDispatcher {
   constructor(private deps: DispatcherDeps) {}
 
   /**
-   * Emite un evento del ciclo de vida de la sesión a todos los destinos suscritos
-   * del tenant (+ al callbackUrl legacy de la sesión si lo tiene). Crea las entregas
-   * y dispara el primer intento de cada una. FAIL-OPEN: nunca lanza.
-   */
+    * Emite un evento del ciclo de vida de la sesión a todos los destinos suscritos
+    * del tenant (+ al callbackUrl legacy de la sesión si lo tiene). Crea las entregas
+    * y dispara el primer intento de cada una. FAIL-OPEN: nunca lanza.
+    * Usa circuit breaker: si un destino falló muchas veces, se skippea.
+    */
   async emitSessionEvent(
     session: VerificationSession,
     event: WebhookEvent,
@@ -129,8 +226,12 @@ export class WebhookDispatcher {
       // del tenant). Suscrito implícitamente a TODOS los eventos.
       if (session.callbackUrl) targets.push({ endpointId: null, url: session.callbackUrl });
 
+      // Circuit breaker: filtrar destinos cuyo circuito está abierto.
+      const cb = getCircuitBreaker();
+      const viableTargets = targets.filter((t) => cb.canSend(t.url));
+
       const createdAt = new Date(this.deps.now()).toISOString();
-      for (const t of targets) {
+      for (const t of viableTargets) {
         const eventId = this.deps.genEventId();
         const payload = buildPayload(eventId, event, session, result, createdAt);
         const rec = await this.deps.deliveries.create({
@@ -155,6 +256,8 @@ export class WebhookDispatcher {
     for (const rec of created) {
       await this.attempt(rec.id).catch(() => undefined);
     }
+    // Limpieza periódica de estados viejos del circuit breaker.
+    getCircuitBreaker().cleanup();
     return created;
   }
 
@@ -168,15 +271,23 @@ export class WebhookDispatcher {
   }
 
   /**
-   * Intenta entregar una entrega por id. Firma, POSTea, registra el resultado y
-   * reprograma con backoff si falló y quedan reintentos. Devuelve el registro
-   * actualizado. FAIL-OPEN: nunca lanza (un error se captura como 'failed').
-   */
+    * Intenta entregar una entrega por id. Firma, POSTea, registra el resultado y
+    * reprograma con backoff si falló y quedan reintentos. Devuelve el registro
+    * actualizado. FAIL-OPEN: nunca lanza (un error se captura como 'failed').
+    * Usa circuit breaker: si el destino falló muchas veces, skippea el intento.
+    */
   async attempt(deliveryId: string): Promise<WebhookDeliveryRecord | null> {
     const rec = await this.deps.deliveries.getById(deliveryId);
     if (!rec) return null;
     if (rec.status === "delivered" || rec.status === "dead") return rec;
     if (rec.attempts >= rec.maxAttempts) return rec;
+
+    // Circuit breaker: verificar si el circuito está abierto para esta URL.
+    const cb = getCircuitBreaker();
+    if (!cb.canSend(rec.url)) {
+      // Circuito abierto: no se intenta hasta que pase el cooldown.
+      return rec;
+    }
 
     const secret = await this.resolveSecret(rec);
     if (!secret) {
@@ -190,12 +301,15 @@ export class WebhookDispatcher {
 
     const timestamp = Math.floor(this.deps.now() / 1000);
     const body = canonicalBody(rec.payload);
+
+    // v2 signing: incluir versión en el header para compatibilidad.
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
       "X-Teko-Event": rec.eventType,
       "X-Event-Id": rec.eventId,
       [TIMESTAMP_HEADER]: String(timestamp),
-      "X-Signature": signatureHeader(secret, timestamp, body),
+      "X-Signature": signatureHeaderV2(secret, timestamp, body),
+      "X-Signature-Version": "2",
     };
 
     let status = 0;
@@ -211,6 +325,7 @@ export class WebhookDispatcher {
 
     const ok = status >= 200 && status < 300;
     if (ok) {
+      cb.recordSuccess(rec.url);
       return this.deps.deliveries.recordAttempt(rec.id, {
         status: "delivered",
         responseCode: status,
@@ -219,7 +334,9 @@ export class WebhookDispatcher {
       });
     }
 
-    // Falló: ¿quedan reintentos? attempts ya hechos = rec.attempts + 1 tras este.
+    // Falló: circuit breaker + reintento.
+    cb.recordFailure(rec.url);
+
     const attemptsAfter = rec.attempts + 1;
     const delay = attemptsAfter < rec.maxAttempts ? backoffMs(attemptsAfter, this.deps.backoff) : null;
     const updated = await this.deps.deliveries.recordAttempt(rec.id, {
@@ -254,6 +371,8 @@ export class WebhookDispatcher {
         nextAttemptInMs: null,
       });
     }
+    // Forzar half-open del circuit breaker para esta URL.
+    getCircuitBreaker().forceHalfOpen(rec.url);
     return this.attempt(deliveryId);
   }
 

@@ -1,30 +1,63 @@
 import { useEffect, useState } from 'react'
 import Card from '@/components/ui/Card'
+import Badge from '@/components/ui/Badge'
+import Button from '@/components/ui/Button'
 import Spinner from '@/components/ui/Spinner'
 import Alert from '@/components/ui/Alert'
-import Button from '@/components/ui/Button'
 import Input from '@/components/ui/Input'
+import Dialog from '@/components/ui/Dialog'
 import Table from '@/components/ui/Table'
+import Chart from '@/components/shared/Chart'
+import IconText from '@/components/shared/IconText'
+import UsersAvatarGroup from '@/components/shared/UsersAvatarGroup'
 import { tekoApi } from '@/teko/client'
 import { fmtDate } from '@/teko/format'
 import type { AdminRole, OperatorRow } from '@/teko/types'
+import { motion } from 'framer-motion'
+import {
+    PiUsers,
+    PiShieldCheck,
+    PiEye,
+    PiGear,
+    PiUserPlus,
+    PiEnvelope,
+    PiKey,
+    PiLock,
+    PiCheckCircle,
+    PiClockClockwise,
+} from 'react-icons/pi'
 
 const { THead, TBody, Tr, Th, Td } = Table
 
-// Vista Team (RBAC): operadores del panel + su rol. manage_members (owner). El
-// backend hace el enforcement; aquí gateamos la UI con /me para no mostrar acciones
-// que devolverían 403. Anti-lockout (último owner) lo valida el backend.
 const ROLE_DESC: Record<string, string> = {
     owner: 'Todos los permisos (incl. orgs y miembros)',
     admin: 'Gestiona apps/workflows/webhooks/branding/keys + revisa',
     reviewer: 'Revisa sesiones + lectura',
     viewer: 'Solo lectura',
+    operator: 'Admin (legacy)',
+}
+
+const ROLE_COLORS: Record<string, string> = {
+    owner: 'danger',
+    admin: 'primary',
+    reviewer: 'warning',
+    viewer: 'gray',
+    operator: 'primary',
+}
+
+const ROLE_ICONS: Record<string, React.ReactNode> = {
+    owner: <PiLock />,
+    admin: <PiGear />,
+    reviewer: <PiEye />,
+    viewer: <PiEye />,
+    operator: <PiKey />,
 }
 
 const TeamView = () => {
     const [operators, setOperators] = useState<OperatorRow[]>([])
     const [assignable, setAssignable] = useState<AdminRole[]>([])
     const [canManage, setCanManage] = useState(false)
+    const [meEmail, setMeEmail] = useState('')
     const [loading, setLoading] = useState(true)
     const [error, setError] = useState<string | null>(null)
 
@@ -32,6 +65,7 @@ const TeamView = () => {
     const [password, setPassword] = useState('')
     const [role, setRole] = useState<AdminRole>('viewer')
     const [busy, setBusy] = useState(false)
+    const [inviteDialog, setInviteDialog] = useState(false)
 
     async function load() {
         setLoading(true)
@@ -41,6 +75,7 @@ const TeamView = () => {
             const manage = me.permissions.includes('manage_members')
             setCanManage(manage)
             setAssignable(me.assignableRoles)
+            setMeEmail(me.operator?.email || '')
             if (manage) {
                 const { operators } = await tekoApi.listOperators()
                 setOperators(operators)
@@ -66,6 +101,7 @@ const TeamView = () => {
             setEmail('')
             setPassword('')
             setRole('viewer')
+            setInviteDialog(false)
             await load()
         } catch (e) {
             setError((e as Error).message)
@@ -84,6 +120,11 @@ const TeamView = () => {
         }
     }
 
+    const roleDistribution = assignable.map((r) => ({
+        name: r,
+        count: operators.filter((o) => o.role === r).length,
+    }))
+
     if (loading) {
         return (
             <div className="flex h-40 items-center justify-center">
@@ -94,12 +135,92 @@ const TeamView = () => {
 
     return (
         <div>
-            <div className="mb-6">
-                <h3 className="mb-1">Team</h3>
-                <p className="text-gray-500">
-                    Operadores del panel y su rol (RBAC).
-                </p>
+            <div className="mb-6 flex flex-wrap items-end justify-between gap-3">
+                <div>
+                    <h3 className="mb-1">Equipo</h3>
+                    <p className="text-gray-500">
+                        Operadores del panel y su rol (RBAC).
+                    </p>
+                </div>
+                {canManage && (
+                    <Button variant="solid" onClick={() => setInviteDialog(true)} className="gap-1">
+                        <PiUserPlus />
+                        Invitar operador
+                    </Button>
+                )}
             </div>
+
+            {/* Summary Cards */}
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+                <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }}>
+                    <Card>
+                        <IconText icon={<PiUsers />} text="Total Operadores" iconClassName="text-primary" />
+                        <div className="mt-2 text-3xl font-bold heading-text">{operators.length}</div>
+                    </Card>
+                </motion.div>
+                <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.1 }}>
+                    <Card>
+                        <IconText icon={<PiShieldCheck />} text="Owners" iconClassName="text-danger" />
+                        <div className="mt-2 text-3xl font-bold text-danger">
+                            {operators.filter((o) => o.role === 'owner').length}
+                        </div>
+                    </Card>
+                </motion.div>
+                <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.2 }}>
+                    <Card>
+                        <IconText icon={<PiGear />} text="Admins" iconClassName="text-primary" />
+                        <div className="mt-2 text-3xl font-bold text-primary">
+                            {operators.filter((o) => o.role === 'admin').length}
+                        </div>
+                    </Card>
+                </motion.div>
+                <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.3 }}>
+                    <Card>
+                        <IconText icon={<PiEye />} text="Reviewers" iconClassName="text-warning" />
+                        <div className="mt-2 text-3xl font-bold text-warning">
+                            {operators.filter((o) => o.role === 'reviewer').length}
+                        </div>
+                    </Card>
+                </motion.div>
+            </div>
+
+            {/* Role Distribution Chart */}
+            {roleDistribution.length > 0 && (
+                <Card className="mb-6">
+                    <h5 className="font-semibold mb-4">Distribución de Roles</h5>
+                    <Chart
+                        type="pie"
+                        height={250}
+                        series={roleDistribution.filter((r) => r.count > 0).map((r) => r.count)}
+                        customOptions={{
+                            labels: roleDistribution.map((r) => r.name),
+                            colors: roleDistribution.map((r) => {
+                                if (r.name === 'owner') return '#ef4444'
+                                if (r.name === 'admin') return '#3b82f6'
+                                if (r.name === 'reviewer') return '#f59e0b'
+                                if (r.name === 'viewer') return '#9ca3af'
+                                return '#3b82f6'
+                            }),
+                            legend: { position: 'bottom' },
+                            plotOptions: {
+                                pie: {
+                                    donut: {
+                                        size: '60%',
+                                        labels: {
+                                            show: true,
+                                            total: {
+                                                show: true,
+                                                label: 'Total',
+                                                formatter: () => operators.length,
+                                            },
+                                        },
+                                    },
+                                },
+                            },
+                        }}
+                    />
+                </Card>
+            )}
 
             {error && (
                 <Alert showIcon className="mb-4" type="danger">
@@ -113,101 +234,68 @@ const TeamView = () => {
                     owner puede gestionar el equipo.
                 </Alert>
             ) : (
-                <>
-                    <Card className="mb-6">
-                        <form
-                            onSubmit={createOp}
-                            className="flex flex-wrap items-end gap-3"
-                        >
-                            <div className="min-w-[180px] flex-1">
-                                <label className="mb-1 block text-sm font-medium text-gray-600 dark:text-gray-300">
-                                    Email / usuario
-                                </label>
-                                <Input
-                                    value={email}
-                                    onChange={(e) => setEmail(e.target.value)}
-                                    placeholder="operador@org"
-                                />
-                            </div>
-                            <div className="min-w-[160px] flex-1">
-                                <label className="mb-1 block text-sm font-medium text-gray-600 dark:text-gray-300">
-                                    Contraseña (≥10)
-                                </label>
-                                <Input
-                                    type="password"
-                                    value={password}
-                                    onChange={(e) =>
-                                        setPassword(e.target.value)
-                                    }
-                                />
-                            </div>
-                            <div className="min-w-[140px]">
-                                <label className="mb-1 block text-sm font-medium text-gray-600 dark:text-gray-300">
-                                    Rol
-                                </label>
-                                <select
-                                    className="h-11 w-full rounded-xl border border-gray-300 bg-white px-3 text-sm dark:border-gray-600 dark:bg-gray-700"
-                                    value={role}
-                                    onChange={(e) =>
-                                        setRole(e.target.value as AdminRole)
-                                    }
-                                >
-                                    {assignable.map((r) => (
-                                        <option key={r} value={r}>
-                                            {r}
-                                        </option>
-                                    ))}
-                                </select>
-                            </div>
-                            <Button
-                                type="submit"
-                                variant="solid"
-                                loading={busy}
-                                disabled={!email.trim() || !password}
-                            >
-                                Crear operador
-                            </Button>
-                        </form>
-                        <p className="mt-2 text-xs text-gray-400">
-                            {ROLE_DESC[role]}
-                        </p>
-                    </Card>
-
-                    <Card bodyClass="px-0 py-0">
-                        <Table>
-                            <THead>
-                                <Tr>
-                                    <Th>Operador</Th>
-                                    <Th>Rol</Th>
-                                    <Th>Creado</Th>
-                                </Tr>
-                            </THead>
-                            <TBody>
-                                {operators.map((o) => (
-                                    <Tr key={o.id}>
-                                        <Td className="font-medium heading-text">
-                                            {o.email}
+                <Card bodyClass="px-0 py-0">
+                    <Table>
+                        <THead>
+                            <Tr>
+                                <Th>Operador</Th>
+                                <Th>Rol</Th>
+                                <Th>Permisos</Th>
+                                <Th>Último acceso</Th>
+                                <Th>Creado</Th>
+                                <Th>Acciones</Th>
+                            </Tr>
+                        </THead>
+                        <TBody>
+                            {operators.map((o) => {
+                                const perms = ROLE_DESC[o.role] || o.role
+                                return (
+                                    <Tr key={o.id} className="hover:bg-gray-50 dark:hover:bg-gray-700/50">
+                                        <Td>
+                                            <div className="flex items-center gap-3">
+                                                <div className={`w-10 h-10 rounded-full flex items-center justify-center font-bold text-white ${
+                                                    o.role === 'owner' ? 'bg-danger' :
+                                                    o.role === 'admin' ? 'bg-primary' :
+                                                    o.role === 'reviewer' ? 'bg-warning' :
+                                                    'bg-gray-400'
+                                                }`}>
+                                                    {o.email.charAt(0).toUpperCase()}
+                                                </div>
+                                                <div>
+                                                    <div className="font-medium heading-text">{o.email}</div>
+                                                    <div className="text-xs text-gray-400">ID: {o.id.slice(0, 8)}</div>
+                                                </div>
+                                            </div>
+                                        </Td>
+                                        <Td>
+                                            <Badge
+                                                variant="solid"
+                                                color={ROLE_COLORS[o.role] || 'gray'}
+                                                className="flex items-center gap-1"
+                                            >
+                                                {ROLE_ICONS[o.role]}
+                                                {o.role}
+                                            </Badge>
+                                        </Td>
+                                        <Td className="max-w-xs">
+                                            <span className="text-sm text-gray-500">{perms}</span>
+                                        </Td>
+                                        <Td>
+                                            <div className="flex items-center gap-1 text-gray-500 text-sm">
+                                                <PiClockClockwise />
+                                                —
+                                            </div>
+                                        </Td>
+                                        <Td className="text-gray-500 whitespace-nowrap">
+                                            {fmtDate(o.createdAt)}
                                         </Td>
                                         <Td>
                                             <select
                                                 className="h-9 rounded-lg border border-gray-300 bg-white px-2 text-sm dark:border-gray-600 dark:bg-gray-700"
-                                                value={
-                                                    assignable.includes(o.role)
-                                                        ? o.role
-                                                        : o.role
-                                                }
-                                                onChange={(e) =>
-                                                    changeRole(
-                                                        o.id,
-                                                        e.target
-                                                            .value as AdminRole,
-                                                    )
-                                                }
+                                                value={assignable.includes(o.role) ? o.role : o.role}
+                                                onChange={(e) => changeRole(o.id, e.target.value as AdminRole)}
                                             >
-                                                {/* incluye el rol actual aunque sea legacy (operator) */}
-                                                {!assignable.includes(
-                                                    o.role,
-                                                ) && (
+                                                {!assignable.includes(o.role) && (
                                                     <option value={o.role}>
                                                         {o.role} (legacy)
                                                     </option>
@@ -219,16 +307,78 @@ const TeamView = () => {
                                                 ))}
                                             </select>
                                         </Td>
-                                        <Td className="text-gray-500">
-                                            {fmtDate(o.createdAt)}
-                                        </Td>
                                     </Tr>
-                                ))}
-                            </TBody>
-                        </Table>
-                    </Card>
-                </>
+                                )
+                            })}
+                        </TBody>
+                    </Table>
+                </Card>
             )}
+
+            {/* Invite Dialog */}
+            <Dialog
+                isOpen={inviteDialog}
+                onClose={() => setInviteDialog(false)}
+                onRequestClose={() => setInviteDialog(false)}
+                title="Invitar operador"
+            >
+                <form onSubmit={createOp} className="space-y-4">
+                    <div>
+                        <label className="mb-1 block text-sm font-medium text-gray-600 dark:text-gray-300">
+                            Email
+                        </label>
+                        <Input
+                            type="email"
+                            value={email}
+                            onChange={(e) => setEmail(e.target.value)}
+                            placeholder="operador@empresa.com"
+                            prefix={<PiEnvelope />}
+                            required
+                        />
+                    </div>
+                    <div>
+                        <label className="mb-1 block text-sm font-medium text-gray-600 dark:text-gray-300">
+                            Contraseña
+                        </label>
+                        <Input
+                            type="password"
+                            value={password}
+                            onChange={(e) => setPassword(e.target.value)}
+                            placeholder="Mínimo 10 caracteres"
+                            prefix={<PiLock />}
+                            required
+                        />
+                    </div>
+                    <div>
+                        <label className="mb-1 block text-sm font-medium text-gray-600 dark:text-gray-300">
+                            Rol
+                        </label>
+                        <select
+                            className="h-11 w-full rounded-xl border border-gray-300 bg-white px-3 text-sm dark:border-gray-600 dark:bg-gray-700"
+                            value={role}
+                            onChange={(e) => setRole(e.target.value as AdminRole)}
+                        >
+                            {assignable.map((r) => (
+                                <option key={r} value={r}>
+                                    {r} — {ROLE_DESC[r]}
+                                </option>
+                            ))}
+                        </select>
+                    </div>
+                    <div className="flex justify-end gap-2 pt-2">
+                        <Button
+                            type="button"
+                            variant="default"
+                            onClick={() => setInviteDialog(false)}
+                        >
+                            Cancelar
+                        </Button>
+                        <Button type="submit" variant="solid" loading={busy}>
+                            Invitar
+                        </Button>
+                    </div>
+                </form>
+            </Dialog>
         </div>
     )
 }

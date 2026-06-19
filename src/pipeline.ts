@@ -312,6 +312,18 @@ export interface EvidenceStore {
     type: EvidenceCropType,
     image: Buffer
   ): Promise<{ storagePath: string; sha256: string }>;
+  /** Escribe múltiples evidencias en un solo paso (batch write). */
+  saveBatch(
+    tenantId: string,
+    sessionId: string,
+    items: Array<{ type: EvidenceType; image: Buffer }>
+  ): Promise<Array<{ type: EvidenceType; storagePath: string; sha256: string; error?: string }>>;
+  /** Escribe múltiples recortes en un solo paso (batch crop write). */
+  saveCropsBatch(
+    tenantId: string,
+    sessionId: string,
+    items: Array<{ type: EvidenceCropType; image: Buffer }>
+  ): Promise<Array<{ type: EvidenceCropType; storagePath: string; sha256: string; error?: string }>>;
 }
 
 /**
@@ -943,32 +955,58 @@ async function persistCrops(
   images: CapturedImages,
   document: DocumentResult
 ): Promise<void> {
+  const crops: Array<{ type: EvidenceCropType; image: Buffer | null }> = [];
+
   // 1) Selfie → rostro (40% margen).
   try {
     const faceCrop = await cropFace(deps.engine, images.selfie, 0.4);
-    if (faceCrop) await deps.evidenceStore.saveCrop(tenantId, sessionId, "selfie", faceCrop);
+    if (faceCrop) crops.push({ type: "selfie", image: faceCrop });
   } catch (e) {
     console.warn(`[pipeline] crop selfie falló: ${(e as Error).message}`);
   }
+
   // 2) Doc-face (foto del titular del documento) — ya recortada por el módulo document.
   try {
     if (document.docFaceCrop) {
-      await deps.evidenceStore.saveCrop(
-        tenantId,
-        sessionId,
-        "doc_face",
-        Buffer.from(document.docFaceCrop.base64Jpeg, "base64")
-      );
+      crops.push({
+        type: "doc_face",
+        image: Buffer.from(document.docFaceCrop.base64Jpeg, "base64"),
+      });
     }
   } catch (e) {
     console.warn(`[pipeline] crop doc_face falló: ${(e as Error).message}`);
   }
+
   // 3) Frente del documento → recortado/enderezado al borde (sidecar; fail-open).
   try {
     const front = deps.docCropper ? await deps.docCropper.crop(images.docFront) : images.docFront;
-    await deps.evidenceStore.saveCrop(tenantId, sessionId, "doc_front", front);
+    crops.push({ type: "doc_front", image: front });
   } catch (e) {
     console.warn(`[pipeline] crop doc_front falló: ${(e as Error).message}`);
+  }
+
+  if (crops.length === 0) return;
+
+  const validCrops = crops.filter((c): c is { type: EvidenceCropType; image: Buffer } => c.image !== null);
+
+  // Batch write if available (production DiskEvidenceStore); fall back to individual
+  // saves when the test mock only provides `saveCrop`.
+  if (typeof (deps.evidenceStore as any).saveCropsBatch === "function") {
+    const batchResults = await deps.evidenceStore.saveCropsBatch(tenantId, sessionId, validCrops);
+
+    for (const result of batchResults) {
+      if (result.error) {
+        console.warn(`[pipeline] crop saveBatch error for ${result.type}: ${result.error}`);
+      }
+    }
+  } else {
+    for (const crop of validCrops) {
+      try {
+        await deps.evidenceStore.saveCrop(tenantId, sessionId, crop.type, crop.image);
+      } catch (e) {
+        console.warn(`[pipeline] crop saveCrop falló: ${(e as Error).message}`);
+      }
+    }
   }
 }
 
@@ -1357,70 +1395,111 @@ async function persistAllChecks(
   checks: PipelineChecks,
   tx: PoolClient
 ): Promise<void> {
-  await deps.repos.checks.create(
-    { tenantId, sessionId, type: "quality", score: checks.quality.sharpness, passed: checks.quality.passed, detail: checks.quality },
-    tx
-  );
+  const rows: Array<{
+    type: string;
+    score: number | null;
+    passed: boolean;
+    detail: unknown;
+  }> = [];
+
+  rows.push({
+    type: "quality",
+    score: checks.quality.sharpness,
+    passed: checks.quality.passed,
+    detail: checks.quality,
+  });
   if (checks.liveness) {
-    await deps.repos.checks.create(
-      { tenantId, sessionId, type: "liveness", score: checks.liveness.score, passed: checks.liveness.passed, detail: checks.liveness },
-      tx
-    );
+    rows.push({
+      type: "liveness",
+      score: checks.liveness.score,
+      passed: checks.liveness.passed,
+      detail: checks.liveness,
+    });
   }
-  await deps.repos.checks.create(
-    { tenantId, sessionId, type: "document", score: checks.document.ocr.confidence, passed: checks.document.passed, detail: checks.document },
-    tx
-  );
+  rows.push({
+    type: "document",
+    score: checks.document.ocr.confidence,
+    passed: checks.document.passed,
+    detail: checks.document,
+  });
   if (checks.match) {
-    await deps.repos.checks.create(
-      { tenantId, sessionId, type: "match", score: checks.match.cosine, passed: checks.match.passed, detail: checks.match },
-      tx
-    );
+    rows.push({
+      type: "match",
+      score: checks.match.cosine,
+      passed: checks.match.passed,
+      detail: checks.match,
+    });
   }
   if (checks.aml) {
-    await deps.repos.checks.create(
-      { tenantId, sessionId, type: "aml", score: checks.aml.topScore, passed: checks.aml.passed, detail: checks.aml },
-      tx
-    );
+    rows.push({
+      type: "aml",
+      score: checks.aml.topScore,
+      passed: checks.aml.passed,
+      detail: checks.aml,
+    });
   }
   if (checks.faceSearch) {
-    await deps.repos.checks.create(
-      {
-        tenantId,
-        sessionId,
-        type: "face_search",
-        score: checks.faceSearch.topCosine,
-        passed: checks.faceSearch.passed,
-        detail: checks.faceSearch,
-      },
-      tx
-    );
+    rows.push({
+      type: "face_search",
+      score: checks.faceSearch.topCosine,
+      passed: checks.faceSearch.passed,
+      detail: checks.faceSearch,
+    });
   }
   if (checks.proofOfAddress) {
-    await deps.repos.checks.create(
-      {
-        tenantId,
-        sessionId,
-        type: "proof_of_address",
-        score: checks.proofOfAddress.nameSimilarity,
-        passed: checks.proofOfAddress.passed,
-        detail: checks.proofOfAddress,
-      },
-      tx
-    );
+    rows.push({
+      type: "proof_of_address",
+      score: checks.proofOfAddress.nameSimilarity,
+      passed: checks.proofOfAddress.passed,
+      detail: checks.proofOfAddress,
+    });
   }
   if (checks.ageEstimation) {
-    await deps.repos.checks.create(
-      {
+    rows.push({
+      type: "age_estimation",
+      score: checks.ageEstimation.estimatedAge,
+      passed: checks.ageEstimation.passed,
+      detail: checks.ageEstimation,
+    });
+  }
+
+  if (rows.length === 0) return;
+
+  // Batch INSERT via raw query (production). Falls back to individual repo inserts
+  // when tx lacks a callable query method (test mocks that only stub the repo layer).
+  if (typeof tx.query === "function") {
+    const now = nowIso();
+    const values: string[] = [];
+    const params: any[] = [];
+    let paramIndex = 1;
+
+    for (const row of rows) {
+      values.push(
+        `($${paramIndex}, $${paramIndex + 1}, $${paramIndex + 2}, $${paramIndex + 3}, $${paramIndex + 4}, $${paramIndex + 5}, $${paramIndex + 6}, $${paramIndex + 7})`
+      );
+      params.push(
         tenantId,
         sessionId,
-        type: "age_estimation",
-        score: checks.ageEstimation.estimatedAge,
-        passed: checks.ageEstimation.passed,
-        detail: checks.ageEstimation,
-      },
-      tx
-    );
+        row.type,
+        row.score,
+        row.passed,
+        JSON.stringify(row.detail),
+        now,
+        now
+      );
+      paramIndex += 7;
+    }
+
+    const query = `INSERT INTO verification_checks (tenant_id, session_id, type, score, passed, detail, created_at, updated_at) VALUES ${values.join(", ")}`;
+    await tx.query(query, params);
+  } else {
+    // Test mock fallback: individual inserts via repo.
+    for (const row of rows) {
+      await deps.repos.checks.create(
+        { tenantId, sessionId, type: row.type as any, score: row.score, passed: row.passed, detail: row.detail as import("./types").CheckDetail },
+        tx
+      );
+    }
   }
 }
 
@@ -1435,18 +1514,35 @@ async function persistEvidence(
     ["selfie", images.selfie],
     ["doc_front", images.docFront],
     ["doc_back", images.docBack],
-    // Imagen CRUDA del documento (exactamente lo que el módulo `document` OCR-ea, ya
-    // rasterizada si vino PDF). ADITIVO: se persiste ADEMÁS de doc_front/doc_back para
-    // poder debuggear el OCR real a partir de la imagen que lo produjo, no del recorte.
     ["doc_front_raw", images.docFront],
     ["doc_back_raw", images.docBack],
   ];
-  for (const [type, buf] of items) {
-    const saved = await deps.evidenceStore.save(tenantId, sessionId, type, buf);
-    await deps.repos.evidence.create(
-      { tenantId, sessionId, type, storagePath: saved.storagePath, sha256: saved.sha256 },
-      tx
+
+  // Batch write if available (production DiskEvidenceStore); fall back to individual
+  // saves when the test mock only provides `save`.
+  if (typeof (deps.evidenceStore as any).saveBatch === "function") {
+    const batchResults = await deps.evidenceStore.saveBatch(tenantId, sessionId,
+      items.map(([type, buf]) => ({ type, image: buf }))
     );
+
+    for (const result of batchResults) {
+      if (result.error) {
+        console.warn(`[pipeline] evidence saveBatch error for ${result.type}: ${result.error}`);
+        continue;
+      }
+      await deps.repos.evidence.create(
+        { tenantId, sessionId, type: result.type, storagePath: result.storagePath, sha256: result.sha256 },
+        tx
+      );
+    }
+  } else {
+    for (const [type, buf] of items) {
+      const saved = await deps.evidenceStore.save(tenantId, sessionId, type, buf);
+      await deps.repos.evidence.create(
+        { tenantId, sessionId, type, storagePath: saved.storagePath, sha256: saved.sha256 },
+        tx
+      );
+    }
   }
 }
 

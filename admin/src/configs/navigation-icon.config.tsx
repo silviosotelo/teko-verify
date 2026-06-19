@@ -91,6 +91,17 @@ import {
     PiCircleHalfTiltDuotone,
     PiHouseLineDuotone,
     PiSquareSplitHorizontalDuotone,
+    PiPlugDuotone,
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
 } from 'react-icons/pi'
 import type { JSX } from 'react'
 
@@ -207,6 +218,24 @@ const navigationIcon: NavigationIcons = {
     tekoCustomization: <PiCircleHalfTiltDuotone />,
     tekoApiKeys: <PiKeyDuotone />,
     tekoAudit: <PiFileMagnifyingGlassDuotone />,
+    // New icons for Teko Verify expanded menu
+    PiUsersDuotone: <PiUsersDuotone />,
+    PiDesktopDuotone: <PiDesktopDuotone />,
+    PiListChecksDuotone: <PiListChecksDuotone />,
+    PiShareNetworkDuotone: <PiShareNetworkDuotone />,
+    PiEnvelopesDuotone: <PiEnvelopesDuotone />,
+    PiPhoneDuotone: <PiPhoneDuotone />,
+    PiHardDiscDuotone: <PiHardDiscDuotone />,
+    PiCurrencyCircleDollarDuotone: <PiCurrencyCircleDollarDuotone />,
+    PiCreditCardDuotone: <PiCreditCardDuotone />,
+    PiWalletDuotone: <PiWalletDuotone />,
+    PiDocumentDuotone: <PiDocumentDuotone />,
+    PiBellDuotone: <PiBellDuotone />,
+    PiBellRingingDuotone: <PiBellRingingDuotone />,
+    PiPlugDuotone: <PiPlugDuotone />,
+    PiFlashlightDuotone: <PiFlashlightDuotone />,
+    PiUsersThreeDuotone: <PiUsersThreeDuotone />,
+    PiLaptopDuotone: <PiLaptopDuotone />,
 }
 
 export default navigationIcon

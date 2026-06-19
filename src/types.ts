@@ -523,6 +523,57 @@ export interface FaceSearchResult {
 }
 
 // ============================================================================ //
+// 2.terbis MÓDULO FACE GALLERY — gestión de galería de rostros (spec §10)
+// ============================================================================ //
+
+/**
+ * Galería de rostros — gestión manual de identidades sospechosas/bloqueadas.
+ * Los operators del admin pueden agregar/quitar caras manualmente.
+ * Se usa como input para faceSearch (1:N) y para auditoría.
+ */
+export interface FaceGalleryEntry {
+  id: string;
+  tenantId: string;
+  /** Embedding facial 512D persistido como bytea. */
+  faceEmbedding: Buffer;
+  /** CI o ID del individuo (para referencia). */
+  identityId: string;
+  /** Nombre del individuo. */
+  name: string;
+  /** Motivo de la inclusión (blocked, suspected_fraud, etc.). */
+  reason: string;
+  /** Agregado por (admin operator id). */
+  addedBy: string;
+  createdAt: string; // ISO 8601
+}
+
+/** Respuesta de creación/actualización de entrada de galería. */
+export interface FaceGalleryEntryResponse {
+  id: string;
+  identityId: string;
+  name: string;
+  reason: string;
+  addedBy: string;
+  createdAt: string;
+}
+
+/** POST /admin/tenants/:id/gallery — crear entrada. */
+export interface CreateGalleryEntryRequest {
+  /** Embedding facial (base64 o Float32Array serializado). */
+  faceEmbedding: string;
+  identityId: string;
+  name: string;
+  reason: string;
+}
+
+/** PUT /admin/tenants/:id/gallery/:entryId — actualizar entrada. */
+export interface UpdateGalleryEntryRequest {
+  identityId?: string;
+  name?: string;
+  reason?: string;
+}
+
+// ============================================================================ //
 // 2.bis MÓDULO AML — screening de sanciones/PEP por matching LOCAL (P1 #1)
 // ============================================================================ //
 
@@ -647,6 +698,11 @@ export interface ProofOfAddressResult {
   ocrConfidence?: number;
   /** Si el OCR no pudo correr / lanzó (fail-closed → passed=false). */
   error?: string;
+  /**
+    * Estimación de coordenadas geográficas a partir del domicilio (spec §19).
+    * null si no se pudo estimar. Solo para Paraguay (ciudades principales).
+    */
+  geocoded?: { lat: number; lng: number; city: string };
 }
 
 // ============================================================================ //
@@ -713,6 +769,32 @@ export interface TenantPolicy {
     livenessScore?: number;
     qualityGlassesPct?: number;
   };
+  /**
+   * Rate limit para la API del tenant (/v1/*) — requests por minuto por IP.
+   * 0 = sin límite. Se lee en lib/rateLimit.ts y se aplica al tenantRateLimiter.
+   */
+  rateLimitV1?: number;
+  /**
+   * Rate limit para el endpoint de verificación (/verify/*) — requests por minuto
+   * por session token. 0 = sin límite.
+   */
+  rateLimitVerify?: number;
+  /**
+   * Rate limit para la API admin (/admin/*) — requests por minuto por operador.
+   * 0 = sin límite.
+   */
+  rateLimitAdmin?: number;
+  /**
+   * Idioma(s) para OCR multi-idioma (spec §15). Valores:
+   *   - "spa"       = español (default)
+   *   - "eng"       = inglés
+   *   - "spa+eng"   = español + inglés (bilingüe)
+   *   - "por"       = portugués
+   *   - "por+eng"   = portugués + inglés
+   *   - "spa+por"   = español + portugués
+   * Se pasa al sidecar PaddleOCR como parámetro de idioma.
+   */
+  ocrLanguage?: string;
 }
 
 // ---- White-label / branding por tenant (P1 #5) --------------------------- //
@@ -1041,6 +1123,7 @@ export interface VerificationCheck {
   passed: boolean;
   detail: CheckDetail;
   createdAt: string;
+  updatedAt: string;
 }
 
 /**
@@ -1081,6 +1164,23 @@ export interface Evidence {
   /** sha256 hex del archivo, para integridad/cadena de custodia. */
   sha256: string;
   createdAt: string;
+}
+
+/**
+ * Template de email por tenant — spec §17.
+ * Almacenado como JSONB en tenants.email_templates.
+ * 5 tipos: verification (default), welcome, password_reset, notification, custom.
+ */
+export interface EmailTemplate {
+  type: "verification" | "welcome" | "password_reset" | "notification" | "custom";
+  subject: string;
+  /** Cuerpo HTML del email. */
+  html: string;
+  /** Cuerpo texto plano (fallback). */
+  text?: string;
+  /** Variables interpolables: {verifyUrl}, {name}, etc. */
+  variables: string[];
+  updatedAt: string; // ISO 8601
 }
 
 /** audit_log — traza para cumplimiento (§5/§12). */

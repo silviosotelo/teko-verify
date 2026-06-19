@@ -35,9 +35,10 @@ export function isCapturable(state: SessionState): boolean {
 
 /**
  * Pura: ¿el handler de consent debe transicionar (crear consent + →capturing)?
- * Sólo desde {created, capturing}; re-aceptar desde 'review' (u otro) es un
- * no-op idempotente para no resetear el progreso (#4).
+ * Sólo desde {created}: la consentimiento debe aceptarse antes de cualquier captura.
+ * Re-aceptar desde 'capturing' o cualquier otro estado es un no-op idempotente
+ * para no resetear el progreso (#4).
  */
 export function consentShouldTransition(state: SessionState): boolean {
-  return state === "created" || state === "capturing";
+  return state === "created";
 }

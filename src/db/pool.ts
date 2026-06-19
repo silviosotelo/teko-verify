@@ -20,17 +20,53 @@ function resolveDatabaseUrl(): string {
 
 export const pool = new Pool({
   connectionString: resolveDatabaseUrl(),
-  max: parseInt(process.env.TEKO_PG_POOL_MAX || "10", 10),
+  max: parseInt(process.env.TEKO_DB_POOL_MAX || process.env.TEKO_PG_POOL_MAX || "25", 10),
   idleTimeoutMillis: parseInt(process.env.TEKO_PG_IDLE_MS || "30000", 10),
   connectionTimeoutMillis: parseInt(process.env.TEKO_PG_CONN_TIMEOUT_MS || "5000", 10),
 });
+
+const CONNECTION_ERRORS = new Set([
+  "ECONNREFUSED",
+  "ETIMEDOUT",
+  "EHOSTUNREACH",
+  "ENETUNREACH",
+  "ECONNRESET",
+]);
+
+function isRetryableError(err: unknown): boolean {
+  const code = (err as { code?: string })?.code ?? "";
+  const message = (err as { message?: string })?.message ?? "";
+  return CONNECTION_ERRORS.has(code) || CONNECTION_ERRORS.has(message) || /connection/i.test(message) || /timeout/i.test(message) || /refused/i.test(message);
+}
 
 /** Atajo tipado para queries one-shot (sin transacción explícita). */
 export function query<T extends QueryResultRow = QueryResultRow>(
   text: string,
   params?: ReadonlyArray<unknown>
 ): Promise<QueryResult<T>> {
-  return pool.query<T>(text, params as unknown[] | undefined);
+  return pool.query<T>(text, params as unknown[] | undefined).catch((err) => {
+    if (!isRetryableError(err)) throw err;
+    let lastErr = err;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      const delay = 100 * 2 ** attempt;
+      // eslint-disable-next-line no-loop-func
+      return new Promise<QueryResult<T>>((resolve, reject) => {
+        setTimeout(async () => {
+          try {
+            const result = await pool.query<T>(text, params as unknown[] | undefined);
+            resolve(result);
+          } catch (retryErr) {
+            if (!isRetryableError(retryErr) || attempt === 3) {
+              reject(retryErr);
+            } else {
+              lastErr = retryErr;
+            }
+          }
+        }, delay);
+      });
+    }
+    throw lastErr;
+  });
 }
 
 /**

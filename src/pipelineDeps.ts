@@ -15,8 +15,8 @@ import { evidenceStore } from "./lib/evidenceStore";
 import { webhookSender } from "./lib/webhook";
 import { OCR_SIDECAR_URL } from "./config";
 import { screen as amlScreen } from "./modules/aml";
-import { createLocalAmlProvider } from "./modules/amlProvider";
-import { runFaceSearch as faceSearch1N } from "./modules/faceSearch";
+import { resolveAmlProvider } from "./modules/amlProvider";
+import { runFaceSearch as faceSearch1N, CachingGalleryProvider } from "./modules/faceSearch";
 import { runProofOfAddress } from "./modules/proofOfAddress";
 import { ageEstimationModule } from "./modules/ageEstimation";
 import type { DocCropper, PipelineDeps, PipelineModules } from "./pipeline";
@@ -28,16 +28,23 @@ import type { DocCropper, PipelineDeps, PipelineModules } from "./pipeline";
  */
 async function docCrop(image: Buffer): Promise<Buffer> {
   try {
-    const res = await fetch(`${OCR_SIDECAR_URL}/doc-crop`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ image: image.toString("base64") }),
-    });
-    if (!res.ok) return image;
-    const data = (await res.json()) as { image?: unknown };
-    if (typeof data.image !== "string" || !data.image) return image;
-    const buf = Buffer.from(data.image, "base64");
-    return buf.length > 0 ? buf : image;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 30000);
+    try {
+      const res = await fetch(`${OCR_SIDECAR_URL}/doc-crop`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ image: image.toString("base64") }),
+        signal: controller.signal,
+      });
+      if (!res.ok) return image;
+      const data = (await res.json()) as { image?: unknown };
+      if (typeof data.image !== "string" || !data.image) return image;
+      const buf = Buffer.from(data.image, "base64");
+      return buf.length > 0 ? buf : image;
+    } finally {
+      clearTimeout(timeout);
+    }
   } catch {
     return image;
   }
@@ -66,10 +73,11 @@ async function preprocessFrontForOcr(front: Buffer): Promise<Buffer> {
 }
 
 /** Provider local del screening AML, respaldado por la tabla `aml_entities`. */
-const localAmlProvider = createLocalAmlProvider({
-  candidates: (input, limit) => repos.amlEntities.candidates(input, limit),
+const localAmlProvider: import("./modules/aml").AmlProvider = {
+  name: "local-opensanctions",
+  candidates: (input) => repos.amlEntities.candidates(input),
   datasetVersion: () => repos.amlEntities.datasetVersion(),
-});
+};
 
 /** Adaptador de los módulos reales a la interfaz `PipelineModules` del pipeline. */
 const modules: PipelineModules = {
@@ -100,10 +108,10 @@ const modules: PipelineModules = {
   faceSearch: (input, opts) =>
     faceSearch1N(
       input,
-      {
+      new CachingGalleryProvider({
         gallery: (tenantId, excludeSessionId) =>
           repos.identities.listGallery(tenantId, { excludeSessionId }),
-      },
+      }),
       { threshold: opts?.threshold }
     ),
   // Comprobante de domicilio (P1 #4): OCR (PaddleOCR sidecar por default) → extracción

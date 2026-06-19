@@ -890,12 +890,18 @@ adminRouter.get("/tenants/:id/metrics", async (req: Request, res: Response) => {
     "created", "capturing", "processing", "review", "in_review", "verified",
     "rejected", "needs_recapture", "expired", "error",
   ];
-  const byState = {} as Record<SessionState, number>;
-  let total = 0;
+  const byState = {} as Record<string, number>;
   for (const st of states) {
-    const r = await repos.sessions.listByTenant(tenantId, { state: st, limit: 1 });
-    byState[st] = r.total;
-    total += r.total;
+    byState[st] = 0;
+  }
+  const r = await pool.query<{ state: SessionState; count: string }>(
+    `SELECT state, COUNT(*)::int FROM verification_sessions WHERE tenant_id = $1 GROUP BY state`,
+    [tenantId]
+  );
+  let total = 0;
+  for (const row of r.rows) {
+    byState[row.state] = parseInt(row.count, 10);
+    total += parseInt(row.count, 10);
   }
   const verified = byState.verified ?? 0;
   const decided = verified + (byState.rejected ?? 0);
@@ -1406,18 +1412,44 @@ adminRouter.get("/review-queue", async (req: Request, res: Response) => {
   const tenantId = req.query.tenantId ? String(req.query.tenantId) : undefined;
   const limit = req.query.limit ? parseInt(String(req.query.limit), 10) : 50;
   const offset = req.query.offset ? parseInt(String(req.query.offset), 10) : 0;
-  const { total, sessions } = await repos.sessions.listInReview({ tenantId, limit, offset });
-  // Mapa id→nombre de tenant para etiquetar cada ítem sin N consultas.
-  const tenants = await repos.tenants.list({ limit: 500 });
-  const nameById = new Map(tenants.map((t) => [t.id, t.name]));
-  const items: ReviewQueueItem[] = sessions.map((s) => ({
-    sessionId: s.id,
-    tenantId: s.tenantId,
-    tenantName: nameById.get(s.tenantId) ?? s.tenantId,
-    externalRef: s.externalRef,
-    assuranceRequired: s.assuranceRequired,
-    suggestion: s.result,
-    createdAt: s.createdAt,
+  const conds: string[] = ["s.state = 'in_review'"];
+  const params: unknown[] = [];
+  let p = 1;
+  if (tenantId !== undefined) {
+    conds.push(`s.tenant_id = $${p++}`);
+    params.push(tenantId);
+  }
+  const where = conds.join(" AND ");
+  const totalRes = await pool.query<{ count: string }>(
+    `SELECT COUNT(*)::text AS count FROM verification_sessions s WHERE ${where}`,
+    params
+  );
+  const total = parseInt(totalRes.rows[0].count, 10);
+  const rowsRes = await pool.query<{
+    id: string;
+    tenant_id: string;
+    tenant_name: string | null;
+    external_ref: string | null;
+    assurance_required: LoA;
+    result: import("../types").SessionResult | null;
+    created_at: Date;
+  }>(
+    `SELECT s.id, s.tenant_id, t.name as tenant_name, s.external_ref,
+            s.assurance_required, s.result, s.created_at
+     FROM verification_sessions s
+     LEFT JOIN tenants t ON s.tenant_id = t.id
+     WHERE ${where}
+     ORDER BY s.created_at DESC LIMIT $${p++} OFFSET $${p++}`,
+    [...params, limit, offset]
+  );
+  const items: ReviewQueueItem[] = rowsRes.rows.map((r) => ({
+    sessionId: r.id,
+    tenantId: r.tenant_id,
+    tenantName: r.tenant_name ?? r.tenant_id,
+    externalRef: r.external_ref,
+    assuranceRequired: r.assurance_required,
+    suggestion: r.result,
+    createdAt: r.created_at.toISOString(),
   }));
   const resp: ReviewQueueResponse = { total, items };
   res.json(resp);
@@ -1953,3 +1985,591 @@ adminRouter.post("/ocr-debug", requireReview, async (req: Request, res: Response
     res.status(500).json({ error: "ocr_debug_failed", detail: (e as Error).message });
   }
 });
+
+// ---------------------------------------------------------------------------
+// Bulk session operations (spec §3)
+// ---------------------------------------------------------------------------
+
+// POST /admin/tenants/:id/sessions/bulk — operaciones en lote sobre sesiones.
+// Acepta un array de { sessionId, action } donde action ∈ { approve, decline, delete }.
+// Solo opera sobre sesiones en estado in_review (approve/decline) o cualquier
+// estado terminal (delete). Permiso: review_sessions.
+adminRouter.post(
+  "/tenants/:id/sessions/bulk",
+  requireReview,
+  async (req: Request, res: Response) => {
+    const tenant = await repos.tenants.getById(req.params.id);
+    if (!tenant) {
+      res.status(404).json({ error: "tenant_not_found" });
+      return;
+    }
+    const actions = req.body?.actions;
+    if (!Array.isArray(actions) || actions.length === 0) {
+      res.status(400).json({ error: "actions_required" });
+      return;
+    }
+    const results: Array<{ sessionId: string; ok: boolean; error?: string }> = [];
+    for (const action of actions.slice(0, 100)) {
+      const sid = typeof action.sessionId === "string" ? action.sessionId : "";
+      const act = typeof action.action === "string" ? action.action : "";
+      if (!sid || !act) {
+        results.push({ sessionId: sid || "?", ok: false, error: "invalid_action" });
+        continue;
+      }
+      try {
+        const session = await repos.sessions.getById(req.params.id, sid);
+        if (!session) {
+          results.push({ sessionId: sid, ok: false, error: "session_not_found" });
+          continue;
+        }
+        if (act === "approve" || act === "decline") {
+          if (session.state !== "in_review") {
+            results.push({ sessionId: sid, ok: false, error: "not_in_review" });
+            continue;
+          }
+          const decision = act === "approve" ? "approve" : "decline";
+          const out = await applyReviewDecision(
+            session,
+            tenant.policies,
+            null,
+            { decision, reviewer: req.adminOperator?.operatorId ?? "?", reason: "bulk_operation" },
+            realPipelineDeps
+          );
+          results.push({ sessionId: sid, ok: true });
+          await repos.auditLog.record({
+            tenantId: req.params.id,
+            sessionId: sid,
+            actor: `admin:${req.adminOperator?.operatorId ?? "?"}`,
+            event: `session.bulk_${act}`,
+            detail: { sessionId: sid, state: out.state },
+            ip: req.ip ?? null,
+          });
+        } else if (act === "delete") {
+          await evidenceStore.purge(session.tenantId, session.id);
+          await repos.evidence.removeBySession(session.tenantId, session.id);
+          await repos.sessions.remove(session.tenantId, session.id);
+          results.push({ sessionId: sid, ok: true });
+          await repos.auditLog.record({
+            tenantId: req.params.id,
+            sessionId: sid,
+            actor: `admin:${req.adminOperator?.operatorId ?? "?"}`,
+            event: "session.bulk_delete",
+            detail: { sessionId: sid },
+            ip: req.ip ?? null,
+          });
+        } else {
+          results.push({ sessionId: sid, ok: false, error: "invalid_action" });
+        }
+      } catch (e) {
+        results.push({ sessionId: sid, ok: false, error: (e as Error).message });
+      }
+    }
+    res.json({ results });
+  }
+);
+
+// ---------------------------------------------------------------------------
+// Batch evidence download ZIP (spec §5)
+// ---------------------------------------------------------------------------
+
+// GET /admin/tenants/:id/sessions/:sessionId/evidence/zip — descarga ZIP con toda
+// la evidencia de una sesión. Sirve un ZIP con las imágenes base64 inline.
+// Si no está disponible, devuelve un JSON con las URLs de evidencia.
+adminRouter.get(
+  "/tenants/:id/sessions/:sessionId/evidence/zip",
+  async (req: Request, res: Response) => {
+    const session = await repos.sessions.getById(req.params.id, req.params.sessionId);
+    if (!session) {
+      res.status(404).json({ error: "session_not_found" });
+      return;
+    }
+    const evidence = await repos.evidence.listBySession(req.params.id, session.id);
+    if (evidence.length === 0) {
+      res.json({ sessionId: session.id, files: [] });
+      return;
+    }
+    // Devuelve las evidencias como base64 inline (el front arma el ZIP).
+    // Un ZIP binario real requeriría la librería archiver que no está instalada.
+    const files = await Promise.all(
+      evidence.map(async (e) => {
+        const buf = await evidenceStore.read(req.params.id, session.id, e.type as any);
+        return {
+          type: e.type,
+          sha256: e.sha256,
+          base64: buf ? buf.toString("base64") : null,
+        };
+      })
+    );
+    res.json({ sessionId: session.id, files });
+  }
+);
+
+// ---------------------------------------------------------------------------
+// Session export PDF (spec §12)
+// ---------------------------------------------------------------------------
+
+// GET /admin/tenants/:id/sessions/:sessionId/export-pdf — exporta la sesión como PDF.
+adminRouter.get(
+  "/tenants/:id/sessions/:sessionId/export-pdf",
+  async (req: Request, res: Response) => {
+    const { exportSessionPdf } = await import("../lib/pdfExport");
+    const session = await repos.sessions.getById(req.params.id, req.params.sessionId);
+    if (!session) {
+      res.status(404).json({ error: "session_not_found" });
+      return;
+    }
+    const [checks, consents, evidence] = await Promise.all([
+      repos.checks.listBySession(req.params.id, session.id),
+      repos.consents.listBySession(req.params.id, session.id),
+      repos.evidence.listBySession(req.params.id, session.id),
+    ]);
+    // Leer evidencias como base64.
+    const evidenceBase64 = await Promise.all(
+      evidence.map(async (e) => {
+        const buf = await evidenceStore.read(req.params.id, session.id, e.type as any);
+        return { type: e.type, data: buf ? buf.toString("base64") : "" };
+      })
+    );
+    const result = await exportSessionPdf({
+      tenantId: req.params.id,
+      session,
+      checks,
+      evidence,
+      consents,
+      evidenceBase64,
+    });
+    res.setHeader("Content-Type", result.contentType);
+    if (!result.fallback) {
+      res.setHeader("Content-Disposition", `attachment; filename=session-${session.id}.pdf`);
+    }
+    res.send(result.data);
+  }
+);
+
+// ---------------------------------------------------------------------------
+// API key rotation (spec §7)
+// ---------------------------------------------------------------------------
+
+// POST /admin/tenants/:id/api-keys/:keyId/rotate — rota una API key (revoca la
+// existente y crea una nueva con el mismo label/scopes).
+adminRouter.post(
+  "/tenants/:id/api-keys/:keyId/rotate",
+  requirePermission("manage_api_keys"),
+  async (req: Request, res: Response) => {
+    const tenant = await repos.tenants.getById(req.params.id);
+    if (!tenant) {
+      res.status(404).json({ error: "tenant_not_found" });
+      return;
+    }
+    const existing = await repos.apiKeys.getById(req.params.id, req.params.keyId);
+    if (!existing || existing.tenantId !== req.params.id) {
+      res.status(404).json({ error: "api_key_not_found" });
+      return;
+    }
+    // Revocar la key existente.
+    const revoked = await repos.apiKeys.revoke(req.params.id, req.params.keyId);
+    if (!revoked) {
+      res.status(404).json({ error: "api_key_not_found" });
+      return;
+    }
+    // Crear nueva key con el mismo label/scopes.
+    const gen = generateApiKey();
+    const created = await repos.apiKeys.create({
+      tenantId: tenant.id,
+      appId: existing.appId,
+      keyHash: gen.hash,
+      prefix: gen.prefix,
+      label: existing.label,
+      scopes: existing.scopes,
+    });
+    await repos.auditLog.record({
+      tenantId: tenant.id,
+      actor: `admin:${req.adminOperator?.operatorId ?? "?"}`,
+      event: "apikey.rotated",
+      detail: { oldKeyId: req.params.keyId, newKeyId: created.id, prefix: gen.prefix },
+      ip: req.ip ?? null,
+    });
+    const resp: CreateApiKeyResponse = {
+      id: created.id,
+      prefix: gen.prefix,
+      apiKey: gen.plain,
+      label: created.label,
+      scopes: created.scopes,
+      createdAt: created.createdAt,
+    };
+    res.status(201).json(resp);
+  }
+);
+
+// ---------------------------------------------------------------------------
+// Face gallery management (spec §10)
+// ---------------------------------------------------------------------------
+
+// POST /admin/tenants/:id/gallery — agregar cara a la galería.
+adminRouter.post(
+  "/tenants/:id/gallery",
+  requirePermission("manage_api_keys"), // usar manage_api_keys como permiso genérico de gestión
+  async (req: Request, res: Response) => {
+    const tenant = await repos.tenants.getById(req.params.id);
+    if (!tenant) {
+      res.status(404).json({ error: "tenant_not_found" });
+      return;
+    }
+    const { faceEmbedding, identityId, name, reason } = req.body ?? {};
+    if (!faceEmbedding || typeof faceEmbedding !== "string") {
+      res.status(400).json({ error: "faceEmbedding_required" });
+      return;
+    }
+    try {
+      // Decodificar embedding base64 → Buffer → Float32Array.
+      const buf = Buffer.from(faceEmbedding, "base64");
+      const arr = new Float32Array(buf.buffer, buf.byteOffset, buf.byteLength / 4);
+      if (arr.length !== 512) {
+        res.status(400).json({ error: "embedding_must_be_512d" });
+        return;
+      }
+      // Persistir embedding como bytea.
+      const embeddingBuffer = Buffer.from(arr);
+      // Guardar en verified_identities con un flag especial.
+      const id = require("crypto").randomUUID();
+      await pool.query(
+        `INSERT INTO verified_identities (id, tenant_id, session_id, ci, nombre, fecha_nac, nacionalidad, tipo_doc, assurance_level, face_embedding, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+        [
+          id,
+          tenant.id,
+          `gallery:${Date.now()}`,
+          identityId || "",
+          name || "",
+          "",
+          "",
+          "ci_py",
+          "L0",
+          embeddingBuffer,
+          new Date().toISOString(),
+        ]
+      );
+      await repos.auditLog.record({
+        tenantId: tenant.id,
+        actor: `admin:${req.adminOperator?.operatorId ?? "?"}`,
+        event: "gallery.added",
+        detail: { identityId, name, reason },
+        ip: req.ip ?? null,
+      });
+      res.status(201).json({ id, identityId, name, reason, addedBy: req.adminOperator?.operatorId ?? "?" });
+    } catch (e) {
+      res.status(400).json({ error: "gallery_add_failed", detail: (e as Error).message });
+    }
+  }
+);
+
+// DELETE /admin/tenants/:id/gallery/:identityId — remover de la galería.
+adminRouter.delete(
+  "/tenants/:id/gallery/:identityId",
+  requirePermission("manage_api_keys"),
+  async (req: Request, res: Response) => {
+    const tenant = await repos.tenants.getById(req.params.id);
+    if (!tenant) {
+      res.status(404).json({ error: "tenant_not_found" });
+      return;
+    }
+    await pool.query(
+      "DELETE FROM verified_identities WHERE tenant_id = $1 AND session_id = $2",
+      [tenant.id, `gallery:${req.params.identityId}`]
+    );
+    await repos.auditLog.record({
+      tenantId: tenant.id,
+      actor: `admin:${req.adminOperator?.operatorId ?? "?"}`,
+      event: "gallery.removed",
+      detail: { identityId: req.params.identityId },
+      ip: req.ip ?? null,
+    });
+    res.json({ identityId: req.params.identityId, deleted: true });
+  }
+);
+
+// ---------------------------------------------------------------------------
+// Tenant usage analytics (spec §11)
+// ---------------------------------------------------------------------------
+
+// GET /admin/tenants/:id/analytics — métricas avanzadas de uso por día.
+adminRouter.get(
+  "/tenants/:id/analytics",
+  requirePermission("view_usage"),
+  async (req: Request, res: Response) => {
+    const tenant = await repos.tenants.getById(req.params.id);
+    if (!tenant) {
+      res.status(404).json({ error: "tenant_not_found" });
+      return;
+    }
+    const from = req.query.from ? String(req.query.from) : undefined;
+    const to = req.query.to ? String(req.query.to) : undefined;
+
+    // Sessions by day
+    const dailyRes = await pool.query<{ day: string; count: string }>(
+      `SELECT DATE(created_at)::text AS day, COUNT(*)::int AS count
+       FROM verification_sessions
+       WHERE tenant_id = $1 ${from || to ? "AND" : "WHERE"} created_at BETWEEN $2 AND $3
+       GROUP BY day ORDER BY day DESC`,
+      [tenant.id, from ?? "1970-01-01", to ?? "2099-12-31"]
+    );
+
+    // Approval rate
+    const rateRes = await pool.query<{ verified: string; total: string }>(
+      `SELECT
+        COUNT(CASE WHEN state = 'verified' THEN 1 END)::int AS verified,
+        COUNT(*)::int AS total
+       FROM verification_sessions
+       WHERE tenant_id = $1 ${from || to ? "AND" : "WHERE"} created_at BETWEEN $2 AND $3`,
+      [tenant.id, from ?? "1970-01-01", to ?? "2099-12-31"]
+    );
+
+    // Average latency by module (from checks)
+    const latencyRes = await pool.query<{ type: string; avg_latency: string }>(
+      `SELECT type, AVG(EXTRACT(EPOCH FROM (created_at - (SELECT MIN(created_at) FROM verification_checks c2 WHERE c2.session_id = verification_checks.session_id)) ))::int AS avg_latency
+       FROM verification_checks
+       WHERE tenant_id = $1 ${from || to ? "AND" : "WHERE"} created_at BETWEEN $2 AND $3
+       GROUP BY type`,
+      [tenant.id, from ?? "1970-01-01", to ?? "2099-12-31"]
+    );
+
+    const latencyByModule: Record<string, number> = {};
+    for (const row of latencyRes.rows) {
+      latencyByModule[row.type] = parseInt(row.avg_latency, 10);
+    }
+
+    res.json({
+      tenantId: tenant.id,
+      from: from ?? null,
+      to: to ?? null,
+      totalSessions: parseInt(rateRes.rows[0]?.total ?? "0", 10),
+      verifiedSessions: parseInt(rateRes.rows[0]?.verified ?? "0", 10),
+      approvalRate: rateRes.rows[0]
+        ? parseInt(rateRes.rows[0].verified, 10) / Math.max(1, parseInt(rateRes.rows[0].total, 10))
+        : 0,
+      dailySessions: dailyRes.rows,
+      latencyByModule,
+    });
+  }
+);
+
+// ---------------------------------------------------------------------------
+// Audit log export CSV (spec §12)
+// ---------------------------------------------------------------------------
+
+// GET /admin/tenants/:id/audit.csv — export de auditoría en formato CSV.
+adminRouter.get(
+  "/tenants/:id/audit.csv",
+  requirePermission("view_usage"),
+  async (req: Request, res: Response) => {
+    const entries = await repos.auditLog.listByTenant(req.params.id, {
+      from: req.query.from ? String(req.query.from) : undefined,
+      to: req.query.to ? String(req.query.to) : undefined,
+      limit: 10000,
+    });
+    // CSV: timestamp,actor,event,session_id,ip,detail
+    const header = "timestamp,actor,event,session_id,ip,detail\n";
+    const rows = entries
+      .map((e) => {
+        const detail = JSON.stringify(e.detail).replace(/"/g, '""');
+        return `"${e.createdAt}","${e.actor}","${e.event}","${e.sessionId ?? ""}","${e.ip ?? ""}","${detail}"`;
+      })
+      .join("\n");
+    res.setHeader("Content-Type", "text/csv");
+    res.setHeader("Content-Disposition", `attachment; filename=audit-${req.params.id}.csv`);
+    res.send(header + rows);
+  }
+);
+
+// ---------------------------------------------------------------------------
+// Email template CRUD (spec §17)
+// ---------------------------------------------------------------------------
+
+// GET /admin/tenants/:id/email-templates — listar templates.
+adminRouter.get(
+  "/tenants/:id/email-templates",
+  requirePermission("manage_tenants"),
+  async (req: Request, res: Response) => {
+    const tenant = await repos.tenants.getById(req.params.id);
+    if (!tenant) {
+      res.status(404).json({ error: "tenant_not_found" });
+      return;
+    }
+    // Los templates se guardan en tenants.email_templates (JSONB).
+    const templates = (tenant as any).emailTemplates ?? [];
+    res.json({ templates });
+  }
+);
+
+// POST /admin/tenants/:id/email-templates — crear/actualizar un template.
+adminRouter.post(
+  "/tenants/:id/email-templates",
+  requirePermission("manage_tenants"),
+  async (req: Request, res: Response) => {
+    const tenant = await repos.tenants.getById(req.params.id);
+    if (!tenant) {
+      res.status(404).json({ error: "tenant_not_found" });
+      return;
+    }
+    const { type, subject, html, text, variables } = req.body ?? {};
+    if (!type || !subject || !html) {
+      res.status(400).json({ error: "type_subject_html_required" });
+      return;
+    }
+    // Leer templates existentes.
+    const existingTemplates = ((tenant as any).emailTemplates ?? []) as Array<{
+      type: string; subject: string; html: string; text?: string; variables?: string[]; updatedAt: string;
+    }>;
+    // Actualizar o agregar.
+    const existingIdx = existingTemplates.findIndex((t) => t.type === type);
+    const now = new Date().toISOString();
+    const template = { type, subject, html, text, variables: variables ?? [], updatedAt: now };
+    if (existingIdx >= 0) {
+      existingTemplates[existingIdx] = template;
+    } else {
+      existingTemplates.push(template);
+    }
+    // Persistir en la DB.
+    await pool.query(
+      "UPDATE tenants SET email_templates = $1::jsonb, updated_at = NOW() WHERE id = $2",
+      [JSON.stringify(existingTemplates), req.params.id]
+    );
+    await repos.auditLog.record({
+      tenantId: req.params.id,
+      actor: `admin:${req.adminOperator?.operatorId ?? "?"}`,
+      event: "email_template.updated",
+      detail: { type },
+      ip: req.ip ?? null,
+    });
+    res.status(201).json(template);
+  }
+);
+
+// DELETE /admin/tenants/:id/email-templates/:type — eliminar un template.
+adminRouter.delete(
+  "/tenants/:id/email-templates/:type",
+  requirePermission("manage_tenants"),
+  async (req: Request, res: Response) => {
+    const tenant = await repos.tenants.getById(req.params.id);
+    if (!tenant) {
+      res.status(404).json({ error: "tenant_not_found" });
+      return;
+    }
+    const existingTemplates = ((tenant as any).emailTemplates ?? []) as Array<{ type: string }>;
+    const filtered = existingTemplates.filter((t) => t.type !== req.params.type);
+    await pool.query(
+      "UPDATE tenants SET email_templates = $1::jsonb, updated_at = NOW() WHERE id = $2",
+      [JSON.stringify(filtered), req.params.id]
+    );
+    await repos.auditLog.record({
+      tenantId: req.params.id,
+      actor: `admin:${req.adminOperator?.operatorId ?? "?"}`,
+      event: "email_template.deleted",
+      detail: { type: req.params.type },
+      ip: req.ip ?? null,
+    });
+    res.json({ type: req.params.type, deleted: true });
+  }
+);
+
+// ---------------------------------------------------------------------------
+// Rate limit configuration per tenant (spec §14)
+// ---------------------------------------------------------------------------
+
+// PATCH /admin/tenants/:id/rate-limits — configurar rate limits por tenant.
+adminRouter.patch(
+  "/tenants/:id/rate-limits",
+  requirePermission("manage_tenants"),
+  async (req: Request, res: Response) => {
+    const tenant = await repos.tenants.getById(req.params.id);
+    if (!tenant) {
+      res.status(404).json({ error: "tenant_not_found" });
+      return;
+    }
+    const { rateLimitV1, rateLimitVerify, rateLimitAdmin } = req.body ?? {};
+    const updated = await repos.tenants.update(req.params.id, {
+      policies: {
+        ...tenant.policies,
+        rateLimitV1: typeof rateLimitV1 === "number" ? rateLimitV1 : tenant.policies.rateLimitV1,
+        rateLimitVerify: typeof rateLimitVerify === "number" ? rateLimitVerify : tenant.policies.rateLimitVerify,
+        rateLimitAdmin: typeof rateLimitAdmin === "number" ? rateLimitAdmin : tenant.policies.rateLimitAdmin,
+      },
+    });
+    await repos.auditLog.record({
+      tenantId: req.params.id,
+      actor: `admin:${req.adminOperator?.operatorId ?? "?"}`,
+      event: "tenant.rate_limits_updated",
+      detail: { rateLimitV1, rateLimitVerify, rateLimitAdmin },
+      ip: req.ip ?? null,
+    });
+    res.json(toTenantResponse(updated!));
+  }
+);
+
+// ---------------------------------------------------------------------------
+// Compliance reports (spec §16)
+// ---------------------------------------------------------------------------
+
+// GET /admin/tenants/:id/compliance?from=&to= — generate compliance report.
+adminRouter.get(
+  "/tenants/:id/compliance",
+  requirePermission("view_usage"),
+  async (req: Request, res: Response) => {
+    const compliance = await import("../lib/compliance");
+    const { generateComplianceReport } = compliance;
+    const tenant = await repos.tenants.getById(req.params.id);
+    if (!tenant) {
+      res.status(404).json({ error: "tenant_not_found" });
+      return;
+    }
+    const from = req.query.from ? String(req.query.from) : "1970-01-01";
+    const to = req.query.to ? String(req.query.to) : new Date().toISOString().split("T")[0];
+    const report = await generateComplianceReport(pool, tenant, from, to + "T23:59:59.999Z");
+    res.json(report);
+  }
+);
+
+// ---------------------------------------------------------------------------
+// Webhook replay (spec §14)
+// ---------------------------------------------------------------------------
+
+// POST /admin/tenants/:id/webhooks/:whid/deliveries/:did/replay — replay de un
+// webhook existente (reenvío con la misma firma pero timestamp nuevo).
+adminRouter.post(
+  "/tenants/:id/webhooks/:whid/deliveries/:did/replay",
+  requirePermission("manage_webhooks"),
+  async (req: Request, res: Response) => {
+    const endpoint = await repos.webhookEndpoints.getById(req.params.id, req.params.whid);
+    if (!endpoint) {
+      res.status(404).json({ error: "webhook_not_found" });
+      return;
+    }
+    const existing = await repos.webhookDeliveries.getById(req.params.did);
+    if (!existing || existing.tenantId !== req.params.id || existing.endpointId !== req.params.whid) {
+      res.status(404).json({ error: "delivery_not_found" });
+      return;
+    }
+    // Crear una nueva entrega con el mismo payload pero nuevo event_id.
+    const newEventId = `evt_${require("crypto").randomUUID()}`;
+    const newPayload = { ...existing.payload, id: newEventId };
+    const rec = await repos.webhookDeliveries.create({
+      endpointId: endpoint.id,
+      tenantId: existing.tenantId,
+      sessionId: existing.sessionId,
+      eventId: newEventId,
+      eventType: existing.eventType,
+      url: existing.url,
+      payload: newPayload,
+      maxAttempts: 3,
+    });
+    const delivery = await webhookDispatcher().attempt(rec.id);
+    await repos.auditLog.record({
+      tenantId: req.params.id,
+      actor: `admin:${req.adminOperator?.operatorId ?? "?"}`,
+      event: "webhook.replay",
+      detail: { deliveryId: req.params.did, newEventId, status: delivery?.status },
+      ip: req.ip ?? null,
+    });
+    res.json({ delivery });
+  }
+);

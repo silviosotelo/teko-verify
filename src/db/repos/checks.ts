@@ -19,6 +19,7 @@ interface CheckRow {
   passed: boolean;
   detail: CheckDetail;
   created_at: Date;
+  updated_at: Date;
 }
 
 function mapCheck(row: CheckRow): VerificationCheck {
@@ -31,6 +32,7 @@ function mapCheck(row: CheckRow): VerificationCheck {
     passed: row.passed,
     detail: row.detail,
     createdAt: iso(row.created_at),
+    updatedAt: iso(row.updated_at),
   };
 }
 
