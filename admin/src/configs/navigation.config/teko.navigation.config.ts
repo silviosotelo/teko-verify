@@ -137,6 +137,16 @@ const tekoNavigationConfig: NavigationTree[] = [
                 authority: [],
                 subMenu: [],
             },
+            {
+                key: 'teko.compliance',
+                path: '/compliance',
+                title: 'Cumplimiento',
+                translateKey: '',
+                icon: 'PiShieldCheckDuotone',
+                type: NAV_ITEM_TYPE_ITEM,
+                authority: [],
+                subMenu: [],
+            },
         ],
     },
     {

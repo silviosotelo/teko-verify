@@ -1,23 +1,26 @@
 import paramiko
 ssh = paramiko.SSHClient()
 ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-try:
-    ssh.connect('192.168.41.34', username='soporte', password='Soporte24', timeout=10)
-    print('Connected as soporte')
-    stdin, stdout, stderr = ssh.exec_command('whoami && id')
-    print('User:', stdout.read().decode())
-    stdin, stdout, stderr = ssh.exec_command('docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Image}}"')
-    print('Docker:')
-    print(stdout.read().decode())
-    print('Stderr:', stderr.read().decode())
-    stdin, stdout, stderr = ssh.exec_command('ls -la /usr/share/nginx/html/ 2>&1')
-    print('Nginx html:')
-    print(stdout.read().decode())
-    stdin, stdout, stderr = ssh.exec_command('df -h / | tail -1')
-    print('Disk:', stdout.read().decode())
-    stdin, stdout, stderr = ssh.exec_command('sudo systemctl is-active nginx 2>&1; sudo systemctl is-active docker 2>&1')
-    print('Services:', stdout.read().decode())
-    ssh.close()
-    print('SUCCESS')
-except Exception as e:
-    print(f'ERROR: {e}')
+ssh.connect('192.168.41.34', username='soporte', password='Soporte24', timeout=10)
+
+# Verify CSS serves correctly
+stdin, stdout, stderr = ssh.exec_command('curl -sI http://localhost:4400/admin-ui/assets/index-D258vUK8.css 2>/dev/null | grep -i content-type')
+print('CSS:', stdout.read().decode())
+
+# Verify JS serves correctly
+stdin, stdout, stderr = ssh.exec_command('curl -sI http://localhost:4400/admin-ui/assets/index-Bkwi16Gj.js 2>/dev/null | grep -i content-type')
+print('JS:', stdout.read().decode())
+
+# Verify no PiPhoneDuotone reference in main bundle
+stdin, stdout, stderr = ssh.exec_command('curl -s http://localhost:4400/admin-ui/assets/index-Bkwi16Gj.js 2>/dev/null | grep -c "PiPhoneDuotone"')
+print('PiPhoneDuotone refs:', stdout.read().decode())
+
+# Verify admin-ui root
+stdin, stdout, stderr = ssh.exec_command('curl -sI http://localhost:4400/admin-ui/ 2>/dev/null | head -5')
+print('Admin UI:', stdout.read().decode())
+
+# Health
+stdin, stdout, stderr = ssh.exec_command('curl -s http://localhost:4400/health')
+print('Health:', stdout.read().decode())
+
+ssh.close()
