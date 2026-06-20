@@ -116,21 +116,18 @@ Confirmado: **UI con datos hardcodeados, sin tablas DB, sin endpoints, sin repos
 
 ---
 
-## 7. Roadmap propuesto a MVP SaaS
+## 7. Roadmap a MVP SaaS — ESTADO DE EJECUCIÓN (2026-06-20)
 
-**Sprint 0 — Hardening (0.5–1 día)**: Q1 rate-limit bug, Q2/Q3 gates RBAC, Q5/Q6 limpieza dead-code. Rebuild + deploy + test no-lockout.
+Decisiones del usuario: monetización **sin pasarela**, maquetas **ocultas con feature-flag**, onboarding **sales-led**.
 
-**Sprint 1 — Monetización-lite (3–5 días)**: tablas `plans/subscriptions/usage_alerts` + repos + endpoints; conectar Billing views al backend; **gating cuota↔plan**; alertas de uso reales (email). SIN pasarela.
+- **Sprint 0 — Hardening ✅ HECHO** (commit): Q1 rate-limit bug, Q2/Q3 gates RBAC, Q5/Q6 dead-code. Verificado tsc/tests/build. *(falta deploy)*.
+- **Sprint 1 — Monetización-lite ✅ HECHO** (commit): migración `0018_billing` (planes/suscripciones/usage_alerts), repos, gating `402 quota_exceeded` en `POST /v1/sessions`, endpoints admin, Billing views conectadas al backend, **feature-flags** que ocultan las maquetas. Verificado: backend 338/339 tests, frontend build OK. *(falta deploy + correr migración)*.
+- **Sprint 2 — Onboarding ✅ CUBIERTO (sin código)**: por decisión sales-led, el provisioning manual (`POST /tenants`) ya existe y un tenant nuevo arranca en `free` implícito (sin fila de suscripción = free). Self-service signup diferido.
+- **Sprint 3 — DX ✅ HECHO** (commit `5de2add`): `docs/openapi.yaml` (3.1 válido), SDK `@teko/verify-sdk` (corregida firma webhooks v1→v2 real), `docs/integration-guide.md`. SDK tsc verde, 21 tests.
+- **Sprint 4 — Notificaciones ⏸️ DIFERIDO**: SMS/Reminders ocultos por feature-flag (no se prometen en v1).
+- **Sprint 5 — ⏸️ DIFERIDO**: pasarela de pagos, OAuth, Zapier, pgvector, S3. Ocultos/diferidos por decisión.
 
-**Sprint 2 — Onboarding SaaS (2–3 días)**: signup self-service de tenant + asignación de plan inicial + provisioning de Default app/owner.
-
-**Sprint 3 — DX / integración (2–3 días)**: OpenAPI spec + SDK npm (`@teko/verify-sdk`) + guía de integración + sample code.
-
-**Sprint 4 — Notificaciones (2–3 días)**: SMS (Twilio) + Recordatorios (tabla + scheduler reutilizando `cleanup.ts` cron pattern + dispatcher email/SMS).
-
-**Sprint 5 (opcional/diferible)**: pasarela de pagos, OAuth, Zapier, pgvector, S3.
-
-**Decisión de vistas maqueta**: por cada una (Billing*, SMS, Reminders, OAuth, Zapier) → **implementar** (sprints arriba) o **ocultar/eliminar de v1** para no mostrar features falsas. Recomendación: ocultar lo que no entre en el MVP elegido (no borrar el código, feature-flag).
+**Pendiente operativo**: deploy al server 34 (rebuild backend + correr migración 0018 + build/scp admin dist) — requiere confirmación. Bug pre-existente `consentShouldTransition` sin resolver (fuera de scope).
 
 ---
 
