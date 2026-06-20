@@ -36,7 +36,7 @@ import {
   captureRateLimiter,
   adminRateLimiter,
 } from "./lib/rateLimit";
-import { scheduleRetentionCleanup } from "./lib/cleanup";
+import { scheduleRetentionCleanup, scheduleUsageAlerts } from "./lib/cleanup";
 
 const app = express();
 app.set("trust proxy", true); // detrás del túnel Cloudflare (X-Forwarded-For) §11
@@ -317,6 +317,10 @@ async function main(): Promise<void> {
 
   // 3.7) Programa la limpieza de retención (spec §12). Solo si TEKO_CLEANUP_ENABLED=true.
   scheduleRetentionCleanup(pool);
+
+  // 3.8) Programa el disparo horario de usage_alerts. Default ON (deshabilita con
+  //      TEKO_USAGE_ALERTS_ENABLED=false). Guard independiente del de cleanup.
+  scheduleUsageAlerts();
 
   app.listen(cfg.PORT, "0.0.0.0", () => {
     consoleLog(

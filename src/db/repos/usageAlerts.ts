@@ -45,6 +45,34 @@ export async function listByTenant(
   return res.rows.map(mapAlert);
 }
 
+/**
+ * Lista TODAS las alertas habilitadas de TODOS los tenants (cada fila trae su
+ * tenant_id). La consume el barrido horario de disparo (src/lib/usageAlerts.ts),
+ * que agrupa por tenant para resolver la cuota una sola vez por tenant.
+ */
+export async function listEnabled(exec: Executor = pool): Promise<UsageAlert[]> {
+  const res = await exec.query<UsageAlertRow>(
+    "SELECT * FROM usage_alerts WHERE enabled = true ORDER BY tenant_id ASC, threshold_pct ASC, created_at ASC"
+  );
+  return res.rows.map(mapAlert);
+}
+
+/**
+ * Marca la alerta como disparada (last_fired_at = now()). Scopeada por
+ * (tenant_id, id) siguiendo la convención del repo. true si actualizó una fila.
+ */
+export async function markFired(
+  tenantId: string,
+  id: string,
+  exec: Executor = pool
+): Promise<boolean> {
+  const res = await exec.query(
+    "UPDATE usage_alerts SET last_fired_at = now() WHERE id = $1 AND tenant_id = $2",
+    [id, tenantId]
+  );
+  return (res.rowCount ?? 0) > 0;
+}
+
 export async function create(
   input: {
     tenantId: string;

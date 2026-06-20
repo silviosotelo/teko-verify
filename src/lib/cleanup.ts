@@ -8,6 +8,7 @@
  */
 import { Pool } from "pg";
 import { repos } from "../db/repos";
+import { runUsageAlertsSweep } from "./usageAlerts";
 
 /** Borra TODA la evidencia de una sesión (disco + DB). */
 async function purgeSessionEvidence(pool: Pool, tenantId: string, sessionId: string): Promise<void> {
@@ -154,6 +155,40 @@ export function scheduleRetentionCleanup(pool: Pool): void {
 
   // No mantener vivo el proceso por el timer
   if (typeof interval.unref === "function") interval.unref();
+}
+
+/**
+ * Programa el barrido horario de disparo de usage_alerts (schedule gemelo del de
+ * retención, mismo patrón). Guard por `TEKO_USAGE_ALERTS_ENABLED` con semántica
+ * default-true: sólo se deshabilita con el valor explícito "false". Fail-open: un
+ * fallo del barrido nunca tumba el proceso.
+ */
+export function scheduleUsageAlerts(): void {
+  if (process.env.TEKO_USAGE_ALERTS_ENABLED === "false") return;
+
+  // Barrido inicial inmediato.
+  runUsageAlertsSweepLogged();
+
+  // Luego cada hora.
+  const interval = setInterval(runUsageAlertsSweepLogged, 60 * 60 * 1000);
+
+  // No mantener vivo el proceso por el timer.
+  if (typeof interval.unref === "function") interval.unref();
+}
+
+/** Corre el barrido de alertas con log y fail-open (no propaga errores). */
+function runUsageAlertsSweepLogged(): void {
+  runUsageAlertsSweep()
+    .then(({ checked, fired }) => {
+      if (fired > 0) {
+        // eslint-disable-next-line no-console
+        console.log(`[usage-alerts] barrido: ${fired}/${checked} alertas disparadas`);
+      }
+    })
+    .catch((e) => {
+      // eslint-disable-next-line no-console
+      console.warn(`[usage-alerts] barrido falló: ${(e as Error).message}`);
+    });
 }
 
 /** Barrido sobre TODOS los tenants activos. */
