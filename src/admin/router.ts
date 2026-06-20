@@ -2545,60 +2545,103 @@ adminRouter.delete(
 adminRouter.get(
   "/tenants/:id/analytics",
   requirePermission("view_usage"),
-  async (req: Request, res: Response) => {
-    const tenant = await repos.tenants.getById(req.params.id);
-    if (!tenant) {
-      res.status(404).json({ error: "tenant_not_found" });
-      return;
+  async (req: Request, res: Response, next: NextFunction) => {
+    // Defensa en profundidad: Express 4 NO reenvía rechazos async al error
+    // handler terminal — un await que rechace tumba el proceso (unhandledRejection)
+    // y arrastra otros requests en vuelo (p. ej. /usage → 502). Envolvemos en
+    // try/catch y delegamos a next(e) para reusar el handler terminal de server.ts
+    // (responde 500 {error} sin filtrar stack/PII). El resto de handlers admin
+    // tiene el mismo riesgo; lo ideal sería un asyncHandler a nivel de router,
+    // pero en Express 4 no hay forma limpia sin parchear el stack del Router.
+    try {
+      const tenant = await repos.tenants.getById(req.params.id);
+      if (!tenant) {
+        res.status(404).json({ error: "tenant_not_found" });
+        return;
+      }
+      const from = req.query.from ? String(req.query.from) : undefined;
+      const to = req.query.to ? String(req.query.to) : undefined;
+      const fromTs = from ?? "1970-01-01";
+      const toTs = to ?? "2099-12-31";
+
+      // Tendencia diaria: creadas/completadas/aprobadas/rechazadas + duración media (ms).
+      // NOTA: la cláusula de fecha SIEMPRE es "AND" porque "WHERE tenant_id = $1"
+      // ya está presente; el bug previo emitía un segundo WHERE (syntax error).
+      const dailyRes = await pool.query<{
+        date: string;
+        created: number;
+        completed: number;
+        approved: number;
+        declined: number;
+        avgDuration: number;
+      }>(
+        `SELECT DATE(created_at)::text AS date,
+                COUNT(*)::int AS created,
+                COUNT(completed_at)::int AS completed,
+                (COUNT(*) FILTER (WHERE state IN ('verified', 'approved')))::int AS approved,
+                (COUNT(*) FILTER (WHERE state IN ('rejected', 'declined')))::int AS declined,
+                COALESCE(AVG(EXTRACT(EPOCH FROM (completed_at - created_at)) * 1000)
+                         FILTER (WHERE completed_at IS NOT NULL), 0)::int AS "avgDuration"
+         FROM verification_sessions
+         WHERE tenant_id = $1 AND created_at BETWEEN $2 AND $3
+         GROUP BY date ORDER BY date ASC`,
+        [tenant.id, fromTs, toTs]
+      );
+
+      // Approval rate.
+      const rateRes = await pool.query<{ verified: string; total: string }>(
+        `SELECT
+          COUNT(CASE WHEN state IN ('verified', 'approved') THEN 1 END)::int AS verified,
+          COUNT(*)::int AS total
+         FROM verification_sessions
+         WHERE tenant_id = $1 AND created_at BETWEEN $2 AND $3`,
+        [tenant.id, fromTs, toTs]
+      );
+
+      // Latencia por módulo (proxy): tiempo desde el inicio de la sesión hasta cada
+      // check, agrupado por tipo de check. avg/p50/p95 en ms. Es un proxy (incluye
+      // tiempo de captura del usuario); los checks no almacenan latencia real en `detail`.
+      const latencyRes = await pool.query<{
+        type: string;
+        avg: number;
+        p50: number;
+        p95: number;
+      }>(
+        `SELECT t.type,
+                COALESCE(AVG(t.lat), 0)::int AS avg,
+                COALESCE(percentile_cont(0.5) WITHIN GROUP (ORDER BY t.lat), 0)::int AS p50,
+                COALESCE(percentile_cont(0.95) WITHIN GROUP (ORDER BY t.lat), 0)::int AS p95
+         FROM (
+           SELECT c.type, EXTRACT(EPOCH FROM (c.created_at - s.created_at)) * 1000 AS lat
+           FROM verification_checks c
+           JOIN verification_sessions s ON s.id = c.session_id
+           WHERE c.tenant_id = $1 AND c.created_at BETWEEN $2 AND $3
+         ) t
+         GROUP BY t.type`,
+        [tenant.id, fromTs, toTs]
+      );
+
+      const latencyByModule: Record<string, { avg: number; p50: number; p95: number }> = {};
+      for (const row of latencyRes.rows) {
+        latencyByModule[row.type] = { avg: row.avg, p50: row.p50, p95: row.p95 };
+      }
+
+      const total = parseInt(rateRes.rows[0]?.total ?? "0", 10);
+      const verified = parseInt(rateRes.rows[0]?.verified ?? "0", 10);
+
+      res.json({
+        tenantId: tenant.id,
+        from: from ?? null,
+        to: to ?? null,
+        totalSessions: total,
+        verifiedSessions: verified,
+        approvalRate: total > 0 ? verified / total : 0,
+        daily: dailyRes.rows,
+        latencyByModule,
+      });
+    } catch (e) {
+      next(e);
     }
-    const from = req.query.from ? String(req.query.from) : undefined;
-    const to = req.query.to ? String(req.query.to) : undefined;
-
-    // Sessions by day
-    const dailyRes = await pool.query<{ day: string; count: string }>(
-      `SELECT DATE(created_at)::text AS day, COUNT(*)::int AS count
-       FROM verification_sessions
-       WHERE tenant_id = $1 ${from || to ? "AND" : "WHERE"} created_at BETWEEN $2 AND $3
-       GROUP BY day ORDER BY day DESC`,
-      [tenant.id, from ?? "1970-01-01", to ?? "2099-12-31"]
-    );
-
-    // Approval rate
-    const rateRes = await pool.query<{ verified: string; total: string }>(
-      `SELECT
-        COUNT(CASE WHEN state = 'verified' THEN 1 END)::int AS verified,
-        COUNT(*)::int AS total
-       FROM verification_sessions
-       WHERE tenant_id = $1 ${from || to ? "AND" : "WHERE"} created_at BETWEEN $2 AND $3`,
-      [tenant.id, from ?? "1970-01-01", to ?? "2099-12-31"]
-    );
-
-    // Average latency by module (from checks)
-    const latencyRes = await pool.query<{ type: string; avg_latency: string }>(
-      `SELECT type, AVG(EXTRACT(EPOCH FROM (created_at - (SELECT MIN(created_at) FROM verification_checks c2 WHERE c2.session_id = verification_checks.session_id)) ))::int AS avg_latency
-       FROM verification_checks
-       WHERE tenant_id = $1 ${from || to ? "AND" : "WHERE"} created_at BETWEEN $2 AND $3
-       GROUP BY type`,
-      [tenant.id, from ?? "1970-01-01", to ?? "2099-12-31"]
-    );
-
-    const latencyByModule: Record<string, number> = {};
-    for (const row of latencyRes.rows) {
-      latencyByModule[row.type] = parseInt(row.avg_latency, 10);
-    }
-
-    res.json({
-      tenantId: tenant.id,
-      from: from ?? null,
-      to: to ?? null,
-      totalSessions: parseInt(rateRes.rows[0]?.total ?? "0", 10),
-      verifiedSessions: parseInt(rateRes.rows[0]?.verified ?? "0", 10),
-      approvalRate: rateRes.rows[0]
-        ? parseInt(rateRes.rows[0].verified, 10) / Math.max(1, parseInt(rateRes.rows[0].total, 10))
-        : 0,
-      dailySessions: dailyRes.rows,
-      latencyByModule,
-    });
   }
 );
 
