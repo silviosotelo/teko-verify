@@ -3,6 +3,7 @@ import AuthContext from './AuthContext'
 import appConfig from '@/configs/app.config'
 import { useSessionUser, useToken } from '@/store/authStore'
 import { apiSignIn, apiSignOut, apiSignUp } from '@/services/AuthService'
+import { getFriendlyErrorMessage } from '@/utils/getFriendlyErrorMessage'
 import { REDIRECT_URL_KEY } from '@/constants/app.constant'
 import { useNavigate } from 'react-router'
 import type {
@@ -95,11 +96,15 @@ function AuthProvider({ children }: AuthProviderProps) {
                 status: 'failed',
                 message: 'Unable to sign in',
             }
-            // eslint-disable-next-line  @typescript-eslint/no-explicit-any
-        } catch (errors: any) {
+        } catch (errors: unknown) {
             return {
                 status: 'failed',
-                message: errors?.response?.data?.message || errors.toString(),
+                message: getFriendlyErrorMessage(errors, {
+                    statusOverrides: {
+                        401: 'Usuario o contraseña incorrectos.',
+                    },
+                    fallback: 'No se pudo iniciar sesión. Intentá de nuevo.',
+                }),
             }
         }
     }
@@ -119,11 +124,12 @@ function AuthProvider({ children }: AuthProviderProps) {
                 status: 'failed',
                 message: 'Unable to sign up',
             }
-            // eslint-disable-next-line  @typescript-eslint/no-explicit-any
-        } catch (errors: any) {
+        } catch (errors: unknown) {
             return {
                 status: 'failed',
-                message: errors?.response?.data?.message || errors.toString(),
+                message: getFriendlyErrorMessage(errors, {
+                    fallback: 'No se pudo crear la cuenta. Intentá de nuevo.',
+                }),
             }
         }
     }

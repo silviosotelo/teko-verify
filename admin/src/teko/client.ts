@@ -107,12 +107,13 @@ async function request<T>(
     }
 
     if (!res.ok) {
+        // Mensaje LIMPIO: priorizamos el `error`/`detail` del body del backend;
+        // si no hay, un texto por status (nunca "Request failed" ni un objeto).
+        const raw = data && (data.error || data.detail || data.message)
         const msg =
-            (data && (data.error || data.detail)) || `Error ${res.status}`
-        throw new ApiError(
-            res.status,
-            typeof msg === 'string' ? msg : JSON.stringify(msg),
-        )
+            (typeof raw === 'string' && raw) ||
+            `No se pudo completar la solicitud (error ${res.status}).`
+        throw new ApiError(res.status, msg)
     }
     return data as T
 }
