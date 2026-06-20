@@ -884,7 +884,7 @@ adminRouter.get(
 
 // ---- Métricas + export de auditoría -------------------------------------- //
 
-adminRouter.get("/tenants/:id/metrics", async (req: Request, res: Response) => {
+adminRouter.get("/tenants/:id/metrics", requirePermission("view_usage"), async (req: Request, res: Response) => {
   const tenantId = req.params.id;
   const states: SessionState[] = [
     "created", "capturing", "processing", "review", "in_review", "verified",
@@ -1408,7 +1408,7 @@ adminRouter.post(
 
 // GET /admin/review-queue?tenantId=&limit=&offset=  → sesiones en `in_review`.
 // Cross-tenant por defecto (el operador revisa todo); filtra por tenant si se pide.
-adminRouter.get("/review-queue", async (req: Request, res: Response) => {
+adminRouter.get("/review-queue", requireReview, async (req: Request, res: Response) => {
   const tenantId = req.query.tenantId ? String(req.query.tenantId) : undefined;
   const limit = req.query.limit ? parseInt(String(req.query.limit), 10) : 50;
   const offset = req.query.offset ? parseInt(String(req.query.offset), 10) : 0;

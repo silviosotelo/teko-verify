@@ -552,7 +552,7 @@ export const tekoApi = {
     // ---- Rate limits por tenant ----
     updateTenantRateLimits(
         tenantId: string,
-        body: { v1?: number; verify?: number; admin?: number },
+        body: { rateLimitV1?: number; rateLimitVerify?: number; rateLimitAdmin?: number },
     ) {
         return request<{ rateLimits: Record<string, number> }>(
             'PATCH', `/tenants/${tenantId}/rate-limits`, body,

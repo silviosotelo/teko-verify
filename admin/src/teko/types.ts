@@ -197,6 +197,9 @@ export interface TenantPolicy {
     consentVersion: string
     maxRecaptureAttempts: number
     linkTokenTtlSeconds: number
+    rateLimitV1?: number
+    rateLimitVerify?: number
+    rateLimitAdmin?: number
     thresholds?: {
         matchCosine?: number
         livenessScore?: number

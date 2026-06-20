@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import Card from '@/components/ui/Card'
 import Button from '@/components/ui/Button'
 import Input from '@/components/ui/Input'
@@ -16,14 +16,23 @@ const RateLimitsView = () => {
     const [admin, setAdmin] = useState('30')
     const [saving, setSaving] = useState(false)
 
+    // Cargar los límites actuales del tenant (si el backend los expone en policies).
+    useEffect(() => {
+        const p = current?.policies
+        if (!p) return
+        if (typeof p.rateLimitV1 === 'number') setV1(String(p.rateLimitV1))
+        if (typeof p.rateLimitVerify === 'number') setVerify(String(p.rateLimitVerify))
+        if (typeof p.rateLimitAdmin === 'number') setAdmin(String(p.rateLimitAdmin))
+    }, [current])
+
     const handleSave = async () => {
         if (!currentId) return
         setSaving(true)
         try {
             await tekoApi.updateTenantRateLimits(currentId, {
-                v1: parseInt(v1) || 100,
-                verify: parseInt(verify) || 50,
-                admin: parseInt(admin) || 30,
+                rateLimitV1: parseInt(v1) || 100,
+                rateLimitVerify: parseInt(verify) || 50,
+                rateLimitAdmin: parseInt(admin) || 30,
             })
             toast.push(<Notification title="Guardado" type="success">Límites actualizados</Notification>, { placement: 'top-center' })
         } catch (e: unknown) {
