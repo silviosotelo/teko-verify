@@ -14,6 +14,23 @@ import type {
   SessionResult,
   SessionStatusResponse,
 } from "./types";
+import { verifySignature } from "./signature";
+
+/** Argumentos del helper de verificación de firma de webhooks (forma por objeto). */
+export interface VerifyWebhookSignatureInput {
+  /** Cuerpo CRUDO recibido (los bytes exactos del POST; no re-serializar). */
+  payload: string | Buffer;
+  /** Valor del header `X-Signature` ("sha256v2=...", "sha256=..." o hex pelado). */
+  signature: string;
+  /** Valor del header `X-Timestamp` (unix seconds; string o number). */
+  timestamp: number | string;
+  /** Secreto del endpoint (o del tenant para el callbackUrl legacy). */
+  secret: string;
+  /** Ventana anti-replay en segundos (default 300). */
+  windowSec?: number;
+  /** Reloj inyectable (unix seconds) para tests. */
+  nowSec?: number;
+}
 
 export interface TekoClientOptions {
   /** Base de la API, p.ej. "https://teko.rohekawebservices.online". Sin barra final. */
@@ -140,6 +157,50 @@ export class TekoClient {
       "DELETE",
       `/v1/sessions/${encodeURIComponent(sessionId)}`
     );
+  }
+}
+
+/**
+ * Cliente principal del SDK: `new TekoVerify({ apiKey, baseUrl })`.
+ *
+ * Es `TekoClient` con un nombre alineado al paquete (`@teko/verify-sdk`) más el
+ * helper ESTÁTICO `verifyWebhookSignature` para validar la firma v2 de los webhooks
+ * sin instanciar el cliente.
+ *
+ *   const teko = new TekoVerify({ apiKey, baseUrl });
+ *   const { verificationUrl } = await teko.createSession({ externalRef: "user-42" });
+ *
+ *   // en el handler del webhook (con el cuerpo CRUDO):
+ *   const ok = TekoVerify.verifyWebhookSignature({
+ *     payload: rawBody,
+ *     signature: req.header("x-signature")!,
+ *     timestamp: req.header("x-timestamp")!,
+ *     secret: WEBHOOK_SECRET,
+ *   });
+ *   if (!ok) return res.sendStatus(401);
+ */
+export class TekoVerify extends TekoClient {
+  /**
+   * Verifica la firma de un webhook (HMAC v2, replica EXACTA de src/webhooks/signing.ts).
+   * Detecta la versión por el prefijo del header: `sha256v2=` → input `2.${ts}.${body}`;
+   * `sha256=`/hex → input `${ts}.${body}`. Comparación en tiempo constante + ventana
+   * anti-replay (300s). Fail-closed: cualquier dato inválido → false (nunca lanza).
+   *
+   * `payload` DEBEN ser los bytes CRUDOS recibidos (no re-serializar el JSON).
+   */
+  static verifyWebhookSignature(input: VerifyWebhookSignatureInput): boolean {
+    const body =
+      typeof input.payload === "string" ? input.payload : input.payload.toString("utf8");
+    const timestamp =
+      typeof input.timestamp === "number" ? input.timestamp : parseInt(input.timestamp, 10);
+    return verifySignature({
+      secret: input.secret,
+      timestamp,
+      body,
+      signature: input.signature,
+      windowSec: input.windowSec,
+      nowSec: input.nowSec,
+    });
   }
 }
 

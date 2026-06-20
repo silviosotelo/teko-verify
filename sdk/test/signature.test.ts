@@ -11,7 +11,10 @@ import {
   verifyWebhookSignature,
   verifySignature,
   signPayload,
+  signPayloadV2,
+  detectSignatureVersion,
 } from "../src/signature";
+import { TekoVerify } from "../src/client";
 
 const SECRET = "whsec_test_secret";
 const TS = 1700000000;
@@ -109,5 +112,61 @@ describe("verifySignature — primitiva", () => {
   it("roundtrip true / firma incorrecta false", () => {
     expect(verifySignature({ secret: SECRET, timestamp: TS, body: BODY, signature: KNOWN_HEX, nowSec: TS })).toBe(true);
     expect(verifySignature({ secret: SECRET, timestamp: TS, body: BODY, signature: "00", nowSec: TS })).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v2 (ACTUAL): el server firma `2.${ts}.${body}` y envía `X-Signature: sha256v2=...`
+// + `X-Signature-Version: 2`. Vector v2 calculado de forma INDEPENDIENTE (paridad
+// de bytes con el server real, no sólo "compila").
+// ---------------------------------------------------------------------------
+const V2_HEX = createHmac("sha256", SECRET).update(`2.${TS}.${BODY}`).digest("hex");
+
+describe("firma v2 — paridad con el server (sha256v2)", () => {
+  it("signPayloadV2 firma `2.${ts}.${body}` (referencia independiente)", () => {
+    expect(signPayloadV2(SECRET, TS, BODY)).toBe(V2_HEX);
+    // v2 != v1 para el mismo (secret, ts, body): el prefijo de versión cambia el HMAC.
+    expect(signPayloadV2(SECRET, TS, BODY)).not.toBe(signPayload(SECRET, TS, BODY));
+  });
+
+  it("detectSignatureVersion distingue v1/v2 por prefijo", () => {
+    expect(detectSignatureVersion(`sha256v2=${V2_HEX}`)).toBe(2);
+    expect(detectSignatureVersion(`sha256=${KNOWN_HEX}`)).toBe(1);
+    expect(detectSignatureVersion(KNOWN_HEX)).toBe(1);
+  });
+
+  it("verifySignature acepta una firma v2 válida (sha256v2=)", () => {
+    expect(
+      verifySignature({ secret: SECRET, timestamp: TS, body: BODY, signature: `sha256v2=${V2_HEX}`, nowSec: TS })
+    ).toBe(true);
+  });
+
+  it("verifyWebhookSignature (headers) acepta v2", () => {
+    const h = {
+      "x-signature-version": "2",
+      "x-timestamp": String(TS),
+      "x-signature": `sha256v2=${V2_HEX}`,
+    };
+    expect(verifyWebhookSignature(BODY, h, SECRET, { nowSec: TS })).toBe(true);
+  });
+});
+
+describe("TekoVerify.verifyWebhookSignature — helper estático (v2, forma por objeto)", () => {
+  const base = { payload: BODY, signature: `sha256v2=${V2_HEX}`, timestamp: TS, secret: SECRET, nowSec: TS };
+
+  it("valida una firma v2 correcta dentro de la ventana", () => {
+    expect(TekoVerify.verifyWebhookSignature(base)).toBe(true);
+  });
+
+  it("acepta payload como Buffer y timestamp como string", () => {
+    expect(
+      TekoVerify.verifyWebhookSignature({ ...base, payload: Buffer.from(BODY, "utf8"), timestamp: String(TS) })
+    ).toBe(true);
+  });
+
+  it("rechaza secreto incorrecto, cuerpo manipulado y replay (fail-closed)", () => {
+    expect(TekoVerify.verifyWebhookSignature({ ...base, secret: "wrong" })).toBe(false);
+    expect(TekoVerify.verifyWebhookSignature({ ...base, payload: BODY + "x" })).toBe(false);
+    expect(TekoVerify.verifyWebhookSignature({ ...base, nowSec: TS + 301 })).toBe(false);
   });
 });

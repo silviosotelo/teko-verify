@@ -35,8 +35,8 @@ export type SessionState =
 /** Veredicto de la decisión. */
 export type DecisionVerdict = "verified" | "rejected" | "needs_recapture";
 
-/** Tipos de documento soportados (PY). */
-export type DocumentType = "ci_py" | "passport" | "license_py" | string;
+/** Tipos de documento soportados (server: src/types.ts DocumentType). */
+export type DocumentType = "ci_py" | "passport";
 
 /** Resultado/decisión de una sesión (campo `result` de la sesión). */
 export interface SessionResult {

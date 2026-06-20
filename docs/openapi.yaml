@@ -1,0 +1,667 @@
+openapi: 3.1.0
+info:
+  title: Teko Verify — Tenant API
+  version: "1.0.0"
+  description: |
+    Public **tenant API** of Teko Verify (KYC / identity verification), served under
+    `/v1`. All contracts here are verified against the server source
+    (`src/api/tenant.ts`, `src/api/auth.ts`, `src/webhooks/*`, `src/types.ts`).
+
+    ## Authentication
+    Every `/v1` request authenticates with a tenant **API key** sent as a Bearer
+    token: `Authorization: Bearer tk_live_<id8>_<random>`. The key derives the
+    tenant (organization) and, optionally, the app (project); all data is scoped to
+    that tenant. Fail-closed: a missing / invalid key or an inactive tenant → `401`.
+
+    ## Hosted model
+    Your backend creates a session and receives a `verificationUrl`. You redirect the
+    holder to that URL; Teko runs the capture (document + selfie), the checks and the
+    decision in its hosted UI, then notifies you via a signed **webhook**. Your
+    backend reads the final state/decision with `GET /v1/sessions/{id}` (or trusts the
+    webhook).
+
+    ## Idempotency
+    Pass `externalRef` on `POST /v1/sessions`. If a session already exists for
+    `(tenant, externalRef)`, the same session is returned with `200` (no new session,
+    no quota consumed).
+
+    ## Webhooks
+    See the top-level `webhooks` section. Each delivery is an HTTP `POST` signed with
+    HMAC-SHA256 **v2**: header `X-Signature: sha256v2=<hex>`, `X-Signature-Version: 2`,
+    `X-Timestamp` (unix seconds) and `X-Event-Id`. The signed input is
+    `2.${X-Timestamp}.${rawBody}` where `rawBody` are the exact bytes received (a
+    canonical JSON body with recursively sorted keys and compact separators). Verify in
+    constant time and reject if `|now - X-Timestamp| > 300s`.
+  contact:
+    name: Teko Verify
+  license:
+    name: UNLICENSED
+
+servers:
+  - url: https://teko.rohekawebservices.online
+    description: Production (on-prem)
+  - url: http://localhost:4400
+    description: Local development
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: Sessions
+    description: Verification sessions (/v1).
+
+paths:
+  /v1/sessions:
+    post:
+      tags: [Sessions]
+      operationId: createSession
+      summary: Create a verification session
+      description: |
+        Creates a verification and returns the `verificationUrl` to redirect the
+        holder to (hosted flow). All body fields are optional. If `externalRef` is
+        provided and a session already exists for it, the SAME session is returned
+        with `200` (idempotency). Genuinely new creations are metered against the
+        tenant plan and may be blocked with `402 quota_exceeded`.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateSessionRequest"
+            examples:
+              minimal:
+                summary: Idempotent creation by external reference
+                value:
+                  externalRef: "user-42"
+                  assuranceRequired: "L2"
+      responses:
+        "201":
+          description: Session created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateSessionResponse"
+              example:
+                sessionId: "9b2f1c1e-0a2b-4c3d-8e4f-1a2b3c4d5e6f"
+                verificationUrl: "https://teko.rohekawebservices.online/verify/lt_AbC123"
+                expiresAt: "2026-06-20T18:00:00.000Z"
+        "200":
+          description: |
+            Existing session returned (idempotent hit on a known `externalRef`).
+            Body is identical to the `201` response.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateSessionResponse"
+        "400":
+          description: |
+            Invalid input. `error` is one of `invalid_email`,
+            `invalid_document_type`, `invalid_workflow`, `app_not_found`,
+            `create_session_failed`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorDetail"
+              example:
+                error: "invalid_document_type"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "402":
+          description: |
+            Monthly verification quota reached for the tenant plan. The session was
+            NOT created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QuotaExceededError"
+              example:
+                error: "quota_exceeded"
+                detail: "Monthly verification quota reached for plan 'free'."
+                used: 100
+                quota: 100
+        "429":
+          $ref: "#/components/responses/RateLimited"
+    get:
+      tags: [Sessions]
+      operationId: listSessions
+      summary: List verification sessions
+      description: Lists the tenant's sessions with optional filters and pagination.
+      parameters:
+        - name: state
+          in: query
+          required: false
+          description: Filter by session state.
+          schema:
+            $ref: "#/components/schemas/SessionState"
+        - name: externalRef
+          in: query
+          required: false
+          description: Filter by the tenant's external reference.
+          schema:
+            type: string
+        - name: from
+          in: query
+          required: false
+          description: Lower bound (ISO 8601) on `createdAt`.
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          required: false
+          description: Upper bound (ISO 8601) on `createdAt`.
+          schema:
+            type: string
+            format: date-time
+        - name: limit
+          in: query
+          required: false
+          description: Page size (default 50).
+          schema:
+            type: integer
+            default: 50
+            minimum: 1
+        - name: offset
+          in: query
+          required: false
+          description: Page offset (default 0).
+          schema:
+            type: integer
+            default: 0
+            minimum: 0
+      responses:
+        "200":
+          description: Paginated list of sessions.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListSessionsResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /v1/sessions/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        description: Session id (UUID) returned by `createSession`.
+        schema:
+          type: string
+    get:
+      tags: [Sessions]
+      operationId: getSession
+      summary: Get a session (state + result + evidence)
+      description: |
+        Returns the session state, the consolidated `result` (decision/LoA/reasons)
+        once available, and the evidence metadata. `result` is `null` until a
+        decision exists. Evidence images are served only from the admin panel, not
+        from this API.
+      responses:
+        "200":
+          description: Session state and result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Session"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+    delete:
+      tags: [Sessions]
+      operationId: deleteSession
+      summary: Delete a session (right to erasure)
+      description: |
+        Purges the session's evidence and verified identity and removes the session
+        (right to erasure). Returns which evidence types were purged.
+      responses:
+        "200":
+          description: Session deleted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeleteSessionResponse"
+              example:
+                sessionId: "9b2f1c1e-0a2b-4c3d-8e4f-1a2b3c4d5e6f"
+                deleted: true
+                purged: ["selfie", "doc_front", "doc_back"]
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+webhooks:
+  sessionEvent:
+    post:
+      operationId: onSessionEvent
+      summary: Session lifecycle event (signed delivery)
+      description: |
+        Teko POSTs a signed JSON body to each subscribed endpoint (and to a session's
+        `callbackUrl`, if set) on every session lifecycle event. The HTTP body is the
+        canonical JSON (recursively sorted keys, compact separators) of
+        `WebhookEventPayload`.
+
+        ### Signature (HMAC-SHA256 v2)
+        ```
+        signed_input   = "2." + X-Timestamp + "." + rawBody
+        expected       = "sha256v2=" + HMAC_SHA256_hex(secret, signed_input)
+        valid  <=>  timingSafeEqual(expected, X-Signature)
+                    && abs(now - X-Timestamp) <= 300
+        ```
+        `rawBody` MUST be the exact bytes received (do not re-serialize the JSON).
+        `secret` is the endpoint secret (or the tenant secret for a session
+        `callbackUrl`). Reply `2xx` quickly; retries use backoff `60s -> 4m -> 15m`
+        and reuse the same `X-Event-Id` (deduplicate by it).
+      parameters:
+        - name: X-Teko-Event
+          in: header
+          required: true
+          description: Event type (equals `payload.event`).
+          schema:
+            $ref: "#/components/schemas/WebhookEvent"
+        - name: X-Event-Id
+          in: header
+          required: true
+          description: Unique event id (equals `payload.id`); stable across retries.
+          schema:
+            type: string
+        - name: X-Timestamp
+          in: header
+          required: true
+          description: Unix seconds used when signing (part of the signed input).
+          schema:
+            type: integer
+        - name: X-Signature
+          in: header
+          required: true
+          description: "`sha256v2=<hmac-hex>`."
+          schema:
+            type: string
+        - name: X-Signature-Version
+          in: header
+          required: true
+          description: Signature scheme version. Always `2`.
+          schema:
+            type: string
+            enum: ["2"]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WebhookEventPayload"
+            example:
+              id: "evt_8f0c2a14-1b2c-4d5e-9f01-23456789abcd"
+              event: "session.approved"
+              createdAt: "2026-06-20T18:00:00.000Z"
+              data:
+                sessionId: "9b2f1c1e-0a2b-4c3d-8e4f-1a2b3c4d5e6f"
+                tenantId: "1f0e2d3c-4b5a-6978-8a9b-0c1d2e3f4a5b"
+                externalRef: "user-42"
+                state: "verified"
+                assuranceRequired: "L2"
+                result:
+                  decision: "verified"
+                  loa: "L2"
+                  reasons: ["doc_ok", "match_ok"]
+      responses:
+        "200":
+          description: Acknowledged. Any `2xx` confirms the delivery.
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: tk_live_<id8>_<random>
+      description: Tenant API key as a Bearer token.
+
+  responses:
+    Unauthorized:
+      description: |
+        Missing or invalid API key, or inactive tenant. `error` is one of
+        `missing_api_key`, `invalid_api_key`, `tenant_inactive`.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error: "invalid_api_key"
+    NotFound:
+      description: Session not found for this tenant.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          example:
+            error: "session_not_found"
+    RateLimited:
+      description: |
+        Too many requests for the tenant rate limit window. Honor `Retry-After`.
+      headers:
+        Retry-After:
+          description: Seconds to wait before retrying.
+          schema:
+            type: integer
+        X-RateLimit-Remaining:
+          description: Requests remaining in the current window.
+          schema:
+            type: integer
+        X-RateLimit-Reset:
+          description: Unix seconds when the window resets.
+          schema:
+            type: integer
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/RateLimitError"
+          example:
+            error: "rate_limited"
+            retryAfterSeconds: 42
+
+  schemas:
+    LoA:
+      type: string
+      description: |
+        Level of Assurance. L0 = none (rejection / fail-closed); L1 = legible
+        document + consistent data; L2 = L1 + 1:1 doc<->selfie match; L3 = L2 +
+        liveness; L4 = future (eMRTD NFC chip).
+      enum: ["L0", "L1", "L2", "L3", "L4"]
+
+    SessionState:
+      type: string
+      description: Session state machine.
+      enum:
+        - created
+        - capturing
+        - processing
+        - review
+        - in_review
+        - verified
+        - rejected
+        - needs_recapture
+        - expired
+        - error
+
+    DecisionVerdict:
+      type: string
+      description: Final verdict produced by the decision engine.
+      enum: ["verified", "rejected", "needs_recapture"]
+
+    DocumentType:
+      type: string
+      description: Supported document type (default `ci_py`).
+      enum: ["ci_py", "passport"]
+
+    Decision:
+      type: object
+      description: |
+        Consolidated session result (`verification_sessions.result`). `null` until a
+        decision exists.
+      required: [decision, loa, reasons]
+      properties:
+        decision:
+          $ref: "#/components/schemas/DecisionVerdict"
+        loa:
+          $ref: "#/components/schemas/LoA"
+        reasons:
+          type: array
+          items:
+            type: string
+        extracted:
+          type: object
+          description: Safe subset of the document data exposed to the tenant.
+          required: [ci, nombre, fechaNac, nacionalidad, tipoDoc]
+          properties:
+            ci:
+              type: string
+            nombre:
+              type: string
+            fechaNac:
+              type: string
+              format: date
+            nacionalidad:
+              type: string
+            tipoDoc:
+              $ref: "#/components/schemas/DocumentType"
+        scores:
+          type: object
+          description: Per-module summary scores (auditable, no raw biometrics).
+          properties:
+            quality:
+              type: number
+            liveness:
+              type: number
+            match:
+              type: number
+
+    EvidenceMeta:
+      type: object
+      description: Evidence metadata (the images are served from the admin panel).
+      required: [type, storagePath, sha256]
+      properties:
+        type:
+          type: string
+        storagePath:
+          type: string
+        sha256:
+          type: string
+
+    CreateSessionRequest:
+      type: object
+      description: All fields optional.
+      properties:
+        externalRef:
+          type: string
+          description: |
+            Your reference. Gives idempotency: the same `externalRef` returns the
+            same session (status 200) instead of creating another.
+        email:
+          type: string
+          format: email
+          description: |
+            If set (and SMTP is configured), Teko emails the `verificationUrl` to the
+            holder (fail-open). Format is validated (`400 invalid_email`).
+        workflowId:
+          type: string
+          description: |
+            Concrete workflow version to snapshot. If omitted, the default workflow
+            that maps to the requested `assuranceRequired` is used.
+        assuranceRequired:
+          $ref: "#/components/schemas/LoA"
+        documentType:
+          $ref: "#/components/schemas/DocumentType"
+        appId:
+          type: string
+          description: |
+            App (project) under the org. Precedence: body `appId` -> the API key's app
+            -> the tenant Default app. `400 app_not_found` if it does not exist.
+        callbackUrl:
+          type: string
+          format: uri
+          description: |
+            URL that receives the webhooks for THIS session (signed with the tenant
+            secret), implicitly subscribed to all events.
+        redirectUrl:
+          type: string
+          format: uri
+          description: Where to redirect the holder when the hosted flow finishes.
+        locale:
+          type: string
+          description: Hosted UI locale (e.g. `es`, `en`).
+
+    CreateSessionResponse:
+      type: object
+      required: [sessionId, verificationUrl, expiresAt]
+      properties:
+        sessionId:
+          type: string
+        verificationUrl:
+          type: string
+          format: uri
+          description: |
+            Hosted flow URL — redirect the holder here. Carries a single-use,
+            expiring, unguessable `linkToken`.
+        expiresAt:
+          type: string
+          format: date-time
+
+    Session:
+      type: object
+      description: Session status response (GET /v1/sessions/{id}).
+      required:
+        - sessionId
+        - externalRef
+        - state
+        - assuranceRequired
+        - result
+        - evidence
+        - createdAt
+        - completedAt
+      properties:
+        sessionId:
+          type: string
+        externalRef:
+          type: ["string", "null"]
+        state:
+          $ref: "#/components/schemas/SessionState"
+        assuranceRequired:
+          $ref: "#/components/schemas/LoA"
+        result:
+          oneOf:
+            - $ref: "#/components/schemas/Decision"
+            - type: "null"
+        evidence:
+          type: array
+          items:
+            $ref: "#/components/schemas/EvidenceMeta"
+        createdAt:
+          type: string
+          format: date-time
+        completedAt:
+          type: ["string", "null"]
+          format: date-time
+
+    ListSessionsResponse:
+      type: object
+      required: [total, limit, offset, sessions]
+      properties:
+        total:
+          type: integer
+        limit:
+          type: integer
+        offset:
+          type: integer
+        sessions:
+          type: array
+          items:
+            $ref: "#/components/schemas/Session"
+
+    DeleteSessionResponse:
+      type: object
+      required: [sessionId, deleted, purged]
+      properties:
+        sessionId:
+          type: string
+        deleted:
+          type: boolean
+        purged:
+          type: array
+          description: Evidence types that were purged.
+          items:
+            type: string
+
+    WebhookEvent:
+      type: string
+      description: Subscribable session lifecycle events.
+      enum:
+        - session.created
+        - session.status_updated
+        - session.approved
+        - session.declined
+        - session.in_review
+        - session.data_updated
+
+    WebhookEventPayload:
+      type: object
+      description: Canonical JSON body of each webhook delivery.
+      required: [id, event, createdAt, data]
+      properties:
+        id:
+          type: string
+          description: Event id (equals header `X-Event-Id`). Deduplicate by it.
+        event:
+          $ref: "#/components/schemas/WebhookEvent"
+        createdAt:
+          type: string
+          format: date-time
+        data:
+          type: object
+          required:
+            - sessionId
+            - tenantId
+            - externalRef
+            - state
+            - assuranceRequired
+            - result
+          properties:
+            sessionId:
+              type: string
+            tenantId:
+              type: string
+            externalRef:
+              type: ["string", "null"]
+            state:
+              $ref: "#/components/schemas/SessionState"
+            assuranceRequired:
+              $ref: "#/components/schemas/LoA"
+            result:
+              oneOf:
+                - $ref: "#/components/schemas/Decision"
+                - type: "null"
+
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+
+    ErrorDetail:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+        detail:
+          type: string
+
+    QuotaExceededError:
+      type: object
+      required: [error, detail, used, quota]
+      properties:
+        error:
+          type: string
+          enum: ["quota_exceeded"]
+        detail:
+          type: string
+        used:
+          type: integer
+        quota:
+          type: integer
+
+    RateLimitError:
+      type: object
+      required: [error, retryAfterSeconds]
+      properties:
+        error:
+          type: string
+          enum: ["rate_limited"]
+        retryAfterSeconds:
+          type: integer

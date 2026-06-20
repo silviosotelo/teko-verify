@@ -10,12 +10,14 @@
  *   // en el endpoint del webhook (con el cuerpo CRUDO):
  *   if (!verifyWebhookSignature(rawBody, req.headers, secret)) return res.sendStatus(401);
  */
-export { TekoClient, TekoApiError } from "./client";
-export type { TekoClientOptions } from "./client";
+export { TekoClient, TekoVerify, TekoApiError } from "./client";
+export type { TekoClientOptions, VerifyWebhookSignatureInput } from "./client";
 export {
   verifyWebhookSignature,
   verifySignature,
   signPayload,
+  signPayloadV2,
+  detectSignatureVersion,
   REPLAY_WINDOW_SEC,
   SIGNATURE_HEADER,
   TIMESTAMP_HEADER,

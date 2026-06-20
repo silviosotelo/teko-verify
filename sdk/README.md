@@ -17,11 +17,11 @@ cd sdk && npm install && npm run build
 ### 1. Crear una verificación y redirigir (flujo hosted)
 
 ```ts
-import { TekoClient } from "@teko/verify-sdk";
+import { TekoVerify } from "@teko/verify-sdk";
 
-const teko = new TekoClient({
-  baseUrl: "https://teko.rohekawebservices.online",
+const teko = new TekoVerify({
   apiKey: process.env.TEKO_API_KEY!, // tk_live_...
+  baseUrl: "https://teko.rohekawebservices.online",
 });
 
 // En tu handler de "iniciar verificación":
@@ -59,16 +59,20 @@ Necesitás el **cuerpo CRUDO** (raw body) para verificar la firma. En Express:
 
 ```ts
 import express from "express";
-import { verifyWebhookSignature, WebhookEventPayload } from "@teko/verify-sdk";
+import { TekoVerify, WebhookEventPayload } from "@teko/verify-sdk";
 
 const app = express();
 
 // Cuerpo crudo SÓLO en la ruta del webhook (no uses express.json acá).
 app.post("/webhooks/teko", express.raw({ type: "*/*" }), (req, res) => {
   const raw = req.body as Buffer; // bytes exactos recibidos
-  if (!verifyWebhookSignature(raw, req.headers, process.env.TEKO_WEBHOOK_SECRET!)) {
-    return res.sendStatus(401);
-  }
+  const ok = TekoVerify.verifyWebhookSignature({
+    payload: raw,                              // bytes crudos, no re-serializar
+    signature: req.header("x-signature")!,     // "sha256v2=..."
+    timestamp: req.header("x-timestamp")!,
+    secret: process.env.TEKO_WEBHOOK_SECRET!,
+  });
+  if (!ok) return res.sendStatus(401);
   const event = JSON.parse(raw.toString("utf8")) as WebhookEventPayload;
 
   // Idempotencia: deduplicá por event.id (== header X-Event-Id).
@@ -85,14 +89,26 @@ app.post("/webhooks/teko", express.raw({ type: "*/*" }), (req, res) => {
 
 ## Verificación de firma (algoritmo)
 
-`verifyWebhookSignature(rawBody, headers, secret, options?)` replica exactamente el server:
+El server firma hoy con el esquema **v2** (header `X-Signature: sha256v2=<hex>` +
+`X-Signature-Version: 2`). El SDK soporta v2 y mantiene v1 por compatibilidad,
+detectando la versión por el prefijo del header igual que el server:
 
-- `expected = HMAC_SHA256(secret, \`${X-Timestamp}.${rawBody}\`)` en hex.
-- compara contra `X-Signature` (con o sin prefijo `sha256=`) en **tiempo constante**.
-- rechaza si `|now - X-Timestamp| > 300s` (anti-replay; configurable con `options.windowSec`).
+- v2 (actual): `expected = HMAC_SHA256(secret, \`2.${X-Timestamp}.${rawBody}\`)` en hex.
+- v1 (legacy): `expected = HMAC_SHA256(secret, \`${X-Timestamp}.${rawBody}\`)` en hex.
+- compara contra `X-Signature` en **tiempo constante** (`crypto.timingSafeEqual`).
+- rechaza si `|now - X-Timestamp| > 300s` (anti-replay; configurable con `windowSec`).
 - **fail-closed**: header faltante/mal formado, timestamp no numérico o desfase → `false` (nunca lanza).
 
-`rawBody` deben ser los **bytes exactos** del cuerpo recibido (string o Buffer). No re-serialices el JSON.
+Dos formas equivalentes:
+
+- `TekoVerify.verifyWebhookSignature({ payload, signature, timestamp, secret, windowSec?, nowSec? })`
+  — helper estático por objeto (recomendado).
+- `verifyWebhookSignature(rawBody, headers, secret, options?)` — conveniencia que lee
+  `X-Signature` / `X-Timestamp` de los headers HTTP.
+
+`payload` / `rawBody` deben ser los **bytes exactos** del cuerpo recibido (string o
+Buffer). No re-serialices el JSON: el server firma el cuerpo canónico (claves ordenadas
+recursivamente, separadores compactos) tal cual lo manda.
 
 ## Scripts
 

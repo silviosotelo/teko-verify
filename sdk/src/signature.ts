@@ -1,11 +1,18 @@
 /**
  * Verificación de la firma de webhooks de Teko Verify.
  *
- * Replica EXACTAMENTE el algoritmo del server (src/webhooks/signing.ts):
+ * Replica EXACTAMENTE el algoritmo del server (src/webhooks/signing.ts). El server
+ * firma hoy con el esquema **v2** (el dispatcher emite `sha256v2=` + cabecera
+ * `X-Signature-Version: 2`); este módulo soporta v2 y mantiene v1 por compatibilidad,
+ * detectando la versión por el prefijo del header `X-Signature` igual que el server:
  *
- *   firma_esperada = HMAC_SHA256(secret, `${timestamp}.${rawBody}`)   (hex)
- *   header X-Signature  = "sha256=" + firma_esperada
- *   header X-Timestamp  = unix seconds usados al firmar
+ *   v1:  firma = HMAC_SHA256(secret, `${timestamp}.${rawBody}`)          (hex)
+ *        header X-Signature = "sha256=" + firma   (o el hex pelado)
+ *
+ *   v2:  firma = HMAC_SHA256(secret, `2.${timestamp}.${rawBody}`)        (hex)   ← actual
+ *        header X-Signature = "sha256v2=" + firma + X-Signature-Version: 2
+ *
+ *   header X-Timestamp = unix seconds usados al firmar (parte del input firmado).
  *
  * Anti-replay: se rechaza si |now - X-Timestamp| > windowSec (300s por defecto).
  * Comparación en tiempo constante (timingSafeEqual). Fail-closed: cualquier
@@ -13,8 +20,9 @@
  *
  * IMPORTANTE: `rawBody` DEBEN ser los BYTES EXACTOS recibidos en el cuerpo HTTP
  * (string crudo o Buffer). No re-serialices el JSON: el server firma el cuerpo
- * canónico tal cual lo envía, y volver a serializar puede cambiar el orden de las
- * claves y romper la firma.
+ * canónico tal cual lo envía (claves ordenadas recursivamente, separadores
+ * compactos), y volver a serializar puede cambiar el orden de las claves y romper
+ * la firma.
  */
 import { createHmac, timingSafeEqual } from "crypto";
 
@@ -27,9 +35,25 @@ export const TIMESTAMP_HEADER = "x-timestamp";
 export const EVENT_ID_HEADER = "x-event-id";
 export const EVENT_TYPE_HEADER = "x-teko-event";
 
-/** Firma HMAC-SHA256 hex de `${timestamp}.${body}` (idéntica a signPayload del server). */
+/** Firma HMAC-SHA256 hex v1 de `${timestamp}.${body}` (idéntica a signPayload del server). */
 export function signPayload(secret: string, timestamp: number, body: string): string {
   return createHmac("sha256", secret).update(`${timestamp}.${body}`).digest("hex");
+}
+
+/**
+ * Firma HMAC-SHA256 hex v2 de `2.${timestamp}.${body}` (idéntica a signPayloadV2 del
+ * server). La versión "2" se incluye en el HMAC para evitar replay entre versiones.
+ */
+export function signPayloadV2(secret: string, timestamp: number, body: string): string {
+  return createHmac("sha256", secret).update(`2.${timestamp}.${body}`).digest("hex");
+}
+
+/**
+ * Determina la versión de firma a partir del header X-Signature recibido, igual que
+ * el server: "sha256v2=" → v2; "sha256=" o hex pelado → v1 (compat).
+ */
+export function detectSignatureVersion(signature: string): 1 | 2 {
+  return signature.startsWith("sha256v2=") ? 2 : 1;
 }
 
 type HeaderValue = string | string[] | number | undefined;
@@ -82,8 +106,14 @@ export function verifySignature(opts: {
     const windowSec = opts.windowSec ?? REPLAY_WINDOW_SEC;
     if (!Number.isFinite(opts.timestamp)) return false;
     if (Math.abs(now - opts.timestamp) > windowSec) return false;
-    const expected = signPayload(opts.secret, opts.timestamp, opts.body);
-    const received = opts.signature.replace(/^sha256=/, "");
+    // Detecta la versión por el prefijo del header (igual que el server) y firma con
+    // el input correcto: v2 = `2.${ts}.${body}`, v1 = `${ts}.${body}`.
+    const version = detectSignatureVersion(opts.signature);
+    const expected =
+      version === 2
+        ? signPayloadV2(opts.secret, opts.timestamp, opts.body)
+        : signPayload(opts.secret, opts.timestamp, opts.body);
+    const received = opts.signature.replace(/^sha256v2=/, "").replace(/^sha256=/, "");
     const a = Buffer.from(expected, "hex");
     const b = Buffer.from(received, "hex");
     if (a.length === 0 || a.length !== b.length) return false;

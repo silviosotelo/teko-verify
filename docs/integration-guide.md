@@ -87,6 +87,25 @@ Content-Type: application/json
 
 > El campo se llama **`verificationUrl`** (no `verifyUrl`). El `verificationUrl` lleva un `linkToken` inadivinable, de un solo uso y expirable (TTL del workflow/tenant, típicamente 15 min — ver `expiresAt`).
 
+### Con el SDK
+
+```ts
+import { TekoVerify } from "@teko/verify-sdk";
+
+const teko = new TekoVerify({
+  apiKey: process.env.TEKO_API_KEY!,                 // tk_live_...
+  baseUrl: "https://teko.rohekawebservices.online",
+});
+
+const session = await teko.createSession({
+  externalRef: "user-42",                            // idempotencia
+  assuranceRequired: "L2",
+  // email / workflowId / documentType / appId / callbackUrl / redirectUrl / locale opcionales
+});
+// session = { sessionId, verificationUrl, expiresAt }
+res.redirect(session.verificationUrl);               // (c) redirigí al titular
+```
+
 ### Modelo hosted
 
 1. Tu backend llama `POST /v1/sessions`.
@@ -170,19 +189,23 @@ Alternativa por sesión: el `callbackUrl` del `POST /v1/sessions` recibe todos l
 | `X-Teko-Event` | tipo de evento (p.ej. `session.approved`) |
 | `X-Event-Id` | id único del evento (== `payload.id`); **estable entre reintentos** |
 | `X-Timestamp` | unix seconds usados al firmar |
-| `X-Signature` | `sha256=<hmac-hex>` |
+| `X-Signature` | `sha256v2=<hmac-hex>` |
+| `X-Signature-Version` | `2` |
 
-### Verificar la firma (algoritmo exacto)
+### Verificar la firma (algoritmo exacto — HMAC v2)
+
+El server firma hoy con el esquema **v2**: la versión `2` va embebida en el input del
+HMAC (anti-replay entre versiones) y el header lleva el prefijo `sha256v2=`.
 
 ```
-firma_esperada = HMAC_SHA256(secret, `${X-Timestamp}.${rawBody}`)   // hex
-válido  ⇔  timingSafeEqual("sha256=" + firma_esperada, X-Signature)
+firma_esperada = HMAC_SHA256(secret, `2.${X-Timestamp}.${rawBody}`)   // hex
+válido  ⇔  timingSafeEqual("sha256v2=" + firma_esperada, X-Signature)
           &&  |now - X-Timestamp| <= 300   (segundos)
 ```
 
 Reglas:
 
-- El `rawBody` deben ser los **bytes exactos recibidos**. **No re-serialices el JSON** (el server firma el cuerpo canónico tal cual lo manda; re-serializar puede reordenar claves y romper la firma).
+- El `rawBody` deben ser los **bytes exactos recibidos**. **No re-serialices el JSON** (el server firma el cuerpo canónico —claves ordenadas recursivamente, separadores compactos— tal cual lo manda; re-serializar puede reordenar claves y romper la firma).
 - Comparación en **tiempo constante** (`crypto.timingSafeEqual`).
 - **Ventana anti-replay:** rechazá si `|now - X-Timestamp| > 300s`.
 - **Idempotencia:** deduplicá por `X-Event-Id` (los reintentos repiten el mismo id).
@@ -196,14 +219,27 @@ const crypto = require("crypto");
 function verify(rawBody, headers, secret) {
   const ts = parseInt(headers["x-timestamp"], 10);
   if (!Number.isFinite(ts) || Math.abs(Math.floor(Date.now()/1000) - ts) > 300) return false;
-  const expected = crypto.createHmac("sha256", secret).update(`${ts}.${rawBody}`).digest("hex");
-  const recv = String(headers["x-signature"] || "").replace(/^sha256=/, "");
+  // v2: la versión "2" va dentro del HMAC y el header lleva el prefijo "sha256v2=".
+  const expected = crypto.createHmac("sha256", secret).update(`2.${ts}.${rawBody}`).digest("hex");
+  const recv = String(headers["x-signature"] || "").replace(/^sha256v2=/, "").replace(/^sha256=/, "");
   const a = Buffer.from(expected, "hex"), b = Buffer.from(recv, "hex");
   return a.length === b.length && a.length > 0 && crypto.timingSafeEqual(a, b);
 }
 ```
 
-Con el SDK: `verifyWebhookSignature(rawBody, req.headers, secret)` hace exactamente esto.
+Con el SDK (forma estática por objeto):
+
+```js
+const { TekoVerify } = require("@teko/verify-sdk");
+const ok = TekoVerify.verifyWebhookSignature({
+  payload: rawBody,                       // bytes crudos
+  signature: headers["x-signature"],      // "sha256v2=..."
+  timestamp: headers["x-timestamp"],
+  secret: process.env.TEKO_WEBHOOK_SECRET,
+});
+```
+
+(También existe `verifyWebhookSignature(rawBody, req.headers, secret)`, que lee los headers por vos. Ambas detectan v1/v2 por el prefijo del header.)
 
 ---
 
@@ -238,6 +274,41 @@ Respuesta:
 - `result` es `null` mientras no haya decisión. La **decisión** es `result.decision` (`verified | rejected | needs_recapture`) con su `loa` y `reasons`.
 - Las imágenes de evidencia se sirven sólo desde el panel admin (autenticado), no por esta API.
 
+### Polling (alternativa al webhook)
+
+Si no podés exponer un endpoint de webhook, hacé **polling** del estado hasta un
+estado terminal (`verified | rejected | expired | error`). Con el SDK:
+
+```ts
+async function waitForDecision(teko, sessionId, { everyMs = 5000, timeoutMs = 600000 } = {}) {
+  const deadline = Date.now() + timeoutMs;
+  const TERMINAL = new Set(["verified", "rejected", "expired", "error"]);
+  while (Date.now() < deadline) {
+    const s = await teko.getSession(sessionId);
+    if (TERMINAL.has(s.state)) return s;       // s.result tiene decision/loa/reasons
+    await new Promise((r) => setTimeout(r, everyMs));
+  }
+  throw new Error("timeout esperando la decisión");
+}
+```
+
+Preferí el **webhook** cuando puedas: es push (sin latencia de polling) y firmado.
+
+### Right-to-erasure (borrado)
+
+```bash
+curl -sS -X DELETE "$BASE/v1/sessions/<sessionId>" -H "Authorization: Bearer $API_KEY"
+# → {"sessionId":"…","deleted":true,"purged":["selfie","doc_front","doc_back"]}
+```
+
+```ts
+const { deleted, purged } = await teko.deleteSession(sessionId);
+```
+
+Borra la sesión, su **evidencia** (imágenes en disco/CIFS) y la **identidad
+verificada** asociada. `purged` lista los tipos de evidencia eliminados. Operación
+idempotente desde el punto de vista del integrador: un id inexistente devuelve `404`.
+
 Otros endpoints del tenant:
 
 - `GET /v1/sessions?state=&externalRef=&from=&to=&limit=&offset=` — listado paginado.
@@ -267,7 +338,43 @@ curl -sS "$BASE/v1/sessions/<sessionId>" -H "Authorization: Bearer $API_KEY"
 
 ---
 
-## 7. Notas de seguridad
+## 7. Manejo de errores
+
+Todas las respuestas de error son JSON `{ "error": "<code>", ... }`. Tratá según el status:
+
+| Status | `error` | Significado | Qué hacer |
+|---|---|---|---|
+| `400` | `invalid_email`, `invalid_document_type`, `invalid_workflow`, `app_not_found`, `create_session_failed` | Input inválido (con `detail` cuando aplica). | Corregí el body; no reintentes sin cambios. |
+| `401` | `missing_api_key`, `invalid_api_key`, `tenant_inactive` | Sin key, key inválida/revocada o tenant inactivo. | Revisá el header `Authorization`/la key; no reintentes. |
+| `402` | `quota_exceeded` | Cuota mensual del plan agotada. La sesión **no** se creó. Trae `used` y `quota`. | Subí de plan o esperá el próximo período; mostrá un aviso. |
+| `404` | `session_not_found` | La sesión no existe para este tenant. | No reintentes. |
+| `429` | `rate_limited` | Superaste el rate limit del tenant. Trae `retryAfterSeconds` y header `Retry-After`. | **Reintentá** tras `Retry-After` (backoff). |
+
+```json
+// 402 quota_exceeded
+{ "error": "quota_exceeded", "detail": "Monthly verification quota reached for plan 'free'.", "used": 100, "quota": 100 }
+// 429 rate_limited
+{ "error": "rate_limited", "retryAfterSeconds": 42 }
+```
+
+Con el SDK, los errores no-2xx se lanzan como `TekoApiError` (con `.status` y `.body`):
+
+```ts
+import { TekoApiError } from "@teko/verify-sdk";
+try {
+  await teko.createSession({ externalRef: "user-42" });
+} catch (e) {
+  if (e instanceof TekoApiError) {
+    if (e.status === 402) { /* quota_exceeded: e.body.used / e.body.quota */ }
+    else if (e.status === 429) { /* rate_limited: backoff y reintentar */ }
+    else if (e.status === 401) { /* key inválida */ }
+  }
+}
+```
+
+---
+
+## 8. Notas de seguridad
 
 - **La API key es secreta**: sólo en el backend, nunca en el browser ni en apps móviles. Rotá/revocá si se filtra.
 - **Verificá SIEMPRE la firma** de los webhooks con el `rawBody` (sin re-serializar) antes de procesar.
