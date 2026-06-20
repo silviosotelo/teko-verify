@@ -11,6 +11,7 @@ import Spinner from '@/components/ui/Spinner'
 import Alert from '@/components/ui/Alert'
 import Tag from '@/components/ui/Tag'
 import Switcher from '@/components/ui/Switcher'
+import Table from '@/components/ui/Table'
 import { tekoApi } from '@/teko/client'
 import { fmtScore, fmtDateOnly } from '@/teko/format'
 import type {
@@ -18,6 +19,8 @@ import type {
     OcrDebugVariant,
     OcrFieldAnchor,
 } from '@/teko/types'
+
+const { Tr, Td, TBody } = Table
 
 // Lee un File a base64 (sin el prefijo data:) para mandarlo al backend.
 function fileToBase64(file: File): Promise<string> {
@@ -497,8 +500,8 @@ const OcrDebugView = () => {
                                             enderezado antes de anclar.
                                         </p>
                                     )}
-                                    <table className="w-full text-sm">
-                                        <tbody>
+                                    <Table className="w-full text-sm">
+                                        <TBody>
                                             {fields.map((f) => {
                                                 const value = fieldValue(
                                                     data.extracted,
@@ -511,7 +514,7 @@ const OcrDebugView = () => {
                                                         SOURCE_KEY[f] ?? f
                                                     ]
                                                 return (
-                                                    <tr
+                                                    <Tr
                                                         key={f}
                                                         className="cursor-default border-b border-gray-100 last:border-0 hover:bg-emerald-50/60 dark:border-gray-700 dark:hover:bg-emerald-500/5"
                                                         onMouseEnter={() =>
@@ -525,10 +528,10 @@ const OcrDebugView = () => {
                                                             )
                                                         }
                                                     >
-                                                        <td className="py-2 pr-4 text-gray-500">
+                                                        <Td className="py-2 pr-4 text-gray-500">
                                                             {FIELD_LABEL[f]}
-                                                        </td>
-                                                        <td
+                                                        </Td>
+                                                        <Td
                                                             className={`py-2 font-medium ${
                                                                 empty
                                                                     ? 'text-red-500'
@@ -540,11 +543,11 @@ const OcrDebugView = () => {
                                                                     ? 'vacío'
                                                                     : value}
                                                             </span>
-                                                        </td>
+                                                        </Td>
                                                         {/* Origen del dato (frente/ampliado/MRZ) en COLUMNA PROPIA: así al
                                                             copiar la fila el valor y el badge no se pegan ("ORUE SOSA" + "frente",
                                                             nunca "ORUESOSAfrente"). El pill es un Tag visualmente separado. */}
-                                                        <td className="py-2 pl-3">
+                                                        <Td className="py-2 pl-3">
                                                             {src && (
                                                                 <Tag className="border-0 bg-sky-100 text-[10px] font-normal text-sky-700 dark:bg-sky-500/20 dark:text-sky-100">
                                                                     {
@@ -554,8 +557,8 @@ const OcrDebugView = () => {
                                                                     }
                                                                 </Tag>
                                                             )}
-                                                        </td>
-                                                        <td className="py-2 text-right">
+                                                        </Td>
+                                                        <Td className="py-2 text-right">
                                                             {anchor ? (
                                                                 <Tag className="border-0 bg-emerald-100 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-100">
                                                                     L
@@ -568,12 +571,12 @@ const OcrDebugView = () => {
                                                                     sin ancla
                                                                 </span>
                                                             )}
-                                                        </td>
-                                                    </tr>
+                                                        </Td>
+                                                    </Tr>
                                                 )
                                             })}
-                                        </tbody>
-                                    </table>
+                                        </TBody>
+                                    </Table>
                                 </Card>
 
                                 <Card>
@@ -584,11 +587,11 @@ const OcrDebugView = () => {
                                         caja.
                                     </p>
                                     <div className="max-h-[28rem] overflow-auto">
-                                        <table className="w-full text-sm">
-                                            <tbody>
+                                        <Table className="w-full text-sm">
+                                            <TBody>
                                                 {orderedLines.map(
                                                     ({ l, idx }) => (
-                                                        <tr
+                                                        <Tr
                                                             key={idx}
                                                             className={`cursor-default border-b border-gray-100 last:border-0 dark:border-gray-700 ${
                                                                 hoveredLine ===
@@ -607,17 +610,17 @@ const OcrDebugView = () => {
                                                                 )
                                                             }
                                                         >
-                                                            <td className="py-1.5 pr-2 align-top font-mono text-xs text-gray-400">
+                                                            <Td className="py-1.5 pr-2 align-top font-mono text-xs text-gray-400">
                                                                 {idx}
-                                                            </td>
-                                                            <td className="break-all py-1.5 pr-2 heading-text">
+                                                            </Td>
+                                                            <Td className="break-all py-1.5 pr-2 heading-text">
                                                                 {l.text || (
                                                                     <span className="text-gray-300">
                                                                         (vacío)
                                                                     </span>
                                                                 )}
-                                                            </td>
-                                                            <td className="py-1.5 text-right align-top">
+                                                            </Td>
+                                                            <Td className="py-1.5 text-right align-top">
                                                                 <span
                                                                     className="font-mono text-xs"
                                                                     style={{
@@ -630,12 +633,12 @@ const OcrDebugView = () => {
                                                                         l.score,
                                                                     )}
                                                                 </span>
-                                                            </td>
-                                                        </tr>
+                                                            </Td>
+                                                        </Tr>
                                                     ),
                                                 )}
-                                            </tbody>
-                                        </table>
+                                            </TBody>
+                                        </Table>
                                     </div>
                                 </Card>
                             </>

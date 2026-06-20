@@ -5,6 +5,7 @@ import Alert from '@/components/ui/Alert'
 import Button from '@/components/ui/Button'
 import Input from '@/components/ui/Input'
 import Table from '@/components/ui/Table'
+import ConfirmDialog from '@/components/shared/ConfirmDialog'
 import { tekoApi } from '@/teko/client'
 import { useTenant } from '@/teko/TenantContext'
 import { fmtDate } from '@/teko/format'
@@ -25,6 +26,7 @@ const AppsView = () => {
     const [busy, setBusy] = useState(false)
     const [editId, setEditId] = useState<string | null>(null)
     const [editName, setEditName] = useState('')
+    const [deleteTarget, setDeleteTarget] = useState<App | null>(null)
 
     async function load() {
         if (!currentId) return
@@ -75,7 +77,6 @@ const AppsView = () => {
 
     async function remove(app: App) {
         if (!currentId) return
-        if (!confirm(`¿Borrar la app "${app.name}"?`)) return
         setError(null)
         try {
             await tekoApi.deleteApp(currentId, app.id)
@@ -229,7 +230,7 @@ const AppsView = () => {
                                                             size="xs"
                                                             variant="default"
                                                             onClick={() =>
-                                                                remove(a)
+                                                                setDeleteTarget(a)
                                                             }
                                                         >
                                                             Borrar
@@ -245,6 +246,29 @@ const AppsView = () => {
                     </Table>
                 )}
             </Card>
+
+            <ConfirmDialog
+                isOpen={!!deleteTarget}
+                type="danger"
+                title="Borrar app"
+                confirmText="Borrar"
+                cancelText="Cancelar"
+                confirmButtonProps={{
+                    className: 'bg-red-600 hover:bg-red-600',
+                }}
+                onClose={() => setDeleteTarget(null)}
+                onRequestClose={() => setDeleteTarget(null)}
+                onCancel={() => setDeleteTarget(null)}
+                onConfirm={async () => {
+                    if (deleteTarget) {
+                        await remove(deleteTarget)
+                        setDeleteTarget(null)
+                    }
+                }}
+            >
+                ¿Borrar la app "{deleteTarget?.name}"? Esta acción no se puede
+                deshacer.
+            </ConfirmDialog>
         </div>
     )
 }

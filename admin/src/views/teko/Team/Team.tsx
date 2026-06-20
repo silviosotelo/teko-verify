@@ -5,6 +5,9 @@ import Button from '@/components/ui/Button'
 import Spinner from '@/components/ui/Spinner'
 import Alert from '@/components/ui/Alert'
 import Input from '@/components/ui/Input'
+import Select from '@/components/ui/Select'
+import { Form } from '@/components/ui/Form'
+import FormItem from '@/components/ui/Form/FormItem'
 import Dialog from '@/components/ui/Dialog'
 import Table from '@/components/ui/Table'
 import Chart from '@/components/shared/Chart'
@@ -123,6 +126,11 @@ const TeamView = () => {
     const roleDistribution = assignable.map((r) => ({
         name: r,
         count: operators.filter((o) => o.role === r).length,
+    }))
+
+    const roleSelectOptions = assignable.map((r) => ({
+        value: r,
+        label: `${r} — ${ROLE_DESC[r]}`,
     }))
 
     if (loading) {
@@ -249,6 +257,12 @@ const TeamView = () => {
                         <TBody>
                             {operators.map((o) => {
                                 const perms = ROLE_DESC[o.role] || o.role
+                                const roleOptions = [
+                                    ...(!assignable.includes(o.role)
+                                        ? [{ value: o.role, label: `${o.role} (legacy)` }]
+                                        : []),
+                                    ...assignable.map((r) => ({ value: r, label: r })),
+                                ]
                                 return (
                                     <Tr key={o.id} className="hover:bg-gray-50 dark:hover:bg-gray-700/50">
                                         <Td>
@@ -290,22 +304,13 @@ const TeamView = () => {
                                             {fmtDate(o.createdAt)}
                                         </Td>
                                         <Td>
-                                            <select
-                                                className="h-9 rounded-lg border border-gray-300 bg-white px-2 text-sm dark:border-gray-600 dark:bg-gray-700"
-                                                value={assignable.includes(o.role) ? o.role : o.role}
-                                                onChange={(e) => changeRole(o.id, e.target.value as AdminRole)}
-                                            >
-                                                {!assignable.includes(o.role) && (
-                                                    <option value={o.role}>
-                                                        {o.role} (legacy)
-                                                    </option>
-                                                )}
-                                                {assignable.map((r) => (
-                                                    <option key={r} value={r}>
-                                                        {r}
-                                                    </option>
-                                                ))}
-                                            </select>
+                                            <Select
+                                                size="sm"
+                                                className="min-w-[140px]"
+                                                options={roleOptions}
+                                                value={roleOptions.find((opt) => opt.value === o.role)}
+                                                onChange={(opt) => opt && changeRole(o.id, opt.value as AdminRole)}
+                                            />
                                         </Td>
                                     </Tr>
                                 )
@@ -322,11 +327,8 @@ const TeamView = () => {
                 onRequestClose={() => setInviteDialog(false)}
                 title="Invitar operador"
             >
-                <form onSubmit={createOp} className="space-y-4">
-                    <div>
-                        <label className="mb-1 block text-sm font-medium text-gray-600 dark:text-gray-300">
-                            Email
-                        </label>
+                <Form onSubmit={createOp} className="space-y-4">
+                    <FormItem label="Email">
                         <Input
                             type="email"
                             value={email}
@@ -335,11 +337,8 @@ const TeamView = () => {
                             prefix={<PiEnvelope />}
                             required
                         />
-                    </div>
-                    <div>
-                        <label className="mb-1 block text-sm font-medium text-gray-600 dark:text-gray-300">
-                            Contraseña
-                        </label>
+                    </FormItem>
+                    <FormItem label="Contraseña">
                         <Input
                             type="password"
                             value={password}
@@ -348,23 +347,14 @@ const TeamView = () => {
                             prefix={<PiLock />}
                             required
                         />
-                    </div>
-                    <div>
-                        <label className="mb-1 block text-sm font-medium text-gray-600 dark:text-gray-300">
-                            Rol
-                        </label>
-                        <select
-                            className="h-11 w-full rounded-xl border border-gray-300 bg-white px-3 text-sm dark:border-gray-600 dark:bg-gray-700"
-                            value={role}
-                            onChange={(e) => setRole(e.target.value as AdminRole)}
-                        >
-                            {assignable.map((r) => (
-                                <option key={r} value={r}>
-                                    {r} — {ROLE_DESC[r]}
-                                </option>
-                            ))}
-                        </select>
-                    </div>
+                    </FormItem>
+                    <FormItem label="Rol">
+                        <Select
+                            options={roleSelectOptions}
+                            value={roleSelectOptions.find((opt) => opt.value === role)}
+                            onChange={(opt) => setRole((opt?.value as AdminRole) ?? 'viewer')}
+                        />
+                    </FormItem>
                     <div className="flex justify-end gap-2 pt-2">
                         <Button
                             type="button"
@@ -377,7 +367,7 @@ const TeamView = () => {
                             Invitar
                         </Button>
                     </div>
-                </form>
+                </Form>
             </Dialog>
         </div>
     )

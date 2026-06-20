@@ -4,6 +4,7 @@
 import { useRef, useState } from 'react'
 import Card from '@/components/ui/Card'
 import Button from '@/components/ui/Button'
+import Input from '@/components/ui/Input'
 import Segment from '@/components/ui/Segment'
 import Spinner from '@/components/ui/Spinner'
 import Alert from '@/components/ui/Alert'
@@ -507,12 +508,11 @@ const TestVerifyView = () => {
                             Email del solicitante{' '}
                             <span className="text-gray-400">(opcional)</span>
                         </label>
-                        <input
+                        <Input
                             type="email"
                             value={email}
                             onChange={(e) => setEmail(e.target.value)}
                             placeholder="persona@dominio.com"
-                            className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm outline-none focus:border-emerald-500 dark:border-gray-700 dark:bg-gray-800"
                         />
                         <p className="mt-1 text-xs text-gray-400">
                             Si lo completás, se le envía el link de verificación

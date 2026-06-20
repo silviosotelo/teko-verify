@@ -286,6 +286,7 @@ const CustomizationView = () => {
 
                             <Field label="Color primario" hint="Theme-a botones, acentos y la barra de progreso.">
                                 <div className="flex items-center gap-3">
+                                    {/* Ecme no provee color picker; input nativo intencional. El hex editable usa <Input> abajo. */}
                                     <input
                                         type="color"
                                         value={isHex(primaryColor) ? primaryColor : TEKO_PRIMARY}
@@ -310,12 +311,21 @@ const CustomizationView = () => {
                                             className="size-12 rounded-xl object-contain ring-1 ring-gray-200"
                                         />
                                     )}
+                                    <Button
+                                        size="sm"
+                                        variant="default"
+                                        disabled={uploading}
+                                        onClick={() => fileRef.current?.click()}
+                                    >
+                                        {logoUrl ? 'Cambiar logo' : 'Subir logo'}
+                                    </Button>
+                                    {/* input file oculto disparado por el Button Ecme; conserva onUploadLogo */}
                                     <input
                                         ref={fileRef}
                                         type="file"
                                         accept="image/png,image/jpeg,image/webp"
                                         onChange={onUploadLogo}
-                                        className="text-sm"
+                                        className="hidden"
                                     />
                                     {uploading && <Spinner size={20} />}
                                     {logoUrl && (
@@ -331,12 +341,12 @@ const CustomizationView = () => {
                             </Field>
 
                             <Field label="Texto de bienvenida" hint="Opcional — reemplaza el subtítulo de la intro.">
-                                <textarea
-                                    value={welcomeText}
-                                    onChange={(e) => setWelcomeText(e.target.value)}
+                                <Input
+                                    textArea
                                     rows={3}
                                     maxLength={280}
-                                    className="w-full rounded-xl border border-gray-200 bg-white p-3 text-sm outline-none focus:border-gray-300 dark:border-gray-600 dark:bg-gray-700"
+                                    value={welcomeText}
+                                    onChange={(e) => setWelcomeText(e.target.value)}
                                 />
                             </Field>
 

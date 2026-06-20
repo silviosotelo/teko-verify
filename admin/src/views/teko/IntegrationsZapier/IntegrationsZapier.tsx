@@ -550,26 +550,26 @@ const IntegrationsZapier = () => {
                             </label>
                             <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
                                 {TRIGGERS.map((t) => (
-                                    <button
+                                    <Button
                                         key={t.id}
                                         type="button"
+                                        block
+                                        active={wizardTrigger === t.id}
                                         onClick={() => setWizardTrigger(t.id)}
-                                        className={`rounded-lg border p-3 text-left transition ${
-                                            wizardTrigger === t.id
-                                                ? 'border-primary bg-primary/5 dark:border-primary/50'
-                                                : 'border-gray-200 hover:border-gray-300 dark:border-gray-600'
-                                        }`}
+                                        className="h-auto justify-start p-3 text-left"
                                     >
-                                        <div className="text-sm font-medium heading-text">
-                                            {t.name}
+                                        <div>
+                                            <div className="text-sm font-medium heading-text">
+                                                {t.name}
+                                            </div>
+                                            <div className="mt-0.5 text-xs text-gray-500">
+                                                {t.description}
+                                            </div>
+                                            <div className="mt-1 text-[10px] font-mono text-gray-400">
+                                                {t.event}
+                                            </div>
                                         </div>
-                                        <div className="mt-0.5 text-xs text-gray-500">
-                                            {t.description}
-                                        </div>
-                                        <div className="mt-1 text-[10px] font-mono text-gray-400">
-                                            {t.event}
-                                        </div>
-                                    </button>
+                                    </Button>
                                 ))}
                             </div>
                         </div>

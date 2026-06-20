@@ -1,5 +1,6 @@
 import { useState, useMemo, useCallback } from 'react'
 import { motion } from 'framer-motion'
+import Alert from '@/components/ui/Alert'
 import Button from '@/components/ui/Button'
 import Card from '@/components/ui/Card'
 import Badge from '@/components/ui/Badge'
@@ -262,9 +263,9 @@ function BillingInvoices() {
             </div>
 
             {error && (
-                <div className="mb-6 rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700 dark:border-red-800 dark:bg-red-900/20 dark:text-red-300">
+                <Alert showIcon type="danger" className="mb-6">
                     {error}
-                </div>
+                </Alert>
             )}
 
             {loading ? (

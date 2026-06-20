@@ -8,6 +8,7 @@ import Input from '@/components/ui/Input'
 import Select from '@/components/ui/Select'
 import Switcher from '@/components/ui/Switcher'
 import Badge from '@/components/ui/Badge'
+import Tag from '@/components/ui/Tag'
 import Tabs from '@/components/ui/Tabs'
 import Notification from '@/components/ui/Notification'
 import toast from '@/components/ui/toast'
@@ -29,6 +30,16 @@ const LOA_OPTS = [
     { value: 'L2', label: 'L2 - Documento + Match' },
     { value: 'L3', label: 'L3 - Documento + Match + Liveness' },
     { value: 'L4', label: 'L4 - Todos los checks' },
+]
+
+const LIVENESS_MODE_OPTS = [
+    { value: 'passive', label: 'Pasivo (fotos)' },
+    { value: 'active', label: 'Activo (video)' },
+]
+
+const AML_ONMATCH_OPTS = [
+    { value: 'review', label: 'Enviar a revisión' },
+    { value: 'flag', label: 'Solo marcar' },
 ]
 
 function defaultDef(loa: string): WorkflowDefinition {
@@ -194,7 +205,7 @@ const WorkflowsView = () => {
                             </div>
                             <div className="flex flex-wrap gap-1.5 mb-3">
                                 {checks.map(c => (
-                                    <span key={c} className="text-xs bg-primary/10 text-primary px-2 py-0.5 rounded-full font-medium">{c}</span>
+                                    <Tag key={c} className="text-xs bg-primary/10 text-primary font-medium">{c}</Tag>
                                 ))}
                             </div>
                             <div className="flex items-center justify-between text-xs text-gray-400">
@@ -233,10 +244,12 @@ const WorkflowsView = () => {
                             {editingLiveness && (
                                 <div className="pl-4">
                                     <label className="text-xs text-gray-400 block mb-1">Modo</label>
-                                    <select className="border rounded px-2 py-1 text-sm" value={editingLivenessMode} onChange={(e) => setEditingLivenessMode(e.target.value)}>
-                                        <option value="passive">Pasivo (fotos)</option>
-                                        <option value="active">Activo (video)</option>
-                                    </select>
+                                    <Select
+                                        size="sm"
+                                        options={LIVENESS_MODE_OPTS}
+                                        value={LIVENESS_MODE_OPTS.find((o) => o.value === editingLivenessMode) ?? null}
+                                        onChange={(o) => setEditingLivenessMode(o?.value ?? 'passive')}
+                                    />
                                 </div>
                             )}
                             <div className="flex items-center justify-between py-2 border-b">
@@ -246,19 +259,23 @@ const WorkflowsView = () => {
                             {editingAml && (
                                 <div className="pl-4">
                                     <label className="text-xs text-gray-400 block mb-1">Al accionar</label>
-                                    <select className="border rounded px-2 py-1 text-sm" value={editingAmlOnMatch} onChange={(e) => setEditingAmlOnMatch(e.target.value)}>
-                                        <option value="review">Enviar a revisión</option>
-                                        <option value="flag">Solo marcar</option>
-                                    </select>
+                                    <Select
+                                        size="sm"
+                                        options={AML_ONMATCH_OPTS}
+                                        value={AML_ONMATCH_OPTS.find((o) => o.value === editingAmlOnMatch) ?? null}
+                                        onChange={(o) => setEditingAmlOnMatch(o?.value ?? 'review')}
+                                    />
                                 </div>
                             )}
                         </div>
                     </div>
                     <div>
                         <h6 className="text-sm font-medium mb-2">Modo de revisión</h6>
-                        <select className="w-full border rounded px-3 py-2 text-sm" value={editingReview} onChange={(e) => setEditingReview(e.target.value)}>
-                            {MODE_OPTS.map(m => <option key={m.value} value={m.value}>{m.label}</option>)}
-                        </select>
+                        <Select
+                            options={MODE_OPTS}
+                            value={MODE_OPTS.find((m) => m.value === editingReview) ?? null}
+                            onChange={(o) => setEditingReview(o?.value ?? 'auto')}
+                        />
                     </div>
                 </div>
                 <div className="mt-6 flex justify-end gap-2">
@@ -276,9 +293,11 @@ const WorkflowsView = () => {
                     </div>
                     <div>
                         <label className="mb-1 block text-sm font-medium">Nivel de aseguramiento</label>
-                        <select className="w-full border rounded px-3 py-2 text-sm" value={newLoa} onChange={(e) => setNewLoa(e.target.value)}>
-                            {LOA_OPTS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-                        </select>
+                        <Select
+                            options={LOA_OPTS}
+                            value={LOA_OPTS.find((o) => o.value === newLoa) ?? null}
+                            onChange={(o) => setNewLoa(o?.value ?? 'L2')}
+                        />
                     </div>
                 </div>
                 <div className="mt-6 flex justify-end gap-2">

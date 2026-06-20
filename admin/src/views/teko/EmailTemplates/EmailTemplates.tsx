@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react'
 import Card from '@/components/ui/Card'
 import Button from '@/components/ui/Button'
 import Input from '@/components/ui/Input'
+import Select from '@/components/ui/Select'
+import Tag from '@/components/ui/Tag'
 import Dialog from '@/components/ui/Dialog'
 import Alert from '@/components/ui/Alert'
 import Spinner from '@/components/ui/Spinner'
@@ -107,7 +109,7 @@ const EmailTemplatesView = () => {
                                 <Tr key={t.type}>
                                     <Td className="font-medium">{TEMPLATE_TYPES.find(x => x.value === t.type)?.label || t.type}</Td>
                                     <Td className="text-gray-600">{t.subject}</Td>
-                                    <Td><span className={`inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full ${t.active ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'}`}>{t.active ? <><PiCheck /> Activo</> : 'Inactivo'}</span></Td>
+                                    <Td><Tag className={t.active ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'}>{t.active ? <><PiCheck /> Activo</> : 'Inactivo'}</Tag></Td>
                                     <Td className="text-right"><div className="inline-flex gap-1"><Button size="xs" variant="plain" icon={<PiPencil />} onClick={() => openEdit(t)} /><Button size="xs" variant="plain" icon={<PiTrash />} onClick={() => handleDelete(t.type)} /></div></Td>
                                 </Tr>
                             ))}
@@ -120,13 +122,15 @@ const EmailTemplatesView = () => {
                 <h5 className="font-semibold mb-4">{templates.find(t => t.type === editType) ? 'Editar' : 'Nueva'} plantilla</h5>
                 <div className="space-y-4">
                     <div><label className="mb-1 block text-sm font-medium">Tipo</label>
-                        <select className="w-full border rounded-md px-3 py-2 text-sm" value={editType} onChange={(e) => setEditType(e.target.value)}>
-                            {TEMPLATE_TYPES.map(tt => <option key={tt.value} value={tt.value}>{tt.label}</option>)}
-                        </select>
+                        <Select
+                            options={TEMPLATE_TYPES}
+                            value={TEMPLATE_TYPES.find((tt) => tt.value === editType)}
+                            onChange={(opt) => setEditType(opt?.value ?? TEMPLATE_TYPES[0].value)}
+                        />
                     </div>
                     <div><label className="mb-1 block text-sm font-medium">Asunto</label><Input value={editSubject} onChange={(e) => setEditSubject(e.target.value)} placeholder="Asunto del correo" /></div>
                     <div><label className="mb-1 block text-sm font-medium">Cuerpo (HTML)</label>
-                        <textarea className="w-full border rounded-md px-3 py-2 text-sm font-mono min-h-[200px]" value={editBody} onChange={(e) => setEditBody(e.target.value)} placeholder="<html><body>...</body></html>" />
+                        <Input textArea rows={10} className="font-mono" value={editBody} onChange={(e) => setEditBody(e.target.value)} placeholder="<html><body>...</body></html>" />
                     </div>
                     <div className="flex items-center gap-2"><Switcher checked={editActive} onChange={setEditActive} /><span className="text-sm">Activo</span></div>
                 </div>

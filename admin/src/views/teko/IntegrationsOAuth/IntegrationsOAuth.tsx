@@ -5,12 +5,15 @@ import Alert from '@/components/ui/Alert'
 import Button from '@/components/ui/Button'
 import Dialog from '@/components/ui/Dialog'
 import Input from '@/components/ui/Input'
+import Select from '@/components/ui/Select'
+import Checkbox from '@/components/ui/Checkbox'
 import Table from '@/components/ui/Table'
 import Badge from '@/components/ui/Badge'
 import Tag from '@/components/ui/Tag'
 import Skeleton from '@/components/ui/Skeleton'
 import Notification from '@/components/ui/Notification'
 import toast from '@/components/ui/toast'
+import ConfirmDialog from '@/components/shared/ConfirmDialog'
 import { tekoApi } from '@/teko/client'
 import { useTenant } from '@/teko/TenantContext'
 import { fmtDate } from '@/teko/format'
@@ -265,7 +268,6 @@ const IntegrationsOAuth = () => {
     }
 
     async function handleRevoke(client: OAuthClient) {
-        if (!confirm(`¿Revocar todas las credenciales de "${client.name}"?`)) return
         try {
             setClients((prev) => prev.filter((c) => c.id !== client.id))
             setRevokeTarget(null)
@@ -287,6 +289,11 @@ const IntegrationsOAuth = () => {
                 : `Aplicación "${client.name}" habilitada.`,
         )
     }
+
+    const appLinkOpts = [
+        { value: '', label: 'Sin vincular' },
+        ...apps.map((app) => ({ value: app.id, label: app.name })),
+    ]
 
     if (tLoading || loading) {
         return (
@@ -328,21 +335,19 @@ const IntegrationsOAuth = () => {
                 <h5 className="mb-3">Flujos OAuth 2.0 soportados</h5>
                 <div className="flex gap-2 mb-4">
                     {Object.keys(OAUTH_FLOWS).map((flow) => (
-                        <button
+                        <Button
                             key={flow}
+                            type="button"
+                            size="sm"
+                            variant={selectedFlow === flow ? 'solid' : 'default'}
                             onClick={() => setSelectedFlow(flow)}
-                            className={`rounded-lg border px-3 py-1.5 text-sm font-medium transition ${
-                                selectedFlow === flow
-                                    ? 'border-primary bg-primary/10 text-primary dark:bg-primary/20'
-                                    : 'border-gray-200 text-gray-500 hover:border-gray-300 dark:border-gray-600 dark:text-gray-400'
-                            }`}
                         >
                             {flow === 'authorization_code'
                                 ? 'Authorization Code + PKCE'
                                 : flow === 'client_credentials'
                                   ? 'Client Credentials'
                                   : flow}
-                        </button>
+                        </Button>
                     ))}
                 </div>
                 <div className="space-y-3">
@@ -542,18 +547,15 @@ const IntegrationsOAuth = () => {
                             <label className="mb-1 block text-sm font-medium text-gray-600 dark:text-gray-300">
                                 Vincular a app (opcional)
                             </label>
-                            <select
-                                value={formAppId}
-                                onChange={(e) => setFormAppId(e.target.value)}
-                                className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm dark:border-gray-600 dark:bg-gray-800"
-                            >
-                                <option value="">Sin vincular</option>
-                                {apps.map((app) => (
-                                    <option key={app.id} value={app.id}>
-                                        {app.name}
-                                    </option>
-                                ))}
-                            </select>
+                            <Select
+                                options={appLinkOpts}
+                                value={
+                                    appLinkOpts.find(
+                                        (o) => o.value === formAppId,
+                                    ) ?? null
+                                }
+                                onChange={(opt) => setFormAppId(opt?.value ?? '')}
+                            />
                         </div>
                     )}
                     <div>
@@ -590,18 +592,12 @@ const IntegrationsOAuth = () => {
                             className="font-mono text-xs"
                         />
                     </div>
-                    <div className="flex items-center gap-2">
-                        <input
-                            type="checkbox"
-                            id="formEnabled"
-                            checked={formEnabled}
-                            onChange={(e) => setFormEnabled(e.target.checked)}
-                            className="rounded"
-                        />
-                        <label htmlFor="formEnabled" className="text-sm text-gray-600 dark:text-gray-300">
-                            Aplicación habilitada
-                        </label>
-                    </div>
+                    <Checkbox
+                        checked={formEnabled}
+                        onChange={(checked) => setFormEnabled(checked)}
+                    >
+                        Aplicación habilitada
+                    </Checkbox>
                     <div className="mt-5 flex justify-end gap-2">
                         <Button
                             type="button"
@@ -668,18 +664,12 @@ const IntegrationsOAuth = () => {
                             className="font-mono text-xs"
                         />
                     </div>
-                    <div className="flex items-center gap-2">
-                        <input
-                            type="checkbox"
-                            id="editEnabled"
-                            checked={eEnabled}
-                            onChange={(e) => setEEnabled(e.target.checked)}
-                            className="rounded"
-                        />
-                        <label htmlFor="editEnabled" className="text-sm text-gray-600 dark:text-gray-300">
-                            Habilitada
-                        </label>
-                    </div>
+                    <Checkbox
+                        checked={eEnabled}
+                        onChange={(checked) => setEEnabled(checked)}
+                    >
+                        Habilitada
+                    </Checkbox>
                     <div className="mt-5 flex justify-end gap-2">
                         <Button
                             type="button"
@@ -713,33 +703,24 @@ const IntegrationsOAuth = () => {
             </Dialog>
 
             {/* Revocar */}
-            <Dialog
+            <ConfirmDialog
                 isOpen={Boolean(revokeTarget)}
+                type="danger"
+                title="Revocar aplicación"
+                confirmText="Revocar"
+                cancelText="Cancelar"
+                width={500}
                 onClose={() => setRevokeTarget(null)}
                 onRequestClose={() => setRevokeTarget(null)}
-                width={500}
+                onCancel={() => setRevokeTarget(null)}
+                onConfirm={() => revokeTarget && handleRevoke(revokeTarget)}
             >
-                <h5 className="mb-2">Revocar aplicación</h5>
                 <p className="text-sm text-gray-500">
                     ¿Estás seguro de que querés revocar todas las credenciales de{' '}
                     <strong>{revokeTarget?.name}</strong>? Se invalidarán todos los
                     tokens activos y la aplicación no podrá obtener nuevos tokens.
                 </p>
-                <div className="mt-5 flex justify-end gap-2">
-                    <Button
-                        variant="default"
-                        onClick={() => setRevokeTarget(null)}
-                    >
-                        Cancelar
-                    </Button>
-                    <Button
-                        variant="solid"
-                        onClick={() => revokeTarget && handleRevoke(revokeTarget)}
-                    >
-                        Revocar
-                    </Button>
-                </div>
-            </Dialog>
+            </ConfirmDialog>
         </div>
     )
 }

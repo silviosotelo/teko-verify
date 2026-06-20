@@ -10,6 +10,7 @@ import Dialog from '@/components/ui/Dialog'
 import Input from '@/components/ui/Input'
 import Table from '@/components/ui/Table'
 import Tag from '@/components/ui/Tag'
+import ConfirmDialog from '@/components/shared/ConfirmDialog'
 import Notification from '@/components/ui/Notification'
 import toast from '@/components/ui/toast'
 import { tekoApi } from '@/teko/client'
@@ -72,6 +73,9 @@ const WebhooksView = () => {
     const [created, setCreated] =
         useState<CreateWebhookEndpointResponse | null>(null)
     const [copied, setCopied] = useState(false)
+    const [deleteTarget, setDeleteTarget] = useState<WebhookEndpoint | null>(
+        null,
+    )
 
     // Log de entregas.
     const [logEndpoint, setLogEndpoint] = useState<WebhookEndpoint | null>(null)
@@ -146,7 +150,6 @@ const WebhooksView = () => {
 
     async function remove(ep: WebhookEndpoint) {
         if (!currentId) return
-        if (!confirm(`¿Eliminar el destino ${ep.url}?`)) return
         try {
             await tekoApi.deleteWebhook(currentId, ep.id)
             notify('Destino eliminado.')
@@ -317,7 +320,9 @@ const WebhooksView = () => {
                                             <Button
                                                 size="xs"
                                                 variant="default"
-                                                onClick={() => remove(ep)}
+                                                onClick={() =>
+                                                    setDeleteTarget(ep)
+                                                }
                                             >
                                                 Eliminar
                                             </Button>
@@ -367,18 +372,15 @@ const WebhooksView = () => {
                             {ALL_EVENTS.map((ev) => {
                                 const on = events.includes(ev)
                                 return (
-                                    <button
+                                    <Button
                                         key={ev}
                                         type="button"
+                                        size="xs"
+                                        variant={on ? 'solid' : 'default'}
                                         onClick={() => toggleEvent(ev)}
-                                        className={`rounded-full border px-3 py-1 text-xs transition ${
-                                            on
-                                                ? 'border-emerald-400 bg-emerald-50 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-100'
-                                                : 'border-gray-200 text-gray-500 dark:border-gray-600'
-                                        }`}
                                     >
                                         {ev.replace('session.', '')}
-                                    </button>
+                                    </Button>
                                 )
                             })}
                         </div>
@@ -527,6 +529,30 @@ const WebhooksView = () => {
                     </Button>
                 </div>
             </Dialog>
+
+            {/* Confirmación de borrado */}
+            <ConfirmDialog
+                isOpen={!!deleteTarget}
+                type="danger"
+                title="Eliminar destino"
+                confirmText="Eliminar"
+                cancelText="Cancelar"
+                confirmButtonProps={{
+                    className: 'bg-red-600 hover:bg-red-600',
+                }}
+                onClose={() => setDeleteTarget(null)}
+                onRequestClose={() => setDeleteTarget(null)}
+                onCancel={() => setDeleteTarget(null)}
+                onConfirm={async () => {
+                    if (deleteTarget) {
+                        await remove(deleteTarget)
+                        setDeleteTarget(null)
+                    }
+                }}
+            >
+                ¿Eliminar el destino {deleteTarget?.url}? Esta acción no se puede
+                deshacer.
+            </ConfirmDialog>
         </div>
     )
 }

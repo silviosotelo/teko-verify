@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import type { FormEvent } from 'react'
 import { useNavigate } from 'react-router'
 import Card from '@/components/ui/Card'
 import Badge from '@/components/ui/Badge'
@@ -7,6 +8,9 @@ import Spinner from '@/components/ui/Spinner'
 import Alert from '@/components/ui/Alert'
 import Input from '@/components/ui/Input'
 import Select from '@/components/ui/Select'
+import Checkbox from '@/components/ui/Checkbox'
+import { Form } from '@/components/ui/Form'
+import FormItem from '@/components/ui/Form/FormItem'
 import Table from '@/components/ui/Table'
 import Pagination from '@/components/ui/Pagination'
 import Dialog from '@/components/ui/Dialog'
@@ -41,6 +45,12 @@ const STATE_OPTIONS: { value: SessionState | ''; label: string }[] = [
     { value: 'needs_recapture', label: 'Recaptura' },
     { value: 'expired', label: 'Expirada' },
     { value: 'error', label: 'Error' },
+]
+
+const LOA_CREATE_OPTIONS = [
+    { value: 'L1', label: 'L1 - Solo documento' },
+    { value: 'L2', label: 'L2 - Documento + Match facial' },
+    { value: 'L3', label: 'L3 - Documento + Match + Liveness' },
 ]
 
 const SessionsView = () => {
@@ -254,7 +264,7 @@ const SessionsView = () => {
                         <THead>
                             <Tr>
                                 <Th className="w-10">
-                                    <input type="checkbox" className="rounded" />
+                                    <Checkbox />
                                 </Th>
                                 <Th
                                     className="cursor-pointer select-none hover:text-primary"
@@ -295,7 +305,7 @@ const SessionsView = () => {
                                     className="hover:bg-gray-50 dark:hover:bg-gray-700/50"
                                 >
                                     <Td>
-                                        <input type="checkbox" className="rounded" />
+                                        <Checkbox />
                                     </Td>
                                     <Td className="whitespace-nowrap text-sm text-gray-500">
                                         {fmtDate(s.createdAt)}
@@ -406,7 +416,7 @@ const SessionsView = () => {
                         </Button>
                     </div>
                 ) : (
-                    <form onSubmit={async (e) => {
+                    <Form onSubmit={async (e: FormEvent) => {
                         e.preventDefault()
                         if (!currentId) return
                         setCreating(true)
@@ -419,25 +429,23 @@ const SessionsView = () => {
                     }}>
                         <h5 className="font-semibold mb-4">Nueva sesión de verificación</h5>
                         <div className="space-y-4">
-                            <div>
-                                <label className="mb-1 block text-sm font-medium">Email del solicitante</label>
+                            <FormItem label="Email del solicitante">
                                 <Input type="email" value={createEmail} onChange={(e) => setCreateEmail(e.target.value)} placeholder="solicitante@ejemplo.com" />
                                 <p className="text-xs text-gray-400 mt-1">Opcional: si se ingresa, se envía el link por email</p>
-                            </div>
-                            <div>
-                                <label className="mb-1 block text-sm font-medium">Nivel de aseguramiento</label>
-                                <select className="w-full border rounded-md px-3 py-2 text-sm" value={createLoa} onChange={(e) => setCreateLoa(e.target.value)}>
-                                    <option value="L1">L1 - Solo documento</option>
-                                    <option value="L2">L2 - Documento + Match facial</option>
-                                    <option value="L3">L3 - Documento + Match + Liveness</option>
-                                </select>
-                            </div>
+                            </FormItem>
+                            <FormItem label="Nivel de aseguramiento">
+                                <Select
+                                    options={LOA_CREATE_OPTIONS}
+                                    value={LOA_CREATE_OPTIONS.find((o) => o.value === createLoa)}
+                                    onChange={(opt) => setCreateLoa(opt?.value ?? 'L2')}
+                                />
+                            </FormItem>
                         </div>
                         <div className="mt-6 flex justify-end gap-2">
                             <Button variant="default" onClick={() => setCreateOpen(false)}>Cancelar</Button>
                             <Button variant="solid" type="submit" loading={creating} icon={<PiLink />}>Crear sesión</Button>
                         </div>
-                    </form>
+                    </Form>
                 )}
             </Dialog>
         </div>

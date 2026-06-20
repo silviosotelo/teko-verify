@@ -8,6 +8,7 @@ import Spinner from '@/components/ui/Spinner'
 import Alert from '@/components/ui/Alert'
 import Button from '@/components/ui/Button'
 import Table from '@/components/ui/Table'
+import Tag from '@/components/ui/Tag'
 import { tekoApi } from '@/teko/client'
 import { useTenant } from '@/teko/TenantContext'
 import { LoaBadge } from '@/teko/badges'
@@ -104,13 +105,13 @@ const ReviewQueueView = () => {
                                         </Td>
                                         <Td>
                                             {sug?.decision === 'verified' ? (
-                                                <span className="rounded bg-emerald-100 px-2 py-0.5 text-xs font-medium text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-100">
+                                                <Tag className="border-0 bg-emerald-100 text-xs font-medium text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-100">
                                                     Aprobar
-                                                </span>
+                                                </Tag>
                                             ) : sug?.decision === 'rejected' ? (
-                                                <span className="rounded bg-red-100 px-2 py-0.5 text-xs font-medium text-red-700 dark:bg-red-500/20 dark:text-red-100">
+                                                <Tag className="border-0 bg-red-100 text-xs font-medium text-red-700 dark:bg-red-500/20 dark:text-red-100">
                                                     Rechazar
-                                                </span>
+                                                </Tag>
                                             ) : (
                                                 <span className="text-xs text-gray-400">
                                                     —

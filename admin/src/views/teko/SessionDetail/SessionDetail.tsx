@@ -45,6 +45,7 @@ import Select from '@/components/ui/Select'
 import DatePicker from '@/components/ui/DatePicker'
 import Dialog from '@/components/ui/Dialog'
 import Dropdown from '@/components/ui/Dropdown'
+import Tag from '@/components/ui/Tag'
 import Notification from '@/components/ui/Notification'
 import toast from '@/components/ui/toast'
 import { tekoApi } from '@/teko/client'
@@ -131,12 +132,13 @@ const STATUS_META: Record<
 function StatusBadge({ state }: { state: SessionState }) {
     const m = STATUS_META[state] ?? STATUS_META.created
     return (
-        <span
-            className={`inline-flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-bold uppercase tracking-wide ring-1 ${m.cls}`}
+        <Tag
+            className={`border-0 font-bold uppercase tracking-wide ${m.cls}`}
+            prefix
+            prefixClass={`shrink-0 ${m.dot}`}
         >
-            <span className={`h-2 w-2 rounded-full ${m.dot}`} />
             {m.label}
-        </span>
+        </Tag>
     )
 }
 
@@ -648,27 +650,27 @@ function EventsTimeline({ events }: { events: SessionEvent[] }) {
                             </div>
                             <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
                                 {e.ip && (
-                                    <span className="inline-flex items-center gap-1 rounded bg-gray-100 px-1.5 py-0.5 font-mono dark:bg-gray-700">
+                                    <Tag className="gap-1 border-0 bg-gray-100 font-mono dark:bg-gray-700">
                                         <TbWorld className="text-[11px]" />
                                         {e.ip}
-                                    </span>
+                                    </Tag>
                                 )}
                                 {e.country && (
-                                    <span className="inline-flex items-center gap-1 rounded bg-gray-100 px-1.5 py-0.5 dark:bg-gray-700">
+                                    <Tag className="gap-1 border-0 bg-gray-100 dark:bg-gray-700">
                                         {cc2flag(e.country)} {e.country}
-                                    </span>
+                                    </Tag>
                                 )}
                                 {dev && (
-                                    <span className="inline-flex items-center gap-1 rounded bg-gray-100 px-1.5 py-0.5 dark:bg-gray-700">
+                                    <Tag className="gap-1 border-0 bg-gray-100 dark:bg-gray-700">
                                         <TbDeviceMobile className="text-[11px]" />
                                         {dev}
-                                    </span>
+                                    </Tag>
                                 )}
                                 {'type' in e.device && e.device.suspicious && (
-                                    <span className="inline-flex items-center gap-1 rounded bg-red-50 px-1.5 py-0.5 text-red-700 dark:bg-red-500/10 dark:text-red-300">
+                                    <Tag className="gap-1 border-0 bg-red-50 text-red-700 dark:bg-red-500/10 dark:text-red-300">
                                         <TbRobot className="text-[11px]" />
                                         UA sospechoso
-                                    </span>
+                                    </Tag>
                                 )}
                             </div>
                             {metaKeys.length > 0 && (
@@ -768,8 +770,8 @@ function DeviceIpPanel({ analysis }: { analysis: DeviceIpAnalysis | null }) {
                         <h6 className="text-sm font-semibold heading-text">
                             Señales de riesgo
                         </h6>
-                        <span
-                            className={`inline-flex items-center gap-1 rounded-full px-2 py-1 text-xs font-bold ring-1 ${
+                        <Tag
+                            className={`gap-1 border-0 font-bold ${
                                 analysis.riskScore >= 50
                                     ? SEVERITY_STYLE.high
                                     : analysis.riskScore >= 25
@@ -781,7 +783,7 @@ function DeviceIpPanel({ analysis }: { analysis: DeviceIpAnalysis | null }) {
                         >
                             <TbAlertTriangle className="text-[11px]" />
                             {analysis.riskScore}
-                        </span>
+                        </Tag>
                     </div>
                     {analysis.signals.length === 0 ? (
                         <p className="inline-flex items-center gap-1.5 text-sm text-emerald-600 dark:text-emerald-400">
@@ -866,8 +868,8 @@ function AmlPanel({ aml }: { aml: AmlResult | undefined }) {
                             . El nombre del titular no se envió a terceros.
                         </p>
                     </div>
-                    <span
-                        className={`inline-flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-bold uppercase tracking-wide ring-1 ${
+                    <Tag
+                        className={`gap-2 border-0 font-bold uppercase tracking-wide ${
                             match
                                 ? 'bg-red-50 text-red-700 ring-red-200 dark:bg-red-500/10 dark:text-red-300 dark:ring-red-500/30'
                                 : 'bg-emerald-50 text-emerald-700 ring-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-300 dark:ring-emerald-500/30'
@@ -879,7 +881,7 @@ function AmlPanel({ aml }: { aml: AmlResult | undefined }) {
                             <TbCircleCheck className="text-sm" />
                         )}
                         {match ? 'COINCIDENCIA POTENCIAL' : 'SIN COINCIDENCIAS'}
-                    </span>
+                    </Tag>
                 </div>
                 <dl className="mt-4 grid grid-cols-2 gap-x-8 gap-y-2 text-sm sm:grid-cols-4">
                     <div>
@@ -939,20 +941,20 @@ function AmlPanel({ aml }: { aml: AmlResult | undefined }) {
                                 </div>
                                 <div className="mt-2 flex flex-wrap items-center gap-1.5">
                                     {h.lists.map((l) => (
-                                        <span
+                                        <Tag
                                             key={l}
-                                            className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-bold uppercase ring-1 ${listBadgeCls(l)}`}
+                                            className={`border-0 text-[11px] font-bold uppercase ${listBadgeCls(l)}`}
                                         >
                                             {l}
-                                        </span>
+                                        </Tag>
                                     ))}
                                     {h.matchedFields.map((f) => (
-                                        <span
+                                        <Tag
                                             key={f}
-                                            className="inline-flex items-center rounded bg-gray-100 px-1.5 py-0.5 text-[10px] font-medium text-gray-500 dark:bg-gray-700 dark:text-gray-300"
+                                            className="border-0 bg-gray-100 text-[10px] font-medium text-gray-500 dark:bg-gray-700 dark:text-gray-300"
                                         >
                                             {f}
-                                        </span>
+                                        </Tag>
                                     ))}
                                 </div>
                                 {(h.countries?.length || h.entityId) && (
@@ -984,8 +986,8 @@ function AmlPanel({ aml }: { aml: AmlResult | undefined }) {
 /** Badge verde/rojo de una validación del comprobante (nombre/reciente/domicilio). */
 function PoaCheck({ ok, label }: { ok: boolean; label: string }) {
     return (
-        <span
-            className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-bold uppercase tracking-wide ring-1 ${
+        <Tag
+            className={`gap-1.5 border-0 font-bold uppercase tracking-wide ${
                 ok
                     ? 'bg-emerald-50 text-emerald-700 ring-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-300 dark:ring-emerald-500/30'
                     : 'bg-red-50 text-red-700 ring-red-200 dark:bg-red-500/10 dark:text-red-300 dark:ring-red-500/30'
@@ -997,7 +999,7 @@ function PoaCheck({ ok, label }: { ok: boolean; label: string }) {
                 <TbAlertTriangle className="text-sm" />
             )}
             {label}
-        </span>
+        </Tag>
     )
 }
 

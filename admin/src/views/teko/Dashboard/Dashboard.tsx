@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import Card from '@/components/ui/Card'
 import Badge from '@/components/ui/Badge'
+import Tag from '@/components/ui/Tag'
 import Button from '@/components/ui/Button'
 import Spinner from '@/components/ui/Spinner'
 import Alert from '@/components/ui/Alert'
@@ -497,9 +498,9 @@ const DashboardView = () => {
                                             </div>
                                             <div className="text-right">
                                                 {session.result?.loa && (
-                                                    <span className="text-xs font-bold bg-primary/10 text-primary px-2 py-0.5 rounded-full">
+                                                    <Tag className="border-0 bg-primary/10 text-xs font-bold text-primary">
                                                         {session.result.loa}
-                                                    </span>
+                                                    </Tag>
                                                 )}
                                                 <div className="text-xs text-gray-400 mt-1">
                                                     {session.result?.decision || '—'}

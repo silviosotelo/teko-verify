@@ -5,6 +5,7 @@ import Alert from '@/components/ui/Alert'
 import Button from '@/components/ui/Button'
 import Dialog from '@/components/ui/Dialog'
 import Input from '@/components/ui/Input'
+import Select from '@/components/ui/Select'
 import Badge from '@/components/ui/Badge'
 import Table from '@/components/ui/Table'
 import Tag from '@/components/ui/Tag'
@@ -116,6 +117,13 @@ const CONNECTORS: Connector[] = [
         status: 'configured',
         keyCount: 0,
     },
+]
+
+const STATUS_FILTER_OPTS = [
+    { value: 'all', label: 'Todos los estados' },
+    { value: 'active', label: 'Activos' },
+    { value: 'configured', label: 'Configurados' },
+    { value: 'coming_soon', label: 'Próximamente' },
 ]
 
 function statusBadge(status: Connector['status']) {
@@ -275,16 +283,16 @@ const IntegrationsConnectors = () => {
                     onChange={(e) => setSearch(e.target.value)}
                     className="max-w-xs"
                 />
-                <select
-                    value={filterStatus}
-                    onChange={(e) => setFilterStatus(e.target.value)}
-                    className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-700 dark:border-gray-600 dark:bg-gray-800 dark:text-gray-200"
-                >
-                    <option value="all">Todos los estados</option>
-                    <option value="active">Activos</option>
-                    <option value="configured">Configurados</option>
-                    <option value="coming_soon">Próximamente</option>
-                </select>
+                <Select
+                    className="min-w-[200px]"
+                    options={STATUS_FILTER_OPTS}
+                    value={
+                        STATUS_FILTER_OPTS.find(
+                            (o) => o.value === filterStatus,
+                        ) ?? null
+                    }
+                    onChange={(opt) => setFilterStatus(opt?.value ?? 'all')}
+                />
             </div>
 
             {/* Grid de conectores */}
@@ -458,18 +466,15 @@ const IntegrationsConnectors = () => {
                             {ALL_WEBHOOK_EVENTS.map((ev) => {
                                 const on = newEvents.includes(ev)
                                 return (
-                                    <button
+                                    <Button
                                         key={ev}
                                         type="button"
+                                        size="xs"
+                                        variant={on ? 'solid' : 'default'}
                                         onClick={() => toggleNewEvent(ev)}
-                                        className={`rounded-full border px-3 py-1 text-xs transition ${
-                                            on
-                                                ? 'border-emerald-400 bg-emerald-50 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-100'
-                                                : 'border-gray-200 text-gray-500 dark:border-gray-600'
-                                        }`}
                                     >
                                         {ev.replace('session.', '')}
-                                    </button>
+                                    </Button>
                                 )
                             })}
                         </div>

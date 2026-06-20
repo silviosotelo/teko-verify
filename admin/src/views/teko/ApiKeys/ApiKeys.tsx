@@ -4,6 +4,8 @@ import Spinner from '@/components/ui/Spinner'
 import Alert from '@/components/ui/Alert'
 import Button from '@/components/ui/Button'
 import Input from '@/components/ui/Input'
+import Select from '@/components/ui/Select'
+import Checkbox from '@/components/ui/Checkbox'
 import Dialog from '@/components/ui/Dialog'
 import Switcher from '@/components/ui/Switcher'
 import Badge from '@/components/ui/Badge'
@@ -221,29 +223,32 @@ const ApiKeysView = () => {
                             {apps.length > 0 && (
                                 <div>
                                     <label className="mb-1 block text-sm font-medium">App (opcional)</label>
-                                    <select
-                                        className="w-full border rounded-md px-3 py-2 text-sm"
-                                        value={selectedAppId}
-                                        onChange={(e) => setSelectedAppId(e.target.value)}
-                                    >
-                                        <option value="">Todas las apps</option>
-                                        {apps.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
-                                    </select>
+                                    {(() => {
+                                        const appOptions = [
+                                            { value: '', label: 'Todas las apps' },
+                                            ...apps.map((a) => ({ value: a.id, label: a.name })),
+                                        ]
+                                        return (
+                                            <Select
+                                                options={appOptions}
+                                                value={appOptions.find((o) => o.value === selectedAppId)}
+                                                onChange={(opt) => setSelectedAppId(opt?.value ?? '')}
+                                            />
+                                        )
+                                    })()}
                                 </div>
                             )}
                             <div>
                                 <label className="mb-1 block text-sm font-medium">Permisos (opcional)</label>
                                 <div className="space-y-1.5">
                                     {SCOPE_OPTIONS.map(s => (
-                                        <label key={s.value} className="flex items-center gap-2 text-sm cursor-pointer">
-                                            <input
-                                                type="checkbox"
-                                                checked={selectedScopes.includes(s.value)}
-                                                onChange={() => toggleScope(s.value)}
-                                                className="rounded"
-                                            />
+                                        <Checkbox
+                                            key={s.value}
+                                            checked={selectedScopes.includes(s.value)}
+                                            onChange={() => toggleScope(s.value)}
+                                        >
                                             {s.label}
-                                        </label>
+                                        </Checkbox>
                                     ))}
                                 </div>
                             </div>

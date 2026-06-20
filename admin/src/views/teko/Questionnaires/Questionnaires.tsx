@@ -228,14 +228,16 @@ const QuestionnairesView = () => {
                                         {q.name}
                                     </Td>
                                     <Td>
-                                        <button
+                                        <Button
                                             type="button"
+                                            size="xs"
+                                            variant="plain"
                                             title="Copiar id"
                                             onClick={() => copyId(q.id)}
                                             className="font-mono text-xs text-gray-400 hover:text-emerald-600"
                                         >
                                             {q.id.slice(0, 8)}…
-                                        </button>
+                                        </Button>
                                     </Td>
                                     <Td className="text-gray-500">
                                         {q.questions.length}
@@ -312,7 +314,8 @@ const QuestionnairesView = () => {
                         <label className="mb-1 block text-sm font-medium text-gray-600 dark:text-gray-300">
                             Preguntas (JSON)
                         </label>
-                        <textarea
+                        <Input
+                            textArea
                             className={textareaCls}
                             value={json}
                             onChange={(e) => setJson(e.target.value)}
@@ -367,7 +370,8 @@ const QuestionnairesView = () => {
                             Tipos: text · select · multiselect · checkbox · date ·
                             number.
                         </p>
-                        <textarea
+                        <Input
+                            textArea
                             className={textareaCls}
                             value={newJson}
                             onChange={(e) => setNewJson(e.target.value)}

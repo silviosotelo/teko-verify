@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import Card from '@/components/ui/Card'
 import Button from '@/components/ui/Button'
 import Input from '@/components/ui/Input'
+import Select from '@/components/ui/Select'
 import Tabs from '@/components/ui/Tabs'
 import Dialog from '@/components/ui/Dialog'
 import Alert from '@/components/ui/Alert'
@@ -212,15 +213,11 @@ const SettingsEmail = () => {
                 <div className="space-y-4">
                     <div>
                         <label className="mb-1 block text-sm font-medium">Tipo</label>
-                        <select
-                            className="w-full border rounded-md px-3 py-2 text-sm"
-                            value={editType}
-                            onChange={(e) => setEditType(e.target.value)}
-                        >
-                            {TEMPLATE_TYPES.map(tt => (
-                                <option key={tt.value} value={tt.value}>{tt.label}</option>
-                            ))}
-                        </select>
+                        <Select
+                            options={TEMPLATE_TYPES}
+                            value={TEMPLATE_TYPES.find((tt) => tt.value === editType)}
+                            onChange={(opt) => setEditType(opt?.value ?? '')}
+                        />
                     </div>
                     <div>
                         <label className="mb-1 block text-sm font-medium">Asunto</label>
@@ -228,8 +225,10 @@ const SettingsEmail = () => {
                     </div>
                     <div>
                         <label className="mb-1 block text-sm font-medium">Cuerpo (HTML)</label>
-                        <textarea
-                            className="w-full border rounded-md px-3 py-2 text-sm font-mono min-h-[200px]"
+                        <Input
+                            textArea
+                            rows={10}
+                            className="font-mono"
                             value={editBody}
                             onChange={(e) => setEditBody(e.target.value)}
                             placeholder="<html><body>...</body></html>"
