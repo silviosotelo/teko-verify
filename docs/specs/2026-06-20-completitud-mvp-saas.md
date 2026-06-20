@@ -127,7 +127,20 @@ Decisiones del usuario: monetización **sin pasarela**, maquetas **ocultas con f
 - **Sprint 4 — Notificaciones ⏸️ DIFERIDO**: SMS/Reminders ocultos por feature-flag (no se prometen en v1).
 - **Sprint 5 — ⏸️ DIFERIDO**: pasarela de pagos, OAuth, Zapier, pgvector, S3. Ocultos/diferidos por decisión.
 
-**Pendiente operativo**: deploy al server 34 (rebuild backend + correr migración 0018 + build/scp admin dist) — requiere confirmación. Bug pre-existente `consentShouldTransition` sin resolver (fuera de scope).
+- **Usage alerts ✅ FUNCIONAL** (commit): además del CRUD, ahora se DISPARAN — sweep horario (`scheduleUsageAlerts`, guard `TEKO_USAGE_ALERTS_ENABLED`) que evalúa uso vs umbral por tenant y notifica por email/webhook con dedup por período (`last_fired_at`). Ya no es UI vacía.
+
+## 8. Checklist de DEPLOY (server 34) — pendiente de confirmación
+
+> Todo lo construido (Sprints 0/1/3 + firing de alertas) está commiteado y verificado en local, pero **NADA está live**. El deploy es outward-facing + corre una migración de DB → requiere OK explícito.
+
+1. **Backend**: `docker compose up -d --build teko-verify` (incluye Sprint 0 gates + Sprint 1 billing/gating + alertas).
+2. **Migración**: `node dist/db/migrate.js` → aplica `0018_billing` (planes/suscripciones/usage_alerts). ⚠️ **Nunca se corrió contra Postgres real** — los tests mockean el Executor. Validar que la migración aplica sin error (seeds jsonb array, `gen_random_uuid()`, FK a `tenants(id)`).
+3. **Smoke test post-migración**: una query real de `getQuotaStatus` para un tenant existente (confirma que los repos billing funcionan contra el esquema real).
+4. **🔴 Lockout check (gate review-queue)**: ANTES de exponer, confirmar el rol del operador `admin` de producción: `SELECT role FROM admin_operators WHERE ...` debe ser owner/admin/operator/reviewer (NO viewer) o se bloquea la cola de revisión.
+5. **Frontend admin**: `vite build` + `scp -r admin/dist/* …:/home/soporte/teko/admin/dist/` (rate-limit fix + Billing views + feature-flags + nav).
+6. **Verificar**: `/health` ok; login admin; abrir Facturación (planes reales); crear una alerta; rate-limits cargan/guardan.
+
+**No bloqueante / fuera de scope**: bug pre-existente `consentShouldTransition` (guard de re-consentimiento no transiciona desde `capturing`); env `TEKO_USAGE_ALERTS_ENABLED` para activar el sweep.
 
 ---
 
