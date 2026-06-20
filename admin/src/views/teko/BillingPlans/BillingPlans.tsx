@@ -157,14 +157,19 @@ function BillingPlans() {
         setLoading(true)
         setError(null)
         try {
-            const [plansRes, subRes] = await Promise.all([
-                tekoApi.listPlans(),
-                tekoApi.getSubscription(currentId),
-            ])
+            // El catálogo de planes y la suscripción son independientes: si la
+            // suscripción falla (404/403/tenant recién borrado/restart transitorio)
+            // NO debe ocultar los planes. Antes iban en un Promise.all y cualquier
+            // rechazo dejaba la página en "No hay planes configurados" pese al 200
+            // de /plans. La suscripción es no-fatal (patrón de Usage.tsx).
+            const plansRes = await tekoApi.listPlans()
             const sorted = [...(plansRes.plans || [])].sort(
                 (a, b) => a.sortOrder - b.sortOrder,
             )
             setPlans(sorted)
+            const subRes = await tekoApi
+                .getSubscription(currentId)
+                .catch(() => null)
             setSub(subRes)
         } catch (e) {
             setError((e as Error).message)

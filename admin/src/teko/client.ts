@@ -37,6 +37,7 @@ import type {
     WebhookListResponse,
     CreateWebhookEndpointResponse,
     BillingPlan,
+    ComplianceReport,
     TenantSubscriptionResponse,
     TenantSubscription,
     UsageAlert,
@@ -527,11 +528,13 @@ export const tekoApi = {
     },
 
     // ---- Compliance reports ----
+    // El backend (lib/compliance.generateComplianceReport) devuelve el reporte
+    // PLANO: NO hay envoltura `summary`. Cada grupo de stats viene al tope.
     compliance(tenantId: string) {
-        return request<{
-            summary: Record<string, unknown>
-            generatedAt: string
-        }>('GET', `/tenants/${tenantId}/compliance`)
+        return request<ComplianceReport>(
+            'GET',
+            `/tenants/${tenantId}/compliance`,
+        )
     },
 
     // ---- Email templates ----

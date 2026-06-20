@@ -617,6 +617,19 @@ export interface BillingPlan {
     sortOrder: number
 }
 
+// ---- Compliance report (GET /admin/tenants/:id/compliance) ----
+// Shape PLANO que devuelve lib/compliance.generateComplianceReport (sin `summary`).
+export interface ComplianceReport {
+    tenant: { id: string; name: string; status: string }
+    generatedAt: string
+    period: { from: string; to: string }
+    verificationStats: { total: number; byState: Record<string, number> }
+    consentStats: { total: number; byVersion: Record<string, number> }
+    suppressionStats: { total: number }
+    retentionStats: { retentionDays: number; sessionsPastRetention: number }
+    adminAccessStats: { totalEntries: number; byOperator: Record<string, number> }
+}
+
 export type SubscriptionStatus = 'active' | 'trialing' | 'past_due' | 'canceled'
 
 export interface TenantSubscription {

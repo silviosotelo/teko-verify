@@ -19,7 +19,7 @@ interface CheckRow {
   passed: boolean;
   detail: CheckDetail;
   created_at: Date;
-  updated_at: Date;
+  updated_at?: Date; // columna inexistente en el DDL (0001) → undefined en runtime.
 }
 
 function mapCheck(row: CheckRow): VerificationCheck {
@@ -32,7 +32,10 @@ function mapCheck(row: CheckRow): VerificationCheck {
     passed: row.passed,
     detail: row.detail,
     createdAt: iso(row.created_at),
-    updatedAt: iso(row.updated_at),
+    // La tabla verification_checks no tiene columna updated_at (migración 0001):
+    // row.updated_at llega undefined → iso() crashea el proceso (502 al abrir una
+    // sesión con checks). Caemos a created_at, que sí existe y es NOT NULL.
+    updatedAt: iso(row.updated_at ?? row.created_at),
   };
 }
 

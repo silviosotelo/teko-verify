@@ -26,7 +26,20 @@ const ComplianceView = () => {
         setError('')
         try {
             const res = await tekoApi.compliance(currentId)
-            setReport(res.summary)
+            // El backend NO devuelve `summary`: arma el resumen legible a partir de
+            // los grupos de stats planos del reporte (antes leía res.summary →
+            // undefined → la vista quedaba vacía pese al 200).
+            setReport({
+                'Verificaciones totales': res.verificationStats?.total ?? 0,
+                Consentimientos: res.consentStats?.total ?? 0,
+                'Solicitudes de supresión': res.suppressionStats?.total ?? 0,
+                'Retención (días)': res.retentionStats?.retentionDays ?? 0,
+                'Sesiones fuera de retención':
+                    res.retentionStats?.sessionsPastRetention ?? 0,
+                'Accesos admin auditados':
+                    res.adminAccessStats?.totalEntries ?? 0,
+                Período: `${res.period?.from ?? '—'} → ${res.period?.to ?? '—'}`,
+            })
             setGeneratedAt(res.generatedAt)
         } catch (e: unknown) {
             setError(e instanceof Error ? e.message : 'Error al generar reporte')
