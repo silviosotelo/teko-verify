@@ -1,149 +1,212 @@
 import { useState, useEffect, useCallback } from 'react'
-import { motion } from 'framer-motion'
 import Button from '@/components/ui/Button'
 import Card from '@/components/ui/Card'
-import Switcher from '@/components/ui/Switcher'
-import Progress from '@/components/ui/Progress'
 import Input from '@/components/ui/Input'
+import Select from '@/components/ui/Select'
+import Switcher from '@/components/ui/Switcher'
+import Tag from '@/components/ui/Tag'
+import Dialog from '@/components/ui/Dialog'
 import Alert from '@/components/ui/Alert'
-import Skeleton from '@/components/ui/Skeleton'
 import Spinner from '@/components/ui/Spinner'
-import Badge from '@/components/ui/Badge'
+import Table from '@/components/ui/Table'
+import toast from '@/components/ui/toast'
+import Notification from '@/components/ui/Notification'
+import ConfirmDialog from '@/components/shared/ConfirmDialog'
 import { tekoApi } from '@/teko/client'
 import { useTenant } from '@/teko/TenantContext'
-import classNames from '@/utils/classNames'
+import type {
+    UsageAlert,
+    UsageAlertChannel,
+    UsageAlertInput,
+} from '@/teko/types'
 import {
-    PiBell,
     PiBellRinging,
-    PiCheckCircle,
-    PiWarning,
-    PiWarningCircle,
+    PiPlus,
+    PiPencil,
+    PiTrash,
     PiEnvelope,
     PiPhone,
-    PiWebcam,
+    PiShareNetwork,
 } from 'react-icons/pi'
 
-interface AlertThreshold {
-    level: number
-    enabled: boolean
-    channels: string[]
+const { THead, TBody, Tr, Th, Td } = Table
+
+const CHANNELS: Array<{ value: UsageAlertChannel; label: string }> = [
+    { value: 'email', label: 'Email' },
+    { value: 'webhook', label: 'Webhook' },
+]
+
+const CHANNEL_META: Record<
+    UsageAlertChannel,
+    { label: string; icon: typeof PiEnvelope; targetLabel: string; placeholder: string }
+> = {
+    email: {
+        label: 'Email',
+        icon: PiEnvelope,
+        targetLabel: 'Correo electrónico',
+        placeholder: 'admin@empresa.com',
+    },
+    webhook: {
+        label: 'Webhook',
+        icon: PiShareNetwork,
+        targetLabel: 'URL del webhook',
+        placeholder: 'https://api.tu-servicio.com/webhooks/alertas',
+    },
 }
 
-const THRESHOLDS = [50, 75, 90, 100]
-
-const THRESHOLD_LABELS: Record<number, string> = {
-    50: '50% - Precaución',
-    75: '75% - Advertencia',
-    90: '90% - Crítico',
-    100: '100% - Límite alcanzado',
-}
-
-const THRESHOLD_ICONS: Record<number, typeof PiBell> = {
-    50: PiBell,
-    75: PiBellRinging,
-    90: PiWarning,
-    100: PiWarningCircle,
-}
-
-const THRESHOLD_COLORS: Record<number, 'emerald' | 'amber' | 'red' | 'rose'> = {
-    50: 'emerald',
-    75: 'amber',
-    90: 'red',
-    100: 'rose',
+const EMPTY_FORM: UsageAlertInput = {
+    thresholdPct: 80,
+    channel: 'email',
+    target: '',
+    enabled: true,
 }
 
 function BillingUsageAlerts() {
     const { current, currentId, loading: tLoading } = useTenant()
     const [loading, setLoading] = useState(true)
     const [error, setError] = useState<string | null>(null)
+    const [alerts, setAlerts] = useState<UsageAlert[]>([])
+
+    const [editOpen, setEditOpen] = useState(false)
+    const [editingId, setEditingId] = useState<string | null>(null)
+    const [form, setForm] = useState<UsageAlertInput>(EMPTY_FORM)
     const [saving, setSaving] = useState(false)
-    const [saved, setSaved] = useState(false)
-    const [usageUsage, setUsageUsage] = useState<{ used: number; limit: number }>({
-        used: 0,
-        limit: 5000,
-    })
 
-    const [thresholds, setThresholds] = useState<AlertThreshold[]>(
-        THRESHOLDS.map((level) => ({
-            level,
-            enabled: true,
-            channels: ['email'],
-        })),
-    )
+    const [deleteTarget, setDeleteTarget] = useState<UsageAlert | null>(null)
+    const [deleting, setDeleting] = useState(false)
 
-    const [channels, setChannels] = useState({
-        email: true,
-        webhook: false,
-        sms: false,
-    })
-
-    const [webhookUrl, setWebhookUrl] = useState('')
-    const [smsNumber, setSmsNumber] = useState('')
-
-    useEffect(() => {
+    const load = useCallback(async () => {
         if (!currentId) {
             setLoading(false)
             return
         }
         setLoading(true)
-        tekoApi
-            .usage(currentId)
-            .then((res) => {
-                setUsageUsage({ used: res.total, limit: 5000 })
-            })
-            .catch((e) => {
-                setError((e as Error).message)
-            })
-            .finally(() => setLoading(false))
+        setError(null)
+        try {
+            const res = await tekoApi.listUsageAlerts(currentId)
+            setAlerts(res.alerts || [])
+        } catch (e) {
+            setError((e as Error).message)
+        } finally {
+            setLoading(false)
+        }
     }, [currentId])
 
-    const usagePct =
-        usageUsage.limit > 0
-            ? Math.round((usageUsage.used / usageUsage.limit) * 100)
-            : 0
+    useEffect(() => {
+        load()
+    }, [load])
 
-    const handleThresholdToggle = useCallback((level: number) => {
-        setThresholds((prev) =>
-            prev.map((t) => (t.level === level ? { ...t, enabled: !t.enabled } : t)),
-        )
-    }, [])
-
-    const handleChannelToggle = useCallback((level: number, channel: string) => {
-        setThresholds((prev) =>
-            prev.map((t) => {
-                if (t.level !== level) return t
-                const has = t.channels.includes(channel)
-                return {
-                    ...t,
-                    channels: has
-                        ? t.channels.filter((c) => c !== channel)
-                        : [...t.channels, channel],
-                }
-            }),
-        )
-    }, [])
-
-    function handleSave() {
-        setSaving(true)
-        setSaved(false)
-        setTimeout(() => {
-            setSaving(false)
-            setSaved(true)
-            setTimeout(() => setSaved(false), 3000)
-        }, 1000)
+    function openCreate() {
+        setEditingId(null)
+        setForm(EMPTY_FORM)
+        setEditOpen(true)
     }
 
-    function handleReset() {
-        setThresholds(
-            THRESHOLDS.map((level) => ({
-                level,
-                enabled: true,
-                channels: ['email'],
-            })),
-        )
-        setChannels({ email: true, webhook: false, sms: false })
-        setWebhookUrl('')
-        setSmsNumber('')
+    function openEdit(alert: UsageAlert) {
+        setEditingId(alert.id)
+        setForm({
+            thresholdPct: alert.thresholdPct,
+            channel: alert.channel,
+            target: alert.target,
+            enabled: alert.enabled,
+        })
+        setEditOpen(true)
+    }
+
+    async function handleSave() {
+        if (!currentId) return
+        const pct = Number(form.thresholdPct)
+        if (!Number.isFinite(pct) || pct < 1 || pct > 100) {
+            toast.push(
+                <Notification title="Datos inválidos" type="warning">
+                    El umbral debe estar entre 1 y 100.
+                </Notification>,
+                { placement: 'top-center' },
+            )
+            return
+        }
+        if (!form.target.trim()) {
+            toast.push(
+                <Notification title="Datos inválidos" type="warning">
+                    El destino de la notificación es obligatorio.
+                </Notification>,
+                { placement: 'top-center' },
+            )
+            return
+        }
+        setSaving(true)
+        try {
+            const body: UsageAlertInput = {
+                thresholdPct: pct,
+                channel: form.channel,
+                target: form.target.trim(),
+                enabled: form.enabled,
+            }
+            if (editingId) {
+                await tekoApi.updateUsageAlert(currentId, editingId, body)
+            } else {
+                await tekoApi.createUsageAlert(currentId, body)
+            }
+            toast.push(
+                <Notification title="Guardado" type="success">
+                    {editingId ? 'Alerta actualizada.' : 'Alerta creada.'}
+                </Notification>,
+                { placement: 'top-center' },
+            )
+            setEditOpen(false)
+            await load()
+        } catch (e) {
+            toast.push(
+                <Notification title="Error" type="danger">
+                    {(e as Error).message}
+                </Notification>,
+                { placement: 'top-center' },
+            )
+        } finally {
+            setSaving(false)
+        }
+    }
+
+    async function handleToggle(alert: UsageAlert) {
+        if (!currentId) return
+        try {
+            await tekoApi.updateUsageAlert(currentId, alert.id, {
+                enabled: !alert.enabled,
+            })
+            await load()
+        } catch (e) {
+            toast.push(
+                <Notification title="Error" type="danger">
+                    {(e as Error).message}
+                </Notification>,
+                { placement: 'top-center' },
+            )
+        }
+    }
+
+    async function handleDelete() {
+        if (!currentId || !deleteTarget) return
+        setDeleting(true)
+        try {
+            await tekoApi.deleteUsageAlert(currentId, deleteTarget.id)
+            toast.push(
+                <Notification title="Eliminada" type="success">
+                    Alerta eliminada.
+                </Notification>,
+                { placement: 'top-center' },
+            )
+            setDeleteTarget(null)
+            await load()
+        } catch (e) {
+            toast.push(
+                <Notification title="Error" type="danger">
+                    {(e as Error).message}
+                </Notification>,
+                { placement: 'top-center' },
+            )
+        } finally {
+            setDeleting(false)
+        }
     }
 
     if (tLoading) {
@@ -154,410 +217,229 @@ function BillingUsageAlerts() {
         )
     }
 
+    const channelMeta = CHANNEL_META[form.channel]
+
     return (
-        <div>
-            <div className="mb-6">
-                <h3 className="mb-1">Alertas de Uso</h3>
-                <p className="text-gray-500">
-                    {current
-                        ? `Configura las alertas de uso para ${current.name}`
-                        : 'Configura las alertas de uso'}
-                </p>
+        <div className="space-y-6">
+            <div className="flex items-center justify-between">
+                <div>
+                    <h3 className="mb-1">Alertas de Uso</h3>
+                    <p className="text-gray-500">
+                        {current
+                            ? `Notificaciones automáticas de consumo para ${current.name}`
+                            : 'Notificaciones automáticas de consumo'}
+                    </p>
+                </div>
+                <Button
+                    variant="solid"
+                    size="sm"
+                    icon={<PiPlus />}
+                    onClick={openCreate}
+                >
+                    Nueva alerta
+                </Button>
             </div>
 
             {error && (
-                <Alert showIcon className="mb-6" type="danger">
+                <Alert showIcon type="danger">
                     {error}
                 </Alert>
             )}
 
-            {saved && (
-                <motion.div
-                    initial={{ opacity: 0, y: -10 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    exit={{ opacity: 0 }}
-                >
-                    <Alert showIcon className="mb-6" type="success">
-                        Configuración de alertas guardada correctamente.
-                    </Alert>
-                </motion.div>
-            )}
-
-            {loading ? (
-                <div className="space-y-6">
-                    <Card>
-                        <Skeleton className="h-6 w-48 mb-4" />
-                        <Skeleton className="h-4 w-full mb-2" />
-                        <Skeleton className="h-4 w-3/4 mb-6" />
-                        <Skeleton className="h-12 w-full" />
-                    </Card>
-                    <div className="grid gap-4 md:grid-cols-2">
-                        {[0, 1].map((i) => (
-                            <Card key={i}>
-                                <Skeleton className="h-6 w-32 mb-4" />
-                                {[0, 1, 2].map((j) => (
-                                    <Skeleton key={j} className="h-12 w-full mb-3" />
-                                ))}
-                            </Card>
-                        ))}
+            <Card bodyClass="p-0">
+                {loading ? (
+                    <div className="flex justify-center p-8">
+                        <Spinner size={40} />
                     </div>
-                </div>
-            ) : (
-                <motion.div
-                    initial={{ opacity: 0 }}
-                    animate={{ opacity: 1 }}
-                    transition={{ duration: 0.3 }}
-                    className="space-y-6"
-                >
-                    {/* Current usage section */}
-                    <Card>
-                        <div className="flex items-center gap-3 mb-4">
-                            <div
-                                className={classNames(
-                                    'flex h-10 w-10 items-center justify-center rounded-lg',
-                                    usagePct >= 90
-                                        ? 'bg-red-100 dark:bg-red-500/20'
-                                        : usagePct >= 75
-                                            ? 'bg-amber-100 dark:bg-amber-500/20'
-                                            : 'bg-emerald-100 dark:bg-emerald-500/20',
-                                )}
-                            >
-                                <PiBellRinging
-                                    className={classNames(
-                                        'h-5 w-5',
-                                        usagePct >= 90
-                                            ? 'text-red-600'
-                                            : usagePct >= 75
-                                                ? 'text-amber-600'
-                                                : 'text-emerald-600',
-                                    )}
-                                />
-                            </div>
-                            <div>
-                                <h4 className="font-semibold heading-text">Uso Actual</h4>
-                                <p className="text-sm text-gray-500">
-                                    Monitoreo en tiempo real del consumo del plan
-                                </p>
-                            </div>
-                        </div>
-
-                        <div className="mb-4">
-                            <div className="flex items-center justify-between mb-2">
-                                <span className="text-sm text-gray-500">
-                                    Verificaciones utilizadas
-                                </span>
-                                <span className="text-sm font-semibold heading-text">
-                                    {usageUsage.used} / {usageUsage.limit}
-                                </span>
-                            </div>
-                            <Progress
-                                value={usagePct}
-                                max={100}
-                                color={
-                                    usagePct >= 90
-                                        ? 'red'
-                                        : usagePct >= 75
-                                            ? 'amber'
-                                            : 'emerald'
-                                }
-                                showLabel
-                                className="mb-2"
-                            />
-                            <div className="flex items-center justify-between text-xs text-gray-400">
-                                <span>0</span>
-                                <span>{usagePct}% utilizado</span>
-                                <span>{usageUsage.limit}</span>
-                            </div>
-                        </div>
-
-                        {usagePct >= 90 && (
-                            <div className="flex items-start gap-3 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700 dark:border-red-800 dark:bg-red-900/20 dark:text-red-300">
-                                <PiWarningCircle className="mt-0.5 w-5 h-5 flex-shrink-0" />
-                                <div>
-                                    <span className="font-semibold">Límite crítico:</span> Has
-                                    alcanzado el {usagePct}% de tu límite mensual. Se han
-                                    activado todas las alertas.
-                                </div>
-                            </div>
-                        )}
-
-                        {usagePct >= 75 && usagePct < 90 && (
-                            <div className="flex items-start gap-3 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-700 dark:border-amber-800 dark:bg-amber-900/20 dark:text-amber-300">
-                                <PiWarning className="mt-0.5 w-5 h-5 flex-shrink-0" />
-                                <div>
-                                    <span className="font-semibold">Advertencia:</span> Has
-                                    alcanzado el {usagePct}% de tu límite mensual. Revisa tu
-                                    configuración de alertas.
-                                </div>
-                            </div>
-                        )}
-                    </Card>
-
-                    {/* Threshold alerts */}
-                    <Card>
-                        <div className="flex items-center gap-3 mb-6">
-                            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-blue-100 dark:bg-blue-500/20">
-                                <PiBell className="h-5 w-5 text-blue-600 dark:text-blue-400" />
-                            </div>
-                            <div>
-                                <h4 className="font-semibold heading-text">Umbral de Alertas</h4>
-                                <p className="text-sm text-gray-500">
-                                    Configura notificaciones automáticas al alcanzar ciertos
-                                    porcentajes de uso
-                                </p>
-                            </div>
-                        </div>
-
-                        <div className="space-y-4">
-                            {thresholds.map((threshold) => {
-                                const Icon = THRESHOLD_ICONS[threshold.level]
-                                const color = THRESHOLD_COLORS[threshold.level]
+                ) : alerts.length === 0 ? (
+                    <div className="text-center py-12 text-gray-400">
+                        <PiBellRinging className="mx-auto mb-2 text-4xl" />
+                        <p>No hay alertas configuradas</p>
+                    </div>
+                ) : (
+                    <Table>
+                        <THead>
+                            <Tr>
+                                <Th>Umbral</Th>
+                                <Th>Canal</Th>
+                                <Th>Destino</Th>
+                                <Th>Estado</Th>
+                                <Th className="text-right">Acciones</Th>
+                            </Tr>
+                        </THead>
+                        <TBody>
+                            {alerts.map((alert) => {
+                                const meta = CHANNEL_META[alert.channel]
+                                const Icon = meta?.icon ?? PiEnvelope
                                 return (
-                                    <div
-                                        key={threshold.level}
-                                        className={classNames(
-                                            'flex items-center justify-between rounded-lg border p-4 transition-colors',
-                                            threshold.enabled
-                                                ? 'border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-800/50'
-                                                : 'border-gray-100 dark:border-gray-800 bg-gray-50/50 dark:bg-gray-900/30 opacity-60',
-                                        )}
-                                    >
-                                        <div className="flex items-center gap-4 flex-1">
-                                            <div
-                                                className={classNames(
-                                                    'flex h-10 w-10 items-center justify-center rounded-lg',
-                                                    color === 'emerald' &&
-                                                        'bg-emerald-100 dark:bg-emerald-500/20',
-                                                    color === 'amber' &&
-                                                        'bg-amber-100 dark:bg-amber-500/20',
-                                                    color === 'red' &&
-                                                        'bg-red-100 dark:bg-red-500/20',
-                                                    color === 'rose' &&
-                                                        'bg-rose-100 dark:bg-rose-500/20',
-                                                )}
-                                            >
-                                                <Icon
-                                                    className={classNames(
-                                                        'h-5 w-5',
-                                                        color === 'emerald' && 'text-emerald-600',
-                                                        color === 'amber' && 'text-amber-600',
-                                                        color === 'red' && 'text-red-600',
-                                                        color === 'rose' && 'text-rose-600',
-                                                    )}
+                                    <Tr key={alert.id}>
+                                        <Td className="font-medium">
+                                            {alert.thresholdPct}%
+                                        </Td>
+                                        <Td>
+                                            <span className="inline-flex items-center gap-1.5">
+                                                <Icon className="text-gray-500" />
+                                                {meta?.label ?? alert.channel}
+                                            </span>
+                                        </Td>
+                                        <Td className="text-gray-600">
+                                            {alert.target}
+                                        </Td>
+                                        <Td>
+                                            <div className="flex items-center gap-2">
+                                                <Switcher
+                                                    checked={alert.enabled}
+                                                    onChange={() =>
+                                                        handleToggle(alert)
+                                                    }
+                                                />
+                                                <Tag
+                                                    className={
+                                                        alert.enabled
+                                                            ? 'bg-emerald-100 text-emerald-700'
+                                                            : 'bg-gray-100 text-gray-500'
+                                                    }
+                                                >
+                                                    {alert.enabled
+                                                        ? 'Activa'
+                                                        : 'Inactiva'}
+                                                </Tag>
+                                            </div>
+                                        </Td>
+                                        <Td className="text-right">
+                                            <div className="inline-flex gap-1">
+                                                <Button
+                                                    size="xs"
+                                                    variant="plain"
+                                                    icon={<PiPencil />}
+                                                    onClick={() =>
+                                                        openEdit(alert)
+                                                    }
+                                                />
+                                                <Button
+                                                    size="xs"
+                                                    variant="plain"
+                                                    icon={<PiTrash />}
+                                                    onClick={() =>
+                                                        setDeleteTarget(alert)
+                                                    }
                                                 />
                                             </div>
-                                            <div className="flex-1">
-                                                <div className="flex items-center gap-2">
-                                                    <span className="font-medium heading-text">
-                                                        {THRESHOLD_LABELS[threshold.level]}
-                                                    </span>
-                                                    <Badge
-                                                        variant="solid"
-                                                        color={color}
-                                                        className="text-xs"
-                                                    >
-                                                        {threshold.level}%
-                                                    </Badge>
-                                                </div>
-                                                <div className="mt-1 flex items-center gap-3 text-xs text-gray-500">
-                                                    <span
-                                                        className={classNames(
-                                                            'flex items-center gap-1',
-                                                            channels.email &&
-                                                                'text-blue-600 dark:text-blue-400',
-                                                        )}
-                                                    >
-                                                        <PiEnvelope className="w-3 h-3" />
-                                                        Email
-                                                    </span>
-                                                    <span
-                                                        className={classNames(
-                                                            'flex items-center gap-1',
-                                                            channels.webhook &&
-                                                                'text-blue-600 dark:text-blue-400',
-                                                        )}
-                                                    >
-                                                        <PiWebcam className="w-3 h-3" />
-                                                        Webhook
-                                                    </span>
-                                                    <span
-                                                        className={classNames(
-                                                            'flex items-center gap-1',
-                                                            channels.sms &&
-                                                                'text-blue-600 dark:text-blue-400',
-                                                        )}
-                                                    >
-                                                        <PiPhone className="w-3 h-3" />
-                                                        SMS
-                                                    </span>
-                                                </div>
-                                            </div>
-                                        </div>
-                                        <Switcher
-                                            checked={threshold.enabled}
-                                            onChange={() => handleThresholdToggle(threshold.level)}
-                                        />
-                                    </div>
+                                        </Td>
+                                    </Tr>
                                 )
                             })}
-                        </div>
-                    </Card>
+                        </TBody>
+                    </Table>
+                )}
+            </Card>
 
-                    {/* Notification channels */}
-                    <Card>
-                        <div className="flex items-center gap-3 mb-6">
-                            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-violet-100 dark:bg-violet-500/20">
-                                <PiEnvelope className="h-5 w-5 text-violet-600 dark:text-violet-400" />
-                            </div>
-                            <div>
-                                <h4 className="font-semibold heading-text">
-                                    Canales de Notificación
-                                </h4>
-                                <p className="text-sm text-gray-500">
-                                    Selecciona los canales por los cuales recibirás las alertas
-                                </p>
-                            </div>
-                        </div>
-
-                        <div className="space-y-6">
-                            {/* Email */}
-                            <div className="flex items-center justify-between">
-                                <div className="flex items-center gap-4">
-                                    <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-blue-100 dark:bg-blue-500/20">
-                                        <PiEnvelope className="h-5 w-5 text-blue-600 dark:text-blue-400" />
-                                    </div>
-                                    <div>
-                                        <div className="font-medium heading-text">Email</div>
-                                        <div className="text-sm text-gray-500">
-                                            Recibe alertas en tu correo electrónico
-                                        </div>
-                                    </div>
-                                </div>
-                                <Switcher
-                                    checked={channels.email}
-                                    onChange={() =>
-                                        setChannels((prev) => ({
-                                            ...prev,
-                                            email: !prev.email,
-                                        }))
-                                    }
-                                />
-                            </div>
-
-                            {channels.email && (
-                                <div className="ml-14">
-                                    <label className="mb-1 block text-sm font-medium text-gray-600 dark:text-gray-300">
-                                        Correo electrónico
-                                    </label>
-                                    <Input
-                                        type="email"
-                                        placeholder="admin@empresa.com"
-                                        defaultValue="admin@tekoverify.com"
-                                    />
-                                </div>
-                            )}
-
-                            {/* Webhook */}
-                            <div className="flex items-center justify-between">
-                                <div className="flex items-center gap-4">
-                                    <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-purple-100 dark:bg-purple-500/20">
-                                        <PiWebcam className="h-5 w-5 text-purple-600 dark:text-purple-400" />
-                                    </div>
-                                    <div>
-                                        <div className="font-medium heading-text">Webhook</div>
-                                        <div className="text-sm text-gray-500">
-                                            Envía notificaciones a una URL personalizada
-                                        </div>
-                                    </div>
-                                </div>
-                                <Switcher
-                                    checked={channels.webhook}
-                                    onChange={() =>
-                                        setChannels((prev) => ({
-                                            ...prev,
-                                            webhook: !prev.webhook,
-                                        }))
-                                    }
-                                />
-                            </div>
-
-                            {channels.webhook && (
-                                <div className="ml-14">
-                                    <label className="mb-1 block text-sm font-medium text-gray-600 dark:text-gray-300">
-                                        URL del webhook
-                                    </label>
-                                    <Input
-                                        placeholder="https://api.tu-servicio.com/webhooks/alertas"
-                                        value={webhookUrl}
-                                        onChange={(e) => setWebhookUrl(e.target.value)}
-                                    />
-                                </div>
-                            )}
-
-                            {/* SMS */}
-                            <div className="flex items-center justify-between">
-                                <div className="flex items-center gap-4">
-                                    <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-green-100 dark:bg-green-500/20">
-                                        <PiPhone className="h-5 w-5 text-green-600 dark:text-green-400" />
-                                    </div>
-                                    <div>
-                                        <div className="font-medium heading-text">SMS</div>
-                                        <div className="text-sm text-gray-500">
-                                            Recibe alertas por mensaje de texto
-                                        </div>
-                                    </div>
-                                </div>
-                                <Switcher
-                                    checked={channels.sms}
-                                    onChange={() =>
-                                        setChannels((prev) => ({
-                                            ...prev,
-                                            sms: !prev.sms,
-                                        }))
-                                    }
-                                />
-                            </div>
-
-                            {channels.sms && (
-                                <div className="ml-14">
-                                    <label className="mb-1 block text-sm font-medium text-gray-600 dark:text-gray-300">
-                                        Número de teléfono
-                                    </label>
-                                    <Input
-                                        placeholder="+595 9XX XXX XXX"
-                                        value={smsNumber}
-                                        onChange={(e) => setSmsNumber(e.target.value)}
-                                    />
-                                </div>
-                            )}
-                        </div>
-                    </Card>
-
-                    {/* Actions */}
-                    <div className="flex items-center justify-end gap-3">
-                        <Button variant="outline" onClick={handleReset}>
-                            Restablecer
-                        </Button>
-                        <Button
-                            variant="solid"
-                            onClick={handleSave}
-                            disabled={saving}
-                        >
-                            {saving ? (
-                                <>
-                                    <Spinner className="w-4 h-4" />
-                                    <span>Guardando...</span>
-                                </>
-                            ) : (
-                                <>
-                                    <PiCheckCircle className="w-4 h-4" />
-                                    <span>Guardar configuración</span>
-                                </>
-                            )}
-                        </Button>
+            <Dialog
+                isOpen={editOpen}
+                onClose={() => setEditOpen(false)}
+                width={520}
+            >
+                <h5 className="font-semibold mb-4">
+                    {editingId ? 'Editar alerta' : 'Nueva alerta'}
+                </h5>
+                <div className="space-y-4">
+                    <div>
+                        <label className="mb-1 block text-sm font-medium">
+                            Umbral de uso (%)
+                        </label>
+                        <Input
+                            type="number"
+                            min={1}
+                            max={100}
+                            value={form.thresholdPct}
+                            onChange={(e) =>
+                                setForm((f) => ({
+                                    ...f,
+                                    thresholdPct: Number(e.target.value),
+                                }))
+                            }
+                            placeholder="80"
+                        />
                     </div>
-                </motion.div>
-            )}
+                    <div>
+                        <label className="mb-1 block text-sm font-medium">
+                            Canal
+                        </label>
+                        <Select
+                            options={CHANNELS}
+                            value={CHANNELS.find(
+                                (c) => c.value === form.channel,
+                            )}
+                            onChange={(opt) =>
+                                setForm((f) => ({
+                                    ...f,
+                                    channel:
+                                        (opt?.value as UsageAlertChannel) ??
+                                        'email',
+                                }))
+                            }
+                        />
+                    </div>
+                    <div>
+                        <label className="mb-1 block text-sm font-medium">
+                            {channelMeta.targetLabel}
+                        </label>
+                        <Input
+                            value={form.target}
+                            onChange={(e) =>
+                                setForm((f) => ({
+                                    ...f,
+                                    target: e.target.value,
+                                }))
+                            }
+                            placeholder={channelMeta.placeholder}
+                        />
+                    </div>
+                    <div className="flex items-center gap-2">
+                        <Switcher
+                            checked={form.enabled}
+                            onChange={(checked) =>
+                                setForm((f) => ({ ...f, enabled: checked }))
+                            }
+                        />
+                        <span className="text-sm">Alerta activa</span>
+                    </div>
+                </div>
+                <div className="mt-5 flex justify-end gap-2">
+                    <Button
+                        variant="default"
+                        onClick={() => setEditOpen(false)}
+                    >
+                        Cancelar
+                    </Button>
+                    <Button
+                        variant="solid"
+                        loading={saving}
+                        onClick={handleSave}
+                    >
+                        Guardar
+                    </Button>
+                </div>
+            </Dialog>
+
+            <ConfirmDialog
+                isOpen={!!deleteTarget}
+                type="danger"
+                title="Eliminar alerta"
+                confirmText="Eliminar"
+                cancelText="Cancelar"
+                confirmButtonProps={{
+                    loading: deleting,
+                    className: 'bg-red-600 hover:bg-red-600',
+                }}
+                onClose={() => setDeleteTarget(null)}
+                onRequestClose={() => setDeleteTarget(null)}
+                onCancel={() => setDeleteTarget(null)}
+                onConfirm={handleDelete}
+            >
+                ¿Eliminar la alerta del {deleteTarget?.thresholdPct}% (
+                {deleteTarget?.target})? Esta acción no se puede deshacer.
+            </ConfirmDialog>
         </div>
     )
 }

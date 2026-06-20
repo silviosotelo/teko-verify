@@ -603,6 +603,63 @@ export interface OcrDebugResponse {
     mrz?: unknown
 }
 
+// ---- Monetización-lite (Sprint 1): Planes / Suscripción / Alertas de uso ----
+export interface BillingPlan {
+    slug: string
+    name: string
+    monthlyQuota: number | null // null = ilimitado
+    priceCents: number
+    currency: string
+    // Shape no especificado en el contrato: lo tratamos defensivamente como
+    // lista de features incluidas (string[]). Ver report (incertidumbre).
+    features: string[]
+    isActive: boolean
+    sortOrder: number
+}
+
+export type SubscriptionStatus = 'active' | 'trialing' | 'past_due' | 'canceled'
+
+export interface TenantSubscription {
+    tenantId: string
+    planSlug: string
+    status: SubscriptionStatus
+    periodStart: string
+    periodEnd: string
+}
+
+export interface SubscriptionUsage {
+    used: number
+    quota: number | null // null = ilimitado
+    periodStart: string
+    periodEnd: string
+}
+
+export interface TenantSubscriptionResponse {
+    subscription: TenantSubscription | null
+    plan: BillingPlan | null
+    usage: SubscriptionUsage
+}
+
+// Canal de notificación de una alerta de uso (alineado al CHECK del backend).
+// SMS no está disponible en v1 (feature oculto).
+export type UsageAlertChannel = 'email' | 'webhook'
+
+export interface UsageAlert {
+    id: string
+    thresholdPct: number
+    channel: UsageAlertChannel
+    target: string
+    enabled: boolean
+    lastFiredAt: string | null
+}
+
+export interface UsageAlertInput {
+    thresholdPct: number
+    channel: UsageAlertChannel
+    target: string
+    enabled: boolean
+}
+
 // Identidad rica extraída del documento (checks[document].detail.extracted).
 export interface ExtractedDocument {
     documento?: {

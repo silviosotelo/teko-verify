@@ -36,6 +36,11 @@ import type {
     WebhookDelivery,
     WebhookListResponse,
     CreateWebhookEndpointResponse,
+    BillingPlan,
+    TenantSubscriptionResponse,
+    TenantSubscription,
+    UsageAlert,
+    UsageAlertInput,
 } from './types'
 
 // baseURL origin-root: NO relativo a /admin-ui/.
@@ -593,6 +598,54 @@ export const tekoApi = {
     // ---- Session export PDF ----
     sessionExportPdfUrl(tenantId: string, sessionId: string) {
         return `/admin/tenants/${tenantId}/sessions/${sessionId}/export-pdf`
+    },
+
+    // ---- Monetización-lite (Sprint 1): Planes / Suscripción / Alertas ----
+    listPlans() {
+        return request<{ plans: BillingPlan[] }>('GET', '/plans')
+    },
+    getSubscription(tenantId: string) {
+        return request<TenantSubscriptionResponse>(
+            'GET',
+            `/tenants/${tenantId}/subscription`,
+        )
+    },
+    setPlan(tenantId: string, planSlug: string) {
+        return request<TenantSubscription>(
+            'PUT',
+            `/tenants/${tenantId}/subscription`,
+            { planSlug },
+        )
+    },
+    listUsageAlerts(tenantId: string) {
+        return request<{ alerts: UsageAlert[] }>(
+            'GET',
+            `/tenants/${tenantId}/usage-alerts`,
+        )
+    },
+    createUsageAlert(tenantId: string, body: UsageAlertInput) {
+        return request<UsageAlert>(
+            'POST',
+            `/tenants/${tenantId}/usage-alerts`,
+            body,
+        )
+    },
+    updateUsageAlert(
+        tenantId: string,
+        alertId: string,
+        body: Partial<UsageAlertInput>,
+    ) {
+        return request<UsageAlert>(
+            'PUT',
+            `/tenants/${tenantId}/usage-alerts/${alertId}`,
+            body,
+        )
+    },
+    deleteUsageAlert(tenantId: string, alertId: string) {
+        return request<void>(
+            'DELETE',
+            `/tenants/${tenantId}/usage-alerts/${alertId}`,
+        )
     },
 }
 

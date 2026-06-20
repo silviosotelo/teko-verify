@@ -19,6 +19,7 @@ import { webhookDispatcher } from "../webhooks/dispatcher";
 import { evidenceStore } from "../lib/evidenceStore";
 import { isMailerConfigured, isValidEmail, sendVerificationEmail } from "../lib/mailer";
 import { isDocumentType } from "../types";
+import { getQuotaStatus } from "../lib/billing";
 import type {
   CreateSessionResponse,
   DeleteSessionResponse,
@@ -97,6 +98,28 @@ tenantRouter.post("/sessions", async (req: Request, res: Response) => {
         res.status(200).json(resp);
         return;
       }
+    }
+
+    // Plan gating (Sprint 1 — metering): se aplica SÓLO a creaciones genuinamente
+    // nuevas (después del short-circuit idempotente: reusar una sesión existente NO
+    // consume cuota). Cuenta el uso del período y bloquea con 402 si la cuota está
+    // agotada. FAIL-OPEN: si el cálculo lanza, se loguea y se sigue (no se bloquea por
+    // un error interno de billing). El 402 es un camino de ÉXITO, no del catch.
+    try {
+      const quota = await getQuotaStatus(tenant.id);
+      if (quota.exceeded) {
+        res.status(402).json({
+          error: "quota_exceeded",
+          detail: `Monthly verification quota reached for plan '${quota.plan.slug}'.`,
+          used: quota.used,
+          quota: quota.quota,
+        });
+        return;
+      }
+    } catch (e) {
+      // Fail-open: nunca bloquear la creación por un fallo del metering.
+      // eslint-disable-next-line no-console
+      console.error("billing_gate_failed", (e as Error).message);
     }
 
     const requestedAssurance = body.assuranceRequired ?? tenant.policies.assuranceRequired;

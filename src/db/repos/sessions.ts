@@ -188,6 +188,25 @@ export async function getById(
   return res.rows[0] ? mapSession(res.rows[0]) : null;
 }
 
+/**
+ * Conteo de sesiones del tenant creadas en la ventana [periodStart, periodEnd)
+ * (ISO 8601), CUALQUIER estado — base del metering de billing (Sprint 1). Mismo
+ * criterio que el endpoint de usage (cuenta por created_at). Scopeado por tenant.
+ */
+export async function countInPeriod(
+  tenantId: string,
+  periodStart: string,
+  periodEnd: string,
+  exec: Executor = pool
+): Promise<number> {
+  const res = await exec.query<{ count: string }>(
+    `SELECT COUNT(*)::text AS count FROM verification_sessions
+      WHERE tenant_id = $1 AND created_at >= $2 AND created_at < $3`,
+    [tenantId, periodStart, periodEnd]
+  );
+  return parseInt(res.rows[0].count, 10);
+}
+
 /** Fila de uso agregado: conteo de sesiones por (app, estado) en un período. */
 export interface UsageRow {
   appId: string | null;

@@ -846,6 +846,63 @@ export interface AppResponse {
   updatedAt: string;
 }
 
+// ---- Billing / metering (Sprint 1 — monetización-lite) ------------------- //
+
+/** Estado de la suscripción de un tenant a un plan. */
+export type SubscriptionStatus = "active" | "past_due" | "canceled";
+
+/** Canal de una alerta de consumo. */
+export type UsageAlertChannel = "email" | "webhook";
+
+/**
+ * billing_plans — catálogo GLOBAL de planes (NO por tenant). `slug` es la PK.
+ * `monthlyQuota` = verificaciones/mes; null = ILIMITADO. `features` JSONB libre.
+ */
+export interface BillingPlan {
+  slug: string;
+  name: string;
+  /** Verificaciones/mes. null = ilimitado. */
+  monthlyQuota: number | null;
+  priceCents: number;
+  currency: string;
+  /** Bullets de características del plan (para el pricing). */
+  features: string[];
+  isActive: boolean;
+  sortOrder: number;
+  createdAt: string; // ISO 8601
+}
+
+/**
+ * tenant_subscriptions — suscripción del tenant a un plan (1:1). Los tenants SIN
+ * fila se tratan como plan 'free' implícito.
+ */
+export interface TenantSubscription {
+  tenantId: string;
+  planSlug: string;
+  status: SubscriptionStatus;
+  periodStart: string; // ISO 8601
+  periodEnd: string; // ISO 8601
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * usage_alerts — alerta de consumo por umbral (% de la cuota) por tenant. El
+ * disparo/notificación efectivo es otra pieza; acá vive la configuración.
+ */
+export interface UsageAlert {
+  id: string;
+  tenantId: string;
+  /** Umbral de disparo en % de la cuota (1..100). */
+  thresholdPct: number;
+  channel: UsageAlertChannel;
+  /** Destino según el canal (email o URL de webhook). */
+  target: string;
+  enabled: boolean;
+  lastFiredAt: string | null;
+  createdAt: string;
+}
+
 // ---- Questionnaires (formularios custom por workflow) — P2 --------------- //
 
 /** Tipo de campo de una pregunta de cuestionario. */

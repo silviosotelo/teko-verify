@@ -79,8 +79,13 @@ import type {
   WorkflowResponse,
   Questionnaire,
   QuestionnaireResponse,
+  BillingPlan,
+  TenantSubscription,
+  UsageAlert,
+  UsageAlertChannel,
 } from "../types";
 import { WEBHOOK_EVENTS } from "../types";
+import { getQuotaStatus } from "../lib/billing";
 
 /** Base pública para construir el verifyUrl de la sesión de test con cámara. */
 const PUBLIC_BASE_URL = (
@@ -979,6 +984,250 @@ adminRouter.get("/tenants/:id/audit", requirePermission("view_usage"), async (re
   });
   res.json({ entries });
 });
+
+// ---- Billing / metering (Sprint 1 — monetización-lite) ------------------- //
+
+/** Catálogo → contrato exacto del front (sin createdAt). */
+function toPlanResponse(p: BillingPlan) {
+  return {
+    slug: p.slug,
+    name: p.name,
+    monthlyQuota: p.monthlyQuota,
+    priceCents: p.priceCents,
+    currency: p.currency,
+    features: p.features,
+    isActive: p.isActive,
+    sortOrder: p.sortOrder,
+  };
+}
+
+/** Suscripción → contrato exacto del front (sin created/updated). null si free implícito. */
+function toSubscriptionResponse(s: TenantSubscription | null) {
+  if (!s) return null;
+  return {
+    tenantId: s.tenantId,
+    planSlug: s.planSlug,
+    status: s.status,
+    periodStart: s.periodStart,
+    periodEnd: s.periodEnd,
+  };
+}
+
+/** Alerta → item exacto del front: {id,thresholdPct,channel,target,enabled,lastFiredAt}. */
+function toUsageAlertResponse(a: UsageAlert) {
+  return {
+    id: a.id,
+    thresholdPct: a.thresholdPct,
+    channel: a.channel,
+    target: a.target,
+    enabled: a.enabled,
+    lastFiredAt: a.lastFiredAt,
+  };
+}
+
+const USAGE_ALERT_CHANNELS = new Set<UsageAlertChannel>(["email", "webhook"]);
+
+// GET /admin/plans → catálogo global de planes. Cualquier admin autenticado (sólo
+// requiere sesión válida vía adminGuard; sin permiso adicional, como GET /tenants).
+adminRouter.get("/plans", async (_req: Request, res: Response) => {
+  const plans = await repos.billingPlans.list();
+  res.json({ plans: plans.map(toPlanResponse) });
+});
+
+// GET /admin/tenants/:id/subscription → plan + suscripción + uso del período.
+adminRouter.get(
+  "/tenants/:id/subscription",
+  requirePermission("view_usage"),
+  async (req: Request, res: Response) => {
+    const tenant = await repos.tenants.getById(req.params.id);
+    if (!tenant) {
+      res.status(404).json({ error: "tenant_not_found" });
+      return;
+    }
+    const q = await getQuotaStatus(tenant.id);
+    res.json({
+      subscription: toSubscriptionResponse(q.subscription),
+      plan: toPlanResponse(q.plan),
+      usage: {
+        used: q.used,
+        quota: q.quota,
+        periodStart: q.periodStart,
+        periodEnd: q.periodEnd,
+      },
+    });
+  }
+);
+
+// PUT /admin/tenants/:id/subscription {planSlug} → set plan (upsert) + audit.
+adminRouter.put(
+  "/tenants/:id/subscription",
+  requirePermission("manage_tenants"),
+  async (req: Request, res: Response) => {
+    const tenant = await repos.tenants.getById(req.params.id);
+    if (!tenant) {
+      res.status(404).json({ error: "tenant_not_found" });
+      return;
+    }
+    const planSlug = typeof req.body?.planSlug === "string" ? req.body.planSlug.trim() : "";
+    if (!planSlug) {
+      res.status(400).json({ error: "plan_slug_required" });
+      return;
+    }
+    const plan = await repos.billingPlans.getBySlug(planSlug);
+    if (!plan) {
+      res.status(400).json({ error: "plan_not_found" });
+      return;
+    }
+    const subscription = await repos.subscriptions.setPlan(tenant.id, planSlug);
+    await repos.auditLog.record({
+      tenantId: tenant.id,
+      actor: `admin:${req.adminOperator?.operatorId ?? "?"}`,
+      event: "subscription.updated",
+      detail: { planSlug },
+      ip: req.ip ?? null,
+    });
+    // El front consume la suscripción BARE (client.setPlan → TenantSubscription).
+    res.json(toSubscriptionResponse(subscription));
+  }
+);
+
+// GET /admin/tenants/:id/usage-alerts → alertas de consumo del tenant.
+adminRouter.get(
+  "/tenants/:id/usage-alerts",
+  requirePermission("view_usage"),
+  async (req: Request, res: Response) => {
+    const tenant = await repos.tenants.getById(req.params.id);
+    if (!tenant) {
+      res.status(404).json({ error: "tenant_not_found" });
+      return;
+    }
+    const alerts = await repos.usageAlerts.listByTenant(tenant.id);
+    res.json({ alerts: alerts.map(toUsageAlertResponse) });
+  }
+);
+
+/** Valida thresholdPct entero en 1..100. */
+function isValidThreshold(x: unknown): x is number {
+  return typeof x === "number" && Number.isInteger(x) && x >= 1 && x <= 100;
+}
+
+// POST /admin/tenants/:id/usage-alerts {thresholdPct, channel, target, enabled?}
+adminRouter.post(
+  "/tenants/:id/usage-alerts",
+  requirePermission("manage_tenants"),
+  async (req: Request, res: Response) => {
+    const tenant = await repos.tenants.getById(req.params.id);
+    if (!tenant) {
+      res.status(404).json({ error: "tenant_not_found" });
+      return;
+    }
+    const { thresholdPct, channel, target, enabled } = req.body ?? {};
+    if (!isValidThreshold(thresholdPct)) {
+      res.status(400).json({ error: "invalid_threshold_pct" });
+      return;
+    }
+    if (typeof channel !== "string" || !USAGE_ALERT_CHANNELS.has(channel as UsageAlertChannel)) {
+      res.status(400).json({ error: "invalid_channel" });
+      return;
+    }
+    if (typeof target !== "string" || !target.trim()) {
+      res.status(400).json({ error: "target_required" });
+      return;
+    }
+    const alert = await repos.usageAlerts.create({
+      tenantId: tenant.id,
+      thresholdPct,
+      channel: channel as UsageAlertChannel,
+      target: target.trim(),
+      enabled: typeof enabled === "boolean" ? enabled : undefined,
+    });
+    await repos.auditLog.record({
+      tenantId: tenant.id,
+      actor: `admin:${req.adminOperator?.operatorId ?? "?"}`,
+      event: "usage_alert.created",
+      detail: { thresholdPct, channel },
+      ip: req.ip ?? null,
+    });
+    res.status(201).json(toUsageAlertResponse(alert));
+  }
+);
+
+// PUT /admin/tenants/:id/usage-alerts/:alertId → update parcial.
+adminRouter.put(
+  "/tenants/:id/usage-alerts/:alertId",
+  requirePermission("manage_tenants"),
+  async (req: Request, res: Response) => {
+    const tenant = await repos.tenants.getById(req.params.id);
+    if (!tenant) {
+      res.status(404).json({ error: "tenant_not_found" });
+      return;
+    }
+    const { thresholdPct, channel, target, enabled } = req.body ?? {};
+    if (thresholdPct !== undefined && !isValidThreshold(thresholdPct)) {
+      res.status(400).json({ error: "invalid_threshold_pct" });
+      return;
+    }
+    if (
+      channel !== undefined &&
+      (typeof channel !== "string" || !USAGE_ALERT_CHANNELS.has(channel as UsageAlertChannel))
+    ) {
+      res.status(400).json({ error: "invalid_channel" });
+      return;
+    }
+    if (target !== undefined && (typeof target !== "string" || !target.trim())) {
+      res.status(400).json({ error: "invalid_target" });
+      return;
+    }
+    if (enabled !== undefined && typeof enabled !== "boolean") {
+      res.status(400).json({ error: "invalid_enabled" });
+      return;
+    }
+    const updated = await repos.usageAlerts.update(tenant.id, req.params.alertId, {
+      thresholdPct: thresholdPct as number | undefined,
+      channel: channel as UsageAlertChannel | undefined,
+      target: typeof target === "string" ? target.trim() : undefined,
+      enabled: enabled as boolean | undefined,
+    });
+    if (!updated) {
+      res.status(404).json({ error: "usage_alert_not_found" });
+      return;
+    }
+    await repos.auditLog.record({
+      tenantId: tenant.id,
+      actor: `admin:${req.adminOperator?.operatorId ?? "?"}`,
+      event: "usage_alert.updated",
+      detail: { alertId: req.params.alertId },
+      ip: req.ip ?? null,
+    });
+    res.json(toUsageAlertResponse(updated));
+  }
+);
+
+// DELETE /admin/tenants/:id/usage-alerts/:alertId → borra la alerta.
+adminRouter.delete(
+  "/tenants/:id/usage-alerts/:alertId",
+  requirePermission("manage_tenants"),
+  async (req: Request, res: Response) => {
+    const tenant = await repos.tenants.getById(req.params.id);
+    if (!tenant) {
+      res.status(404).json({ error: "tenant_not_found" });
+      return;
+    }
+    const deleted = await repos.usageAlerts.remove(tenant.id, req.params.alertId);
+    if (!deleted) {
+      res.status(404).json({ error: "usage_alert_not_found" });
+      return;
+    }
+    await repos.auditLog.record({
+      tenantId: tenant.id,
+      actor: `admin:${req.adminOperator?.operatorId ?? "?"}`,
+      event: "usage_alert.deleted",
+      detail: { alertId: req.params.alertId },
+      ip: req.ip ?? null,
+    });
+    res.json({ deleted: true });
+  }
+);
 
 // ---- Workflows (configurables + versionados) — P0 #1 --------------------- //
 

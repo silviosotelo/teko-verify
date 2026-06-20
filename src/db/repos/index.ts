@@ -21,6 +21,9 @@ export * as webhookDeliveries from "./webhookDeliveries";
 export * as sessionEvents from "./sessionEvents";
 export * as amlEntities from "./amlEntities";
 export * as questionnaires from "./questionnaires";
+export * as billingPlans from "./billingPlans";
+export * as subscriptions from "./subscriptions";
+export * as usageAlerts from "./usageAlerts";
 
 import * as tenants from "./tenants";
 import * as apps from "./apps";
@@ -37,6 +40,9 @@ import * as webhookDeliveries from "./webhookDeliveries";
 import * as sessionEvents from "./sessionEvents";
 import * as amlEntities from "./amlEntities";
 import * as questionnaires from "./questionnaires";
+import * as billingPlans from "./billingPlans";
+import * as subscriptions from "./subscriptions";
+import * as usageAlerts from "./usageAlerts";
 
 /** Agrupador único para inyección/uso conveniente. */
 export const repos = {
@@ -55,4 +61,7 @@ export const repos = {
   sessionEvents,
   amlEntities,
   questionnaires,
+  billingPlans,
+  subscriptions,
+  usageAlerts,
 } as const;
