@@ -48,26 +48,46 @@ export function TenantProvider({ children }: { children: ReactNode }) {
         }
         setLoading(true)
         setError(null)
-        try {
-            const { tenants } = await tekoApi.listTenants()
-            setTenants(tenants)
-            const saved = localStorage.getItem(LS_KEY)
-            const valid =
-                saved && tenants.some((t) => t.id === saved) ? saved : null
-            const next = valid ?? tenants[0]?.id ?? null
-            setCurrentIdState(next)
-            if (next) localStorage.setItem(LS_KEY, next)
-        } catch (e) {
-            setError((e as Error).message)
-        } finally {
-            setLoading(false)
+        // Un fallo transitorio del backend (ej. proceso reiniciándose) NO debe
+        // dejar el selector vacío para siempre: reintentamos una vez con backoff.
+        let lastErr: unknown = null
+        for (let attempt = 0; attempt < 2; attempt++) {
+            try {
+                const { tenants } = await tekoApi.listTenants()
+                setTenants(tenants)
+                const saved = localStorage.getItem(LS_KEY)
+                const valid =
+                    saved && tenants.some((t) => t.id === saved) ? saved : null
+                const next = valid ?? tenants[0]?.id ?? null
+                setCurrentIdState(next)
+                if (next) localStorage.setItem(LS_KEY, next)
+                setLoading(false)
+                return
+            } catch (e) {
+                lastErr = e
+                if (attempt === 0) await new Promise((r) => setTimeout(r, 800))
+            }
         }
+        setError((lastErr as Error)?.message ?? 'Error')
+        setLoading(false)
     }
 
+    // 1) Carga inicial + cambios de `signedIn` (returning user / logout).
     useEffect(() => {
         reload()
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [signedIn])
+
+    // 2) Login en la MISMA carga de página: `signedIn` puede estar ya en `true`
+    //    (persistido) cuando el usuario se loguea, así que el efecto de arriba no
+    //    se re-dispara y el selector quedaría vacío hasta recargar. El AuthProvider
+    //    emite `teko:signed-in` al setear el token → recargamos los tenants ya.
+    useEffect(() => {
+        const onSignedIn = () => reload()
+        window.addEventListener('teko:signed-in', onSignedIn)
+        return () => window.removeEventListener('teko:signed-in', onSignedIn)
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [])
 
     const current = tenants.find((t) => t.id === currentId) ?? null
 

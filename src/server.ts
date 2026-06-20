@@ -236,9 +236,16 @@ app.get("/verify/:token", (_req: Request, res: Response) => {
 const ADMIN_DIST = process.env.TEKO_ADMIN_DIST || path.resolve(__dirname, "..", "admin", "dist");
 if (fs.existsSync(ADMIN_DIST)) {
   // 1) Estáticos del dashboard (assets compilados ganan sobre el fallback).
-  //    Cache-Control: no-cache para evitar cache de bundles viejos tras deploys.
+  //    /admin-ui/assets/* lleva hash de contenido en el nombre → inmutable y
+  //    cacheable a largo plazo (un deploy genera nombres nuevos, nunca sirve
+  //    bundles viejos). El resto (index.html, etc.) va no-cache para que el shell
+  //    HTML siempre referencie los hashes vigentes tras un deploy.
   app.use("/admin-ui", (req, res, next) => {
-    res.set("Cache-Control", "no-cache");
+    if (req.path.startsWith("/assets/")) {
+      res.set("Cache-Control", "public, max-age=31536000, immutable");
+    } else {
+      res.set("Cache-Control", "no-cache");
+    }
     next();
   });
   app.use("/admin-ui", express.static(ADMIN_DIST));

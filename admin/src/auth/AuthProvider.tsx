@@ -66,6 +66,12 @@ function AuthProvider({ children }: AuthProviderProps) {
         if (user) {
             setUser(user)
         }
+
+        // `signedIn` puede estar ya en `true` (persistido de una sesión previa cuyo
+        // token expiró), así que su efecto no se re-dispara al loguear. Avisamos a
+        // los consumidores (TenantContext) que el token YA está en storage para que
+        // carguen datos en la primera visita, sin necesidad de recargar la página.
+        window.dispatchEvent(new Event('teko:signed-in'))
     }
 
     const handleSignOut = () => {

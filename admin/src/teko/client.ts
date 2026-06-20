@@ -61,6 +61,10 @@ function getToken(): string | null {
 
 function redirectToLogin(): void {
     localStorage.removeItem(TOKEN_NAME_IN_STORAGE)
+    // Mantener `signedIn` consistente con el token: si lo dejamos persistido en
+    // `true`, el próximo login no togglea `signedIn` y el efecto que recarga datos
+    // no se re-dispara (selector vacío hasta recargar). Limpiar evita ese desync.
+    localStorage.removeItem('sessionUser')
     if (!window.location.pathname.endsWith('/sign-in')) {
         window.location.href = '/admin-ui/sign-in'
     }
