@@ -38,6 +38,7 @@ import { mergePolicy } from "../lib/policy";
 import { requestContext } from "../lib/requestContext";
 import { analyzeDeviceIp } from "../lib/deviceIp";
 import { resolveTestSessionTtlSec } from "./testSessionTtl";
+import { parseConfigScope, isValidConfigPut } from "./configValidation";
 import { decodeBase64Image } from "../lib/images";
 import { ensureRasterImage } from "../lib/raster";
 import { isMailerConfigured, isValidEmail, sendVerificationEmail } from "../lib/mailer";
@@ -2863,5 +2864,62 @@ adminRouter.post(
       ip: req.ip ?? null,
     });
     res.json({ delivery });
+  }
+);
+
+// ---- Config Plane (Fase 0) — config por scope, versionada + auditada --------- //
+
+// GET /admin/tenants/:id/config?scopeType=&scopeId= → valores vigentes del scope.
+adminRouter.get(
+  "/tenants/:id/config",
+  requirePermission("manage_tenants"),
+  async (req: Request, res: Response) => {
+    const tenant = await repos.tenants.getById(req.params.id);
+    if (!tenant) {
+      res.status(404).json({ error: "tenant_not_found" });
+      return;
+    }
+    const scope = parseConfigScope(req.query as Record<string, unknown>, tenant.id);
+    if (!scope) {
+      res.status(400).json({ error: "invalid_scope" });
+      return;
+    }
+    const values = await repos.configValues.listByScope(scope.scopeType, scope.scopeId);
+    res.json({ scopeType: scope.scopeType, scopeId: scope.scopeId, values });
+  }
+);
+
+// PUT /admin/tenants/:id/config {scopeType, scopeId?, namespace, key, value}
+// → crea una NUEVA versión de la clave en ese scope. set() escribe config_audit.
+adminRouter.put(
+  "/tenants/:id/config",
+  requirePermission("manage_tenants"),
+  async (req: Request, res: Response) => {
+    const tenant = await repos.tenants.getById(req.params.id);
+    if (!tenant) {
+      res.status(404).json({ error: "tenant_not_found" });
+      return;
+    }
+    const scope = parseConfigScope(
+      { scopeType: req.body?.scopeType, scopeId: req.body?.scopeId },
+      tenant.id
+    );
+    if (!scope) {
+      res.status(400).json({ error: "invalid_scope" });
+      return;
+    }
+    if (!isValidConfigPut(req.body)) {
+      res.status(400).json({ error: "namespace_key_value_required" });
+      return;
+    }
+    const created = await repos.configValues.set({
+      scopeType: scope.scopeType,
+      scopeId: scope.scopeId,
+      namespace: req.body.namespace,
+      key: req.body.key,
+      value: req.body.value,
+      actor: `admin:${req.adminOperator?.operatorId ?? "?"}`,
+    });
+    res.json(created);
   }
 );
