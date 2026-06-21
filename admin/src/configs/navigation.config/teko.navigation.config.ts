@@ -288,6 +288,16 @@ const tekoNavigationConfig: NavigationTree[] = [
                 authority: [],
                 subMenu: [],
             },
+            {
+                key: 'teko.configuracion',
+                path: '/configuracion',
+                title: 'Configuración',
+                translateKey: '',
+                icon: 'PiSlidersHorizontalDuotone',
+                type: NAV_ITEM_TYPE_ITEM,
+                authority: [],
+                subMenu: [],
+            },
         ],
     },
     {

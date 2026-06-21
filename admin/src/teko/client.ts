@@ -132,6 +132,18 @@ async function requestBlob(path: string): Promise<Blob> {
     return res.blob()
 }
 
+export interface ConfigValue {
+    id: string
+    scopeType: string
+    scopeId: string | null
+    namespace: string
+    key: string
+    value: unknown
+    version: number
+    updatedBy: string
+    updatedAt: string
+}
+
 export const tekoApi = {
     // ---- Operador actual + RBAC ----
     me() {
@@ -560,6 +572,22 @@ export const tekoApi = {
         return request<{ deleted: boolean }>(
             'DELETE', `/tenants/${tenantId}/email-templates/${encodeURIComponent(type)}`,
         )
+    },
+
+    // ---- Config Plane (Fase 0) — config por scope, versionada ----
+    getConfig(tenantId: string, scopeType = 'tenant', scopeId?: string) {
+        const qs = new URLSearchParams({ scopeType })
+        if (scopeId) qs.set('scopeId', scopeId)
+        return request<{ scopeType: string; scopeId: string | null; values: ConfigValue[] }>(
+            'GET',
+            `/tenants/${tenantId}/config?${qs.toString()}`,
+        )
+    },
+    setConfig(
+        tenantId: string,
+        body: { scopeType: string; scopeId?: string; namespace: string; key: string; value: unknown },
+    ) {
+        return request<ConfigValue>('PUT', `/tenants/${tenantId}/config`, body)
     },
 
     // ---- Rate limits por tenant ----

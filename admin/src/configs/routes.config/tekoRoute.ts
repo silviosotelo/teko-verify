@@ -125,6 +125,13 @@ const tekoRoute: Routes = [
         authority: [],
         meta: { pageContainerType: 'contained' },
     },
+    {
+        key: 'teko.configuracion',
+        path: '/configuracion',
+        component: lazy(() => import('@/views/teko/Configuracion')),
+        authority: [],
+        meta: { pageContainerType: 'contained' },
+    },
 ]
 
 export default tekoRoute
