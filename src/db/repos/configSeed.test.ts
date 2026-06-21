@@ -1,49 +1,98 @@
 import { describe, it, expect } from "vitest";
-import type { Executor } from "../executor";
-import { resolveConfig } from "./configValues";
-import { MATCH_THRESHOLD, LIVENESS_THRESHOLD, GLASSES_MAX } from "../../config";
+import { readFileSync } from "fs";
+import path from "path";
+import {
+  MATCH_THRESHOLD,
+  LIVENESS_THRESHOLD,
+  GLASSES_MAX,
+  AML_MATCH_THRESHOLD,
+  AML_NAME_ONLY_MARGIN,
+  FACE_SEARCH_THRESHOLD,
+} from "../../config";
 
 /**
- * Mock del estado POST-seed (migración 0020): sólo el system scope tiene filas, con
- * los valores espejo de config.ts. Verifica que un tenant SIN overrides resuelve a
- * los defaults del system, y que el seed NO derivó de config.ts (mismo número).
+ * Drift guard (Task 4) — NO TAUTOLÓGICO.
+ *
+ * Compara las DOS fuentes reales que pueden divergir:
+ *   1. El seed del SQL: migrations/0020_config_plane.sql, leído con fs.readFileSync
+ *      y parseado con un regex sobre el INSERT real.
+ *   2. Las constantes de src/config.ts, importadas directamente.
+ *
+ * NO hay valores numéricos hardcodeados en este test como tercera fuente.
+ * Si alguien cambia MATCH_THRESHOLD en config.ts sin actualizar el INSERT del SQL
+ * (o viceversa), el test FALLA — ese es el punto.
+ *
+ * Antes era tautológico: el mock de seededSystemExec() repetía los mismos literales
+ * que los expect (0.4, 0.6, 0.5 aparecían en las tres fuentes: mock, expect, constante).
+ * Ahora el valor leído por el test proviene exclusivamente del parseo del archivo SQL.
  */
-function seededSystemExec(): Executor {
-  const seed: Record<string, number> = {
-    matchCosine: 0.4,
-    livenessScore: 0.6,
-    qualityGlassesPct: 0.5,
-  };
-  return {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    async query(text: string, params?: unknown[]): Promise<any> {
-      const norm = text.replace(/\s+/g, " ").trim();
-      if (!/SELECT \* FROM config_values WHERE scope_type = \$1/i.test(norm)) return { rows: [], rowCount: 0 };
-      const scopeType = String(params?.[0]);
-      const key = String(params?.[params.length - 1]);
-      if (scopeType === "system" && key in seed) {
-        return { rows: [{ id: "s", scope_type: "system", scope_id: null, namespace: "thresholds", key, value: seed[key], version: 1, updated_by: "system:seed", updated_at: new Date() }], rowCount: 1 };
-      }
-      return { rows: [], rowCount: 0 };
-    },
-  };
+
+const SQL_FILE = path.resolve(
+  __dirname,
+  "../../..",
+  "migrations",
+  "0020_config_plane.sql"
+);
+
+/**
+ * Parsea las filas INSERT del scope 'system'/'thresholds' del SQL y devuelve
+ * un Map de key → valor numérico.
+ *
+ * Formato esperado en el INSERT:
+ *   ('system', NULL, 'thresholds', 'KEY', 'VALUE'::jsonb, ...)
+ */
+function parseSeedValues(sqlText: string): Map<string, number> {
+  const map = new Map<string, number>();
+  const rowRe =
+    /\(\s*'system'\s*,\s*NULL\s*,\s*'thresholds'\s*,\s*'(\w+)'\s*,\s*'([\d.]+)'::jsonb/g;
+  let m: RegExpExecArray | null;
+  while ((m = rowRe.exec(sqlText)) !== null) {
+    map.set(m[1], parseFloat(m[2]));
+  }
+  return map;
 }
 
-describe("system seed mirrors config.ts", () => {
-  const scope = { tenantId: "t-fresh" }; // tenant sin overrides
+/**
+ * Devuelve el valor parseado del SQL para 'key', o lanza un error descriptivo
+ * si no se encontró (para que el fallo del test sea claro).
+ */
+function seedVal(map: Map<string, number>, key: string): number {
+  const v = map.get(key);
+  if (v === undefined) {
+    throw new Error(
+      `Clave '${key}' no encontrada en migrations/0020_config_plane.sql. ` +
+        `Verificar que el INSERT existe y que el formato del archivo coincide con el regex.`
+    );
+  }
+  return v;
+}
 
-  it("matchCosine system == MATCH_THRESHOLD default (0.40)", async () => {
-    expect(MATCH_THRESHOLD).toBe(0.4); // guard de drift del default de código
-    expect(await resolveConfig<number>("thresholds", "matchCosine", scope, seededSystemExec())).toBe(0.4);
+describe("config.ts ↔ migration seed — drift guard (Task 4)", () => {
+  // Lectura y parseo del SQL real — si la clave no existe en el INSERT, seedVal() falla.
+  const sqlText = readFileSync(SQL_FILE, "utf8");
+  const seed = parseSeedValues(sqlText);
+
+  it("matchCosine (SQL seed) == MATCH_THRESHOLD (config.ts)", () => {
+    expect(seedVal(seed, "matchCosine")).toBe(MATCH_THRESHOLD);
   });
 
-  it("livenessScore system == LIVENESS_THRESHOLD default (0.60)", async () => {
-    expect(LIVENESS_THRESHOLD).toBe(0.6);
-    expect(await resolveConfig<number>("thresholds", "livenessScore", scope, seededSystemExec())).toBe(0.6);
+  it("livenessScore (SQL seed) == LIVENESS_THRESHOLD (config.ts)", () => {
+    expect(seedVal(seed, "livenessScore")).toBe(LIVENESS_THRESHOLD);
   });
 
-  it("qualityGlassesPct system == GLASSES_MAX default (0.50)", async () => {
-    expect(GLASSES_MAX).toBe(0.5);
-    expect(await resolveConfig<number>("thresholds", "qualityGlassesPct", scope, seededSystemExec())).toBe(0.5);
+  it("qualityGlassesPct (SQL seed) == GLASSES_MAX (config.ts)", () => {
+    expect(seedVal(seed, "qualityGlassesPct")).toBe(GLASSES_MAX);
+  });
+
+  it("amlMatch (SQL seed) == AML_MATCH_THRESHOLD (config.ts)", () => {
+    expect(seedVal(seed, "amlMatch")).toBe(AML_MATCH_THRESHOLD);
+  });
+
+  it("amlNameOnlyMargin (SQL seed) == AML_NAME_ONLY_MARGIN (config.ts)", () => {
+    expect(seedVal(seed, "amlNameOnlyMargin")).toBe(AML_NAME_ONLY_MARGIN);
+  });
+
+  it("faceSearch (SQL seed) == FACE_SEARCH_THRESHOLD (config.ts)", () => {
+    expect(seedVal(seed, "faceSearch")).toBe(FACE_SEARCH_THRESHOLD);
   });
 });
