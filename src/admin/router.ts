@@ -2869,7 +2869,8 @@ adminRouter.post(
 
 // ---- Config Plane (Fase 0) — config por scope, versionada + auditada --------- //
 
-// GET /admin/tenants/:id/config?scopeType=&scopeId= → valores vigentes del scope.
+// GET /admin/tenants/:id/config?scopeType= → valores vigentes del scope.
+// Nota: ?scopeId= NO aplica — el scope 'tenant' ancla al :id de la ruta (scopeId ignorado).
 adminRouter.get(
   "/tenants/:id/config",
   requirePermission("manage_tenants"),
@@ -2891,6 +2892,14 @@ adminRouter.get(
 
 // PUT /admin/tenants/:id/config {scopeType, scopeId?, namespace, key, value}
 // → crea una NUEVA versión de la clave en ese scope. set() escribe config_audit.
+//
+// DECISIÓN FASE 0: el permiso manage_tenants (solo owner en RBAC) protege TANTO
+// el scope 'system' como 'tenant'. Esto es INTENCIONAL: en Fase 0 no existe un
+// ownership check que permita a un tenant-admin editar su propia config. Ese
+// permiso más fino llegará en Fase 1, donde se verificará que el operador es
+// dueño del tenant de la ruta antes de reducir el requisito a manage_config
+// (o equivalente) para scope 'tenant'. Por ahora, solo platform-owners pueden
+// tocar config de cualquier scope.
 adminRouter.put(
   "/tenants/:id/config",
   requirePermission("manage_tenants"),
