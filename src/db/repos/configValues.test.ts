@@ -107,3 +107,62 @@ describe("configValues.listByScope", () => {
     expect(rows[0]).toMatchObject({ key: "matchCosine", value: 0.42, version: 2 });
   });
 });
+
+describe("resolveConfig — cascada workflow→app→tenant→system", () => {
+  // Mock que responde getCurrent según el scope_type embebido en params.
+  function cascadeExec(present: Record<string, number>): Executor {
+    return {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      async query(text: string, params?: unknown[]): Promise<any> {
+        const norm = text.replace(/\s+/g, " ").trim();
+        if (!/SELECT \* FROM config_values WHERE scope_type = \$1/i.test(norm)) {
+          return { rows: [], rowCount: 0 };
+        }
+        const scopeType = String(params?.[0]);
+        if (scopeType in present) {
+          return {
+            rows: [{
+              id: scopeType, scope_type: scopeType, scope_id: scopeType === "system" ? null : `${scopeType}-id`,
+              namespace: "thresholds", key: "matchCosine", value: present[scopeType],
+              version: 1, updated_by: "x", updated_at: new Date(),
+            }],
+            rowCount: 1,
+          };
+        }
+        return { rows: [], rowCount: 0 };
+      },
+    };
+  }
+
+  const scope = { tenantId: "t1", appId: "a1", workflowId: "w1" };
+
+  it("herencia: sólo system seeded → devuelve el valor system", async () => {
+    const v = await configValues.resolveConfig<number>("thresholds", "matchCosine", scope, cascadeExec({ system: 0.4 }));
+    expect(v).toBe(0.4);
+  });
+
+  it("override tenant gana sobre system", async () => {
+    const v = await configValues.resolveConfig<number>("thresholds", "matchCosine", scope, cascadeExec({ system: 0.4, tenant: 0.45 }));
+    expect(v).toBe(0.45);
+  });
+
+  it("override app gana sobre tenant y system", async () => {
+    const v = await configValues.resolveConfig<number>("thresholds", "matchCosine", scope, cascadeExec({ system: 0.4, tenant: 0.45, app: 0.5 }));
+    expect(v).toBe(0.5);
+  });
+
+  it("override workflow gana sobre todos (más específico)", async () => {
+    const v = await configValues.resolveConfig<number>("thresholds", "matchCosine", scope, cascadeExec({ system: 0.4, tenant: 0.45, app: 0.5, workflow: 0.6 }));
+    expect(v).toBe(0.6);
+  });
+
+  it("sin ninguna fila → undefined (el caller hace ?? config.ts)", async () => {
+    const v = await configValues.resolveConfig<number>("thresholds", "matchCosine", scope, cascadeExec({}));
+    expect(v).toBeUndefined();
+  });
+
+  it("salta niveles sin id: scope sólo-tenant no consulta app/workflow", async () => {
+    const v = await configValues.resolveConfig<number>("thresholds", "matchCosine", { tenantId: "t1" }, cascadeExec({ system: 0.4, tenant: 0.45 }));
+    expect(v).toBe(0.45);
+  });
+});
