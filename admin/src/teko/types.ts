@@ -697,6 +697,36 @@ export interface TenantIntegration {
     updatedAt: string
 }
 
+// ---- Documentos & Campos (Fase 4 — T6) ----
+export interface DocumentTypeDef {
+    key: string
+    label: string
+    country: string
+    mrzFormat: 'td1' | 'td3' | null
+    enabled: boolean
+    scopeType: 'system' | 'tenant'
+    scopeId: string | null
+    createdAt: string
+    updatedAt: string
+}
+
+export interface DocFieldDef {
+    id: string
+    docTypeKey: string
+    key: string
+    label: string
+    type: 'string' | 'date' | 'boolean' | 'number'
+    path: string
+    validation: {
+        required?: boolean
+        regex?: string
+        dateRange?: { minIso?: string; maxIso?: string }
+        normalize?: string
+    }
+    displayOrder: number
+    createdAt: string
+}
+
 // Identidad rica extraída del documento (checks[document].detail.extracted).
 export interface ExtractedDocument {
     documento?: {

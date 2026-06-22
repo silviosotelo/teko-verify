@@ -139,6 +139,13 @@ const tekoRoute: Routes = [
         authority: [],
         meta: { pageContainerType: 'contained' },
     },
+    {
+        key: 'teko.documentTypes',
+        path: '/document-types',
+        component: lazy(() => import('@/views/teko/DocumentTypes')),
+        authority: [],
+        meta: { pageContainerType: 'contained' },
+    },
 ]
 
 export default tekoRoute

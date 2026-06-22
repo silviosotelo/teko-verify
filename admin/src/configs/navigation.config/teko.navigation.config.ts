@@ -196,6 +196,16 @@ const tekoNavigationConfig: NavigationTree[] = [
                         subMenu: [],
                     },
                     {
+                        key: 'teko.documentTypes',
+                        path: '/document-types',
+                        title: 'Documentos & Campos',
+                        translateKey: '',
+                        icon: 'tekoWorkflows',
+                        type: NAV_ITEM_TYPE_ITEM,
+                        authority: [],
+                        subMenu: [],
+                    },
+                    {
                         key: 'reminders.automated',
                         path: '/reminders/automated',
                         title: 'Recordatorios Automáticos',

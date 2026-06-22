@@ -44,6 +44,8 @@ import type {
     UsageAlertInput,
     TenantIntegration,
     IntegrationKind,
+    DocumentTypeDef,
+    DocFieldDef,
 } from './types'
 
 // baseURL origin-root: NO relativo a /admin-ui/.
@@ -710,6 +712,34 @@ export const tekoApi = {
             'DELETE',
             `/tenants/${tenantId}/integrations/${kind}`,
         )
+    },
+
+    // ---- document-types (Fase 4) -------------------------------------------
+    async getDocumentTypes(): Promise<DocumentTypeDef[]> {
+        return request<DocumentTypeDef[]>('GET', '/document-types')
+    },
+
+    async createDocumentType(data: {
+        key: string; label: string; country?: string;
+        mrzFormat?: string | null; enabled?: boolean; scopeType?: string
+    }): Promise<DocumentTypeDef> {
+        return request<DocumentTypeDef>('POST', '/document-types', data)
+    },
+
+    async putDocumentType(key: string, patch: Partial<DocumentTypeDef>): Promise<DocumentTypeDef> {
+        return request<DocumentTypeDef>('PUT', `/document-types/${key}`, patch)
+    },
+
+    async deleteDocumentType(key: string): Promise<{ deleted: boolean }> {
+        return request<{ deleted: boolean }>('DELETE', `/document-types/${key}`)
+    },
+
+    async getDocumentTypeFields(key: string): Promise<DocFieldDef[]> {
+        return request<DocFieldDef[]>('GET', `/document-types/${key}/fields`)
+    },
+
+    async deleteDocumentTypeField(docKey: string, fieldId: string): Promise<{ deleted: boolean }> {
+        return request<{ deleted: boolean }>('DELETE', `/document-types/${docKey}/fields/${fieldId}`)
     },
 }
 
