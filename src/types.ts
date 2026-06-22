@@ -967,6 +967,39 @@ export interface QuestionnaireAnswerRecord {
 export type ReviewMode = "auto" | "always" | "on_borderline";
 
 /**
+ * Entry in the configurable pipeline list (Fase 3).
+ * Stored in workflow.definition.pipeline.checks[].
+ * Absent entry for a key = use registry default (enabled: derived from required fields).
+ */
+export interface PipelineCheckEntry {
+  /** Registry key — must match a CheckKey from src/pipeline/registry.ts. */
+  key: string;
+  /**
+   * Whether this check runs. False = skip entirely (no result, no DB row).
+   * True + required = runs and fails-closed as today.
+   * True + not required = runs only if enabled by the workflow's required flag.
+   */
+  enabled: boolean;
+  /**
+   * UI display order (0-based). Does NOT change execution order in Fase 3
+   * (execution spine is fixed due to data dependencies). Used by the editor.
+   */
+  order: number;
+  /**
+   * Per-check parameter overrides. Keys and semantics are check-specific:
+   * - quality:          { glassesMaxPct?: number }
+   * - liveness:         { threshold?: number }
+   * - match:            { threshold?: number }
+   * - aml:              { threshold?: number }
+   * - face_search:      { threshold?: number }
+   * - proof_of_address: { maxAgeMonths?: number; requireNameMatch?: boolean; nameThreshold?: number }
+   * - age_estimation:   { minAge?: number }
+   * document has no configurable params (hard MRZ/OCR logic).
+   */
+  config?: Record<string, unknown>;
+}
+
+/**
  * Definición de un workflow (JSONB versionado): QUÉ checks corren, con qué umbrales,
  * y la política de revisión. Reemplaza el L1/L2/L3 hardcode. Compatibilidad: los
  * workflows "default" (default-l1/-l2/-l3) mapean exacto a la escalera actual.
@@ -1035,6 +1068,17 @@ export interface WorkflowDefinition {
    * por id contra la tabla `questionnaires` (diferido: snapshotear las preguntas).
    */
   questionnaire?: { questionnaireId: string; required?: boolean };
+  /**
+   * Configurable pipeline (Fase 3). When present, this list is the source of truth
+   * for which checks are enabled and their UI display order. Absent = derive from
+   * existing required fields (full backward compat with Fases 0/1/2).
+   *
+   * Checks absent from the list inherit registry defaults (enabled = derived from
+   * their required field). Only entries with enabled:false suppress a check.
+   */
+  pipeline?: {
+    checks: PipelineCheckEntry[];
+  };
   review?: {
     mode: ReviewMode;
     /** Para on_borderline: bandas de score [min,max] que disparan revisión humana. */

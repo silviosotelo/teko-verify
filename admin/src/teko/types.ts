@@ -379,6 +379,14 @@ export interface SessionEventsResponse {
 // ---- Workflows (configurables + versionados) — P0 #1 ----
 export type ReviewMode = 'auto' | 'always' | 'on_borderline'
 
+// ---- Configurable pipeline (Fase 3) ----
+export interface PipelineCheckEntry {
+    key: string
+    enabled: boolean
+    order: number
+    config?: Record<string, unknown>
+}
+
 export interface WorkflowDefinition {
     document?: { required: boolean }
     liveness?: { required: boolean; mode?: 'active' | 'passive'; threshold?: number }
@@ -387,6 +395,8 @@ export interface WorkflowDefinition {
     aml?: { required: boolean; threshold?: number; onMatch?: 'review' | 'flag' }
     // Cuestionario custom (P2): referencia a un questionnaires.id del tenant.
     questionnaire?: { questionnaireId: string; required?: boolean }
+    // Configurable pipeline (Fase 3). Absent = backward compat (derive from required fields).
+    pipeline?: { checks: PipelineCheckEntry[] }
     review?: {
         mode: ReviewMode
         borderlineBand?: {
