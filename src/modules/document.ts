@@ -2443,18 +2443,19 @@ export class DocumentModule {
 
     // Autenticidad: presencia de campos + check digits ICAO + no vencido. DUROS.
     const checks: AuthenticityCheck[] = [];
-    // Fase 4: data-driven cuando fieldDefs inyectado Y no vacío; fallback hardcodeado
-    // cuando ausente O array vacío. FAIL-CLOSED: [] (p.ej. DB devuelve cero filas) es
-    // tan inseguro como undefined — siempre cae al cálculo hardcodeado seguro.
-    const requiredPresent = deps.fieldDefs?.length
-      ? validateExtracted(extracted, deps.fieldDefs).requiredPresent
-      : (
-          !!extracted.titular.apellidos &&
-          !!extracted.titular.nombres &&
-          !!extracted.documento.numeroCedula &&
-          !!extracted.titular.fechaNacimiento &&
-          !!extracted.documentoFisico.fechaVencimiento
-        )
+    // Piso KYC inviolable (Ley 7593): el baseline hardcodeado se evalúa SIEMPRE.
+    // fieldDefs de la DB solo pueden AGREGAR requisitos, nunca relajar el piso.
+    // Fail-open en disponibilidad: sin fieldDefs (o DB caída → []) → sólo el piso.
+    const baselineRequiredPresent = (
+      !!extracted.titular.apellidos &&
+      !!extracted.titular.nombres &&
+      !!extracted.documento.numeroCedula &&
+      !!extracted.titular.fechaNacimiento &&
+      !!extracted.documentoFisico.fechaVencimiento
+    )
+    const requiredPresent =
+      baselineRequiredPresent &&
+      (deps.fieldDefs?.length ? validateExtracted(extracted, deps.fieldDefs).requiredPresent : true)
     checks.push({
       name: "mrz_fields_present",
       passed: requiredPresent,
@@ -2655,18 +2656,19 @@ export class DocumentModule {
 
     // passed (CAMBIO CLAVE): campos impresos requeridos + no vencido + foto recortable.
     // El MRZ ya NO decide.
-    // Fase 4: data-driven cuando fieldDefs inyectado Y no vacío; fallback hardcodeado
-    // cuando ausente O array vacío. FAIL-CLOSED: [] (p.ej. DB devuelve cero filas) es
-    // tan inseguro como undefined — siempre cae al cálculo hardcodeado seguro.
-    const requiredPresent = deps.fieldDefs?.length
-      ? validateExtracted(extracted, deps.fieldDefs).requiredPresent
-      : (
-          !!extracted.titular.apellidos &&
-          !!extracted.titular.nombres &&
-          !!extracted.documento.numeroCedula &&
-          !!extracted.titular.fechaNacimiento &&
-          !!extracted.documentoFisico.fechaVencimiento
-        )
+    // Piso KYC inviolable (Ley 7593): el baseline hardcodeado se evalúa SIEMPRE.
+    // fieldDefs de la DB solo pueden AGREGAR requisitos, nunca relajar el piso.
+    // Fail-open en disponibilidad: sin fieldDefs (o DB caída → []) → sólo el piso.
+    const baselineRequiredPresent = (
+      !!extracted.titular.apellidos &&
+      !!extracted.titular.nombres &&
+      !!extracted.documento.numeroCedula &&
+      !!extracted.titular.fechaNacimiento &&
+      !!extracted.documentoFisico.fechaVencimiento
+    )
+    const requiredPresent =
+      baselineRequiredPresent &&
+      (deps.fieldDefs?.length ? validateExtracted(extracted, deps.fieldDefs).requiredPresent : true)
     const passed =
       requiredPresent &&
       notExpired(extracted.documentoFisico.fechaVencimiento, deps.maxDocumentAgeYears ?? 0) &&

@@ -187,6 +187,111 @@ const FRONT_LINES_CI_PY: OcrLine[] = [
 
 // ---------------------------------------------------------------------------
 
+/**
+ * OCR lines idénticas a FRONT_LINES_CI_PY pero SIN la línea de número de cédula
+ * ("N4895448"). Con esto, extractFrontInto produce numeroCedula=''.
+ * Usado en la prueba de PISO: el baseline hardcodeado exige numeroCedula aunque
+ * los fieldDefs de la DB no lo marquen como required.
+ */
+const FRONT_LINES_CI_PY_NO_CEDULA: OcrLine[] = [
+  makeOcrLine('APELLIDOS',            0.99, 200, 100, 200, 40),
+  makeOcrLine('RODRIGUEZ',            0.97, 200, 150, 180, 30),
+  makeOcrLine('NOMBRES',              0.99, 200, 230, 200, 40),
+  makeOcrLine('JUAN CARLOS',          0.97, 200, 290, 220, 30),
+  makeOcrLine('FECHA DE NACIMIENTO',  0.99, 200, 370, 300, 30),
+  makeOcrLine('15-06-1990',           0.97, 200, 420, 200, 30),
+  makeOcrLine('FECHA DE VENCIMIENTO', 0.99, 200, 510, 300, 30),
+  makeOcrLine('30-12-2030',           0.97, 200, 560, 200, 30),
+  // Sin línea "N4895448" → numeroCedula queda ''
+]
+
+// ---------------------------------------------------------------------------
+
+describe('E2E Fase4 — ci_py: PISO (floor KYC Ley 7593)', () => {
+  it(
+    'fieldDefs sin numeroCedula-required NO relaja el piso: baseline siempre lo exige',
+    async () => {
+      const faceStub = {
+        bbox: [10, 10, 50, 50] as [number, number, number, number],
+        score: 0.99,
+        landmarks5: [] as Array<[number, number]>,
+      }
+      const STUB_ENGINE_FACE = {
+        ready: true,
+        detect: vi.fn().mockResolvedValue([faceStub]),
+        bestFace: vi.fn().mockReturnValue(faceStub),
+      } as unknown as Engine
+
+      const realFront = await sharp({
+        create: { width: 100, height: 100, channels: 3, background: { r: 200, g: 200, b: 200 } },
+      })
+        .jpeg()
+        .toBuffer()
+
+      const BACK = Buffer.alloc(0)
+
+      // OCR que no tiene numeroCedula
+      const ocrNoCedula: OcrClient = {
+        recognize: vi.fn().mockImplementation(async (buf: Buffer) =>
+          buf === realFront
+            ? { rawText: 'front', confidence: 0.97, lines: FRONT_LINES_CI_PY_NO_CEDULA }
+            : { rawText: '', confidence: 0, lines: [] },
+        ),
+      }
+
+      // fieldDefs: los 4 campos presentes (sin numeroCedula marcado required)
+      // Semántica de REEMPLAZO: validateExtracted → true (los 4 required pasan)
+      // Semántica de PISO:       baseline → false (numeroCedula='') → passed=false
+      const relaxedDefs: FieldDefinition[] = REQUIRED_PATHS_CI_PY
+        .filter(p => p !== 'documento.numeroCedula')
+        .map((path, i) => ({
+          id: String(i),
+          docTypeKey: 'ci_py',
+          key: path.split('.').pop()!,
+          label: path,
+          type: 'string' as const,
+          path,
+          validation: { required: true },
+          displayOrder: (i + 1) * 10,
+          createdAt: '',
+        }))
+
+      function makeDepsFloor(fieldDefs?: FieldDefinition[]): DocumentDeps {
+        return {
+          ocr: ocrNoCedula,
+          mrzReader: STUB_MRZ,
+          barcodeReader: STUB_BARCODE,
+          engine: STUB_ENGINE_FACE,
+          ...(fieldDefs !== undefined ? { fieldDefs } : {}),
+        }
+      }
+
+      const mod = new DocumentModule()
+
+      // Sin fieldDefs: baseline puro → numeroCedula='' → false
+      const sinDefs = await mod.run(realFront, BACK, makeDepsFloor(), 'ci_py')
+      expect(sinDefs.extracted.documento.numeroCedula).toBe('')
+      expect(sinDefs.passed).toBe(false)
+
+      // Con fieldDefs relajados (sin numeroCedula required):
+      // - REEMPLAZO daría true (4 campos presentes pasan los 4 defs)
+      // - PISO da false (baseline sigue exigiendo numeroCedula)
+      // Este test discrimina las dos semánticas: DEBE ser false.
+      const conDefs = await mod.run(realFront, BACK, makeDepsFloor(relaxedDefs), 'ci_py')
+      expect(conDefs.extracted.documento.numeroCedula).toBe('')
+      expect(conDefs.passed).toBe(false)
+
+      // Verificar que los 4 campos sí están presentes (el relaxedDefs no los ve como error)
+      expect(conDefs.extracted.titular.apellidos).toBe('RODRIGUEZ')
+      expect(conDefs.extracted.titular.nombres).toBe('JUAN CARLOS')
+      expect(conDefs.extracted.titular.fechaNacimiento).toBe('1990-06-15')
+      expect(conDefs.extracted.documentoFisico.fechaVencimiento).toBe('2030-12-30')
+    },
+  )
+})
+
+// ---------------------------------------------------------------------------
+
 describe('E2E Fase4 — ci_py: caso discriminatorio (OCR poblado + cara detectada)', () => {
   const faceStub = {
     bbox: [10, 10, 50, 50] as [number, number, number, number],
