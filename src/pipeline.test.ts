@@ -270,6 +270,21 @@ describe("processSession — camino verified (L3)", () => {
     expect(spy.sessionUpdates.some((u) => u.state === "verified")).toBe(true);
   });
 
+  it("L2 verifica con quality+document+match (sin liveness), LoA alcanzado = L2 (no-regresión)", async () => {
+    const modules = modulesFor({ quality: PASS_QUALITY, document: makeDocument(true), match: "pass" });
+    const out = await processSession(
+      makeSession({ workflowSnapshot: workflowDefForLoA("L2"), assuranceRequired: "L2" }),
+      makePolicy({ assuranceRequired: "L2" }),
+      IMAGES,
+      makeDeps(modules, spy)
+    );
+    expect(out.state).toBe("verified");
+    expect(out.result?.loa).toBe("L2");
+    // No corre liveness para L2.
+    expect(spy.checks.map((c) => c.type).sort()).toEqual(["document", "match", "quality"]);
+    expect(spy.identities).toHaveLength(1);
+  });
+
   it("L1 verifica con sólo quality+document (sin match ni liveness)", async () => {
     const modules = modulesFor({ quality: PASS_QUALITY, document: makeDocument(true), match: "pass" });
     const out = await processSession(makeSession({ assuranceRequired: "L1" }), makePolicy({ assuranceRequired: "L1" }), IMAGES, makeDeps(modules, spy));
@@ -519,6 +534,7 @@ describe("pipeline.checks configuration (Fase 3)", () => {
     const modules = modulesFor({ quality: PASS_QUALITY, liveness: PASS_LIVENESS, document: makeDocument(true), match: "pass" });
     const result = await processSession(session, makePolicy(), IMAGES, makeDeps(modules, spy));
     expect(result.state).toBe("verified");
+    expect(result.result?.loa).toBe("L3");
   });
 
   it("disabling match in pipeline.checks → match check not persisted, LoA is L1", async () => {
