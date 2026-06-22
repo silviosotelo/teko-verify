@@ -39,6 +39,8 @@ import { requestContext } from "../lib/requestContext";
 import { analyzeDeviceIp } from "../lib/deviceIp";
 import { resolveTestSessionTtlSec } from "./testSessionTtl";
 import { parseConfigScope, isValidConfigPut } from "./configValidation";
+import { maskConfig, mergeConfig } from "./integrationHelpers";
+import { isValidKind } from "../db/repos/tenantIntegrations";
 import { decodeBase64Image } from "../lib/images";
 import { ensureRasterImage } from "../lib/raster";
 import { isMailerConfigured, isValidEmail, sendVerificationEmail } from "../lib/mailer";
@@ -2930,5 +2932,88 @@ adminRouter.put(
       actor: `admin:${req.adminOperator?.operatorId ?? "?"}`,
     });
     res.json(created);
+  }
+);
+
+// ─── GET /admin/tenants/:id/integrations ─────────────────────────────────── //
+// Lists all integrations for a tenant. Secret config fields are ALWAYS masked
+// ("***") in the response — the clear-text credential never leaves the server.
+adminRouter.get(
+  "/tenants/:id/integrations",
+  requirePermission("manage_tenants"),
+  async (req: Request, res: Response) => {
+    const tenant = await repos.tenants.getById(req.params.id);
+    if (!tenant) return res.status(404).json({ error: "tenant not found" });
+    const list = await repos.tenantIntegrations.listByTenant(req.params.id);
+    return res.json({
+      integrations: list.map((ti) => ({ ...ti, config: maskConfig(ti.config) })),
+    });
+  }
+);
+
+// ─── PUT /admin/tenants/:id/integrations/:kind ───────────────────────────── //
+// Creates or updates the provider config for a tenant integration.
+//
+// SECRET MERGE: if the incoming config contains a field with value "***" (the
+// sentinel the UI shows for masked secrets), we do NOT overwrite the existing
+// encrypted value — we read the existing decrypted row and overlay only the
+// fields whose value is NOT "***". This means toggling `enabled` or editing a
+// non-secret field never wipes a stored password/key.
+adminRouter.put(
+  "/tenants/:id/integrations/:kind",
+  requirePermission("manage_tenants"),
+  async (req: Request, res: Response) => {
+    const { id, kind } = req.params;
+    if (!isValidKind(kind)) {
+      return res
+        .status(400)
+        .json({ error: `invalid kind: ${kind}. Valid: smtp, storage, aml, sms` });
+    }
+    const tenant = await repos.tenants.getById(id);
+    if (!tenant) return res.status(404).json({ error: "tenant not found" });
+
+    const { config, enabled } = req.body as {
+      config?: Record<string, unknown>;
+      enabled?: boolean;
+    };
+    if (!config || typeof config !== "object" || Array.isArray(config)) {
+      return res.status(400).json({ error: "body.config must be a plain object" });
+    }
+
+    // Server-side merge: read existing decrypted config as the base, then
+    // overlay only incoming fields that are NOT the masked sentinel "***".
+    // We do NOT gate on existing.enabled — a disabled-but-configured row still
+    // has a real secret that must survive a re-enable. The fail-closed path in
+    // the repo already returns config={} when decrypt fails, so those rows
+    // contribute nothing to the base (correct).
+    let existingConfig: Record<string, unknown> | null = null;
+    try {
+      const existing = await repos.tenantIntegrations.getByKind(id, kind);
+      if (existing) existingConfig = existing.config;
+    } catch {
+      // If the existing-row read fails, proceed with incoming fields only.
+    }
+    const mergedConfig = mergeConfig(existingConfig, config);
+
+    const actor = `admin:${req.adminOperator?.operatorId ?? "?"}`;
+    try {
+      const ti = await repos.tenantIntegrations.upsert(
+        id,
+        kind,
+        mergedConfig,
+        enabled !== false,
+        actor
+      );
+      return res.json({ integration: { ...ti, config: maskConfig(ti.config) } });
+    } catch (e) {
+      // encryptConfig throws if TEKO_SECRETS_KEY is missing.
+      console.error(`[admin] PUT integrations failed: ${(e as Error).message}`);
+      return res
+        .status(500)
+        .json({
+          error:
+            "failed to save integration — TEKO_SECRETS_KEY may not be configured",
+        });
+    }
   }
 );
