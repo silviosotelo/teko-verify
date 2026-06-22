@@ -80,6 +80,49 @@ describe('tenantIntegrations repo', () => {
     expect(result.length).toBe(2)
     expect(result[0].kind).toBe('smtp')
     expect(result[1].kind).toBe('aml')
+    // Config debe estar DESCIFRADO al original, no el wrapper enc
+    expect(result[0].config).toEqual({ host: 'a' })
+    expect(result[1].config).toEqual({ apiKey: 'k' })
+  })
+
+  it('listByTenant fail-closed: fila con enc inválido devuelve enabled=false y config={}', async () => {
+    const rows = [
+      { id: 'e1', tenant_id: TENANT_ID, kind: 'smtp', config: { enc: 'INVALID' }, enabled: true, updated_by: 's', created_at: new Date(), updated_at: new Date() },
+      { id: 'e2', tenant_id: TENANT_ID, kind: 'aml', config: { enc: 'gcm$fake$fake${"apiKey":"k"}' }, enabled: true, updated_by: 's', created_at: new Date(), updated_at: new Date() },
+    ]
+    const exec = mockExec(rows)
+    const result = await repo.listByTenant(TENANT_ID, exec)
+    expect(result.length).toBe(2)
+    // Fila con decrypt fallido → fail-closed
+    expect(result[0].enabled).toBe(false)
+    expect(result[0].config).toEqual({})
+    // Fila válida no afectada
+    expect(result[1].enabled).toBe(true)
+    expect(result[1].config).toEqual({ apiKey: 'k' })
+  })
+
+  it('upsert — ciphertext invariant: SQL recibe el wrapper cifrado, NO el config plano', async () => {
+    const plainConfig = { pass: 'super-secret' }
+    const row = {
+      id: 'sec1', tenant_id: TENANT_ID, kind: 'smtp',
+      config: { enc: 'gcm$fake$fake${"pass":"super-secret"}' },
+      enabled: true, updated_by: 'admin:1',
+      created_at: new Date(), updated_at: new Date(),
+    }
+    const exec = mockExec([row])
+    await repo.upsert(TENANT_ID, 'smtp', plainConfig, true, 'admin:1', exec)
+
+    const queryFn = exec.query as ReturnType<typeof vi.fn>
+    // exec.query(sql, params) — params es el segundo argumento
+    const sqlParams = queryFn.mock.calls[0][1] as unknown[]
+    const configArg = sqlParams[2] as string // $3 en el SQL = encryptedConfig stringificado
+
+    // POSITIVO: el arg contiene el prefijo gcm$ → prueba que pasó por encryptConfig
+    expect(configArg).toContain('gcm$')
+    // POSITIVO: al parsear tiene la propiedad 'enc' (formato del wrapper cifrado)
+    expect(JSON.parse(configArg)).toHaveProperty('enc')
+    // NEGATIVO: NO es el config plano serializado directamente
+    expect(configArg).not.toBe(JSON.stringify(plainConfig))
   })
 
   it('remove returns true when rowCount > 0', async () => {
