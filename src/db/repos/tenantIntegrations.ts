@@ -15,6 +15,14 @@ export type IntegrationKind = 'smtp' | 'storage' | 'aml' | 'sms'
 
 const VALID_KINDS = new Set<string>(['smtp', 'storage', 'aml', 'sms'])
 
+/**
+ * SMS PROVIDER — DEFERRED (Fase 2).
+ * La tabla soporta kind='sms' y la API acepta GET/PUT para 'sms'.
+ * La implementación del resolver `resolveSmsProvider()` y del envío real
+ * de SMS es trabajo futuro. No existe `resolveSmsProvider` en esta fase.
+ * La UI muestra la pestaña SMS como "Próximamente".
+ */
+
 export interface TenantIntegration {
   id: string
   tenantId: string

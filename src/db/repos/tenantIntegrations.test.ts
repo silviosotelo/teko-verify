@@ -134,4 +134,30 @@ describe('tenantIntegrations repo', () => {
     const exec = { query: vi.fn().mockResolvedValue({ rows: [], rowCount: 0 }) } as unknown as Executor
     expect(await repo.remove(TENANT_ID, 'smtp', exec)).toBe(false)
   })
+
+  it('storage kind round-trip: upsert and getByKind decrypt correctly (no secrets, but consistent encryption)', async () => {
+    // storage kind stores a baseDir path (not a secret, but encrypted for uniformity in Fase 2)
+    const storageConfig = { baseDir: '/var/data/tenant-123' }
+    const row = {
+      id: 'storage1', tenant_id: TENANT_ID, kind: 'storage',
+      config: { enc: 'gcm$fake$fake${"baseDir":"/var/data/tenant-123"}' },
+      enabled: true, updated_by: 'admin:1',
+      created_at: new Date(), updated_at: new Date(),
+    }
+
+    // Step 1: upsert encrypts the config
+    const execUpsert = mockExec([row])
+    const upsertResult = await repo.upsert(TENANT_ID, 'storage', storageConfig, true, 'admin:1', execUpsert)
+    expect(upsertResult.kind).toBe('storage')
+    expect(upsertResult.enabled).toBe(true)
+    expect(upsertResult.config).toEqual(storageConfig)
+
+    // Step 2: getByKind decrypts and returns the same config
+    const execGet = mockExec([row])
+    const getResult = await repo.getByKind(TENANT_ID, 'storage', execGet)
+    expect(getResult).not.toBeNull()
+    expect(getResult!.kind).toBe('storage')
+    expect(getResult!.config).toEqual(storageConfig)
+    expect(getResult!.config).toEqual({ baseDir: '/var/data/tenant-123' })
+  })
 })
