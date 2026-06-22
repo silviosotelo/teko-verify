@@ -89,6 +89,9 @@ import type {
 } from "../types";
 import { WEBHOOK_EVENTS } from "../types";
 import { getQuotaStatus } from "../lib/billing";
+import { isValidDocTypePost, isValidDocTypePatch } from "./docTypeValidation";
+import * as docTypesRepo from "../db/repos/documentTypes";
+import * as fieldsRepo from "../db/repos/extractionFields";
 
 /** Base pública para construir el verifyUrl de la sesión de test con cámara. */
 const PUBLIC_BASE_URL = (
@@ -3017,3 +3020,99 @@ adminRouter.put(
     }
   }
 );
+
+// ---- Tipos de documento + campos (Fase 4) -------------------------------- //
+
+const SYSTEM_PARSERS_F4    = new Set(['ci_py', 'passport'])
+const VALID_FIELD_TYPES_F4 = new Set(['string', 'date', 'boolean', 'number'])
+
+adminRouter.get('/document-types', async (_req: Request, res: Response) => {
+  res.json(await docTypesRepo.listDocumentTypes())
+})
+
+adminRouter.post('/document-types', requirePermission('manage_tenants'),
+  async (req: Request, res: Response) => {
+    if (!isValidDocTypePost(req.body)) {
+      res.status(400).json({ error: 'invalid_doc_type_input' }); return
+    }
+    if (await docTypesRepo.getDocumentType(req.body.key)) {
+      res.status(409).json({ error: 'doc_type_key_exists' }); return
+    }
+    const created = await docTypesRepo.upsertDocumentType({
+      key: req.body.key, label: req.body.label,
+      country: typeof req.body.country === 'string' ? req.body.country : 'PY',
+      mrzFormat: (req.body.mrzFormat ?? null) as 'td1' | 'td3' | null,
+      enabled: typeof req.body.enabled === 'boolean' ? req.body.enabled : true,
+      scopeType: (req.body.scopeType ?? 'system') as 'system' | 'tenant',
+      scopeId: req.body.scopeId ?? null,
+    })
+    res.status(201).json(created)
+  }
+)
+
+adminRouter.put('/document-types/:key', requirePermission('manage_tenants'),
+  async (req: Request, res: Response) => {
+    const existing = await docTypesRepo.getDocumentType(req.params.key)
+    if (!existing) { res.status(404).json({ error: 'doc_type_not_found' }); return }
+    if (!isValidDocTypePatch(req.body)) {
+      res.status(400).json({ error: 'invalid_doc_type_patch' }); return
+    }
+    res.json(await docTypesRepo.upsertDocumentType({
+      ...existing,
+      label:      typeof req.body.label   === 'string'  ? req.body.label                            : existing.label,
+      country:    typeof req.body.country === 'string'  ? req.body.country                          : existing.country,
+      mrzFormat:  req.body.mrzFormat  !== undefined     ? req.body.mrzFormat as 'td1' | 'td3' | null : existing.mrzFormat,
+      enabled:    typeof req.body.enabled === 'boolean' ? req.body.enabled                          : existing.enabled,
+    }))
+  }
+)
+
+adminRouter.delete('/document-types/:key', requirePermission('manage_tenants'),
+  async (req: Request, res: Response) => {
+    const existing = await docTypesRepo.getDocumentType(req.params.key)
+    if (!existing) { res.status(404).json({ error: 'doc_type_not_found' }); return }
+    if (SYSTEM_PARSERS_F4.has(req.params.key)) {
+      res.status(409).json({ error: 'cannot_delete_system_doc_type' }); return
+    }
+    res.json({ deleted: await docTypesRepo.deleteDocumentType(req.params.key) })
+  }
+)
+
+adminRouter.get('/document-types/:key/fields', async (req: Request, res: Response) => {
+  res.json(await fieldsRepo.listFieldsForDocType(req.params.key))
+})
+
+adminRouter.post('/document-types/:key/fields', requirePermission('manage_tenants'),
+  async (req: Request, res: Response) => {
+    const b = req.body ?? {}
+    const key   = typeof b.key   === 'string' && b.key.trim()   ? b.key.trim()   : null
+    const label = typeof b.label === 'string' && b.label.trim() ? b.label.trim() : null
+    const path  = typeof b.path  === 'string' && b.path.trim()  ? b.path.trim()  : null
+    const type  = VALID_FIELD_TYPES_F4.has(b.type)
+      ? b.type as 'string' | 'date' | 'boolean' | 'number' : null
+    if (!key || !label || !path || !type) {
+      res.status(400).json({ error: 'key_label_path_type_required' }); return
+    }
+    res.status(201).json(await fieldsRepo.createField({
+      docTypeKey: req.params.key, key, label, type, path,
+      validation: (b.validation && typeof b.validation === 'object') ? b.validation : {},
+      displayOrder: typeof b.displayOrder === 'number' ? b.displayOrder : 0,
+    }))
+  }
+)
+
+adminRouter.put('/document-types/:key/fields/:fieldId', requirePermission('manage_tenants'),
+  async (req: Request, res: Response) => {
+    const updated = await fieldsRepo.updateField(req.params.fieldId, req.body ?? {})
+    if (!updated) { res.status(404).json({ error: 'field_not_found' }); return }
+    res.json(updated)
+  }
+)
+
+adminRouter.delete('/document-types/:key/fields/:fieldId', requirePermission('manage_tenants'),
+  async (req: Request, res: Response) => {
+    const deleted = await fieldsRepo.deleteField(req.params.fieldId)
+    if (!deleted) { res.status(404).json({ error: 'field_not_found' }); return }
+    res.json({ deleted })
+  }
+)
