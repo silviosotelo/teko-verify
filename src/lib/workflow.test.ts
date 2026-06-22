@@ -40,6 +40,45 @@ describe("assuranceFromDefinition — LoA equivalente", () => {
   it("definición vacía → L1 (fail-safe, nunca sube solo)", () => {
     expect(assuranceFromDefinition({})).toBe("L1");
   });
+
+  it("pipeline.checks disabling liveness drops L3 → L2", () => {
+    const def: WorkflowDefinition = {
+      document: { required: true },
+      match: { required: true },
+      liveness: { required: true, mode: "passive" },
+      pipeline: { checks: [{ key: "liveness", enabled: false, order: 1 }] },
+    };
+    expect(assuranceFromDefinition(def)).toBe("L2");
+  });
+
+  it("pipeline.checks disabling match drops L2 → L1", () => {
+    const def: WorkflowDefinition = {
+      document: { required: true },
+      match: { required: true },
+      pipeline: { checks: [{ key: "match", enabled: false, order: 3 }] },
+    };
+    expect(assuranceFromDefinition(def)).toBe("L1");
+  });
+
+  it("pipeline.checks with no liveness entry does not affect L3", () => {
+    const def: WorkflowDefinition = {
+      document: { required: true },
+      match: { required: true },
+      liveness: { required: true, mode: "passive" },
+      pipeline: { checks: [{ key: "aml", enabled: true, order: 4 }] },
+    };
+    expect(assuranceFromDefinition(def)).toBe("L3");
+  });
+
+  it("empty pipeline.checks list does not affect LoA derivation", () => {
+    const def: WorkflowDefinition = {
+      document: { required: true },
+      liveness: { required: true, mode: "passive" },
+      match: { required: true },
+      pipeline: { checks: [] },
+    };
+    expect(assuranceFromDefinition(def)).toBe("L3");
+  });
 });
 
 describe("defaultWorkflowName", () => {
