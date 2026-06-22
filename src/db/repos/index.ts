@@ -25,6 +25,7 @@ export * as billingPlans from "./billingPlans";
 export * as subscriptions from "./subscriptions";
 export * as usageAlerts from "./usageAlerts";
 export * as configValues from "./configValues";
+export * as tenantIntegrations from "./tenantIntegrations";
 
 import * as tenants from "./tenants";
 import * as apps from "./apps";
@@ -45,6 +46,7 @@ import * as billingPlans from "./billingPlans";
 import * as subscriptions from "./subscriptions";
 import * as usageAlerts from "./usageAlerts";
 import * as configValues from "./configValues";
+import * as tenantIntegrations from "./tenantIntegrations";
 
 /** Agrupador único para inyección/uso conveniente. */
 export const repos = {
@@ -67,4 +69,5 @@ export const repos = {
   subscriptions,
   usageAlerts,
   configValues,
+  tenantIntegrations,
 } as const;
