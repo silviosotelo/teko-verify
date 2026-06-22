@@ -54,10 +54,23 @@ export function defaultWorkflows(): Array<{ name: string; definition: WorkflowDe
  * Deriva el LoA EQUIVALENTE de una definición de workflow (qué checks exige).
  * Escalera: liveness.required → L3; match.required → L2; document.required → L1.
  * Definición vacía/sin checks → L1 (fail-safe conservador: nunca sube solo).
+ *
+ * Respects pipeline.checks disabled overrides: if liveness.required=true but
+ * pipeline.checks disables liveness, the effective LoA drops to L2 (coherent — the
+ * pipeline won't run liveness, so decision() can't award L3).
+ *
+ * Absent pipeline.checks → identical to previous behaviour (reads required fields only).
  */
 export function assuranceFromDefinition(def: WorkflowDefinition): LoA {
-  if (def.liveness?.required) return "L3";
-  if (def.match?.required) return "L2";
+  // Respect pipeline.checks enabled overrides if present
+  const pChecks = def.pipeline?.checks;
+  const isEnabledInPipeline = (key: string): boolean => {
+    if (!pChecks || pChecks.length === 0) return true; // no override list: use required
+    const entry = pChecks.find(c => c.key === key);
+    return entry !== undefined ? entry.enabled : true; // absent entry = enabled by default
+  };
+  if (def.liveness?.required && isEnabledInPipeline('liveness')) return "L3";
+  if (def.match?.required && isEnabledInPipeline('match')) return "L2";
   return "L1";
 }
 

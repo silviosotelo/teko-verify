@@ -17,7 +17,26 @@ import { useTenant } from '@/teko/TenantContext'
 import { LoaBadge } from '@/teko/badges'
 import { fmtDate } from '@/teko/format'
 import type { Workflow, WorkflowDefinition } from '@/teko/types'
-import { PiPlus, PiPencil, PiCheck, PiCopy } from 'react-icons/pi'
+import { PiPlus, PiPencil, PiCheck, PiCopy, PiArrowUp, PiArrowDown } from 'react-icons/pi'
+
+type CheckUIEntry = {
+    key: string
+    label: string
+    enabled: boolean
+    order: number
+    config: Record<string, unknown>
+}
+
+const CHECK_META: Array<{ key: string; label: string }> = [
+    { key: 'quality',          label: 'Calidad de imagen' },
+    { key: 'liveness',         label: 'Prueba de vida' },
+    { key: 'document',         label: 'Documento de identidad' },
+    { key: 'match',            label: 'Match 1:1 selfie/doc' },
+    { key: 'aml',              label: 'Screening AML/PEP' },
+    { key: 'face_search',      label: 'Búsqueda facial 1:N' },
+    { key: 'proof_of_address', label: 'Comprobante de domicilio' },
+    { key: 'age_estimation',   label: 'Estimación de edad' },
+]
 
 const MODE_OPTS = [
     { value: 'auto', label: 'Automática' },
@@ -73,6 +92,7 @@ const WorkflowsView = () => {
     const [editingAml, setEditingAml] = useState(false)
     const [editingAmlOnMatch, setEditingAmlOnMatch] = useState('review')
     const [editingReview, setEditingReview] = useState('auto')
+    const [pipelineChecks, setPipelineChecks] = useState<CheckUIEntry[]>([])
 
     const [creating, setCreating] = useState(false)
     const [newName, setNewName] = useState('')
@@ -115,15 +135,34 @@ const WorkflowsView = () => {
         setEditingAml(d.aml?.required ?? false)
         setEditingAmlOnMatch(d.aml?.onMatch ?? 'review')
         setEditingReview(d.review?.mode ?? 'auto')
+
+        const existingPipeline = d.pipeline?.checks ?? []
+        const initialChecks = CHECK_META.map((m, i) => {
+            const existing = existingPipeline.find(e => e.key === m.key)
+            return {
+                key: m.key,
+                label: m.label,
+                enabled: existing ? existing.enabled : ['quality', 'document'].includes(m.key),
+                order: existing?.order ?? i,
+                config: existing?.config ?? {},
+            }
+        }).sort((a, b) => a.order - b.order)
+        setPipelineChecks(initialChecks)
     }
 
-    const buildDef = (): WorkflowDefinition => ({
-        document: { required: editingDocument },
-        match: editingMatch ? { required: true, threshold: parseFloat(editingMatchThreshold) || 0.4 } : undefined,
-        liveness: editingLiveness ? { required: true, mode: editingLivenessMode as 'passive' | 'active' } : undefined,
-        aml: editingAml ? { required: true, onMatch: editingAmlOnMatch as 'review' | 'flag' } : undefined,
-        review: { mode: editingReview as 'auto' | 'always' | 'on_borderline' },
-    })
+    const buildDef = (): WorkflowDefinition => {
+        const pipelineField = pipelineChecks.length > 0
+            ? { checks: pipelineChecks.map((c, i) => ({ key: c.key, enabled: c.enabled, order: i, config: c.config })) }
+            : undefined
+        return {
+            document: { required: editingDocument },
+            match: editingMatch ? { required: true, threshold: parseFloat(editingMatchThreshold) || 0.4 } : undefined,
+            liveness: editingLiveness ? { required: true, mode: editingLivenessMode as 'passive' | 'active' } : undefined,
+            aml: editingAml ? { required: true, onMatch: editingAmlOnMatch as 'review' | 'flag' } : undefined,
+            review: { mode: editingReview as 'auto' | 'always' | 'on_borderline' },
+            pipeline: pipelineField,
+        }
+    }
 
     const handleSave = async () => {
         if (!currentId || !editing) return
@@ -219,65 +258,174 @@ const WorkflowsView = () => {
 
             <Dialog isOpen={Boolean(editing)} onClose={() => setEditing(null)} width={640}>
                 <h5 className="font-semibold mb-4">Editar: {editing?.name}</h5>
-                <div className="space-y-5">
-                    <div>
-                        <h6 className="text-sm font-medium mb-3">Checks requeridos</h6>
-                        <div className="space-y-3">
-                            <div className="flex items-center justify-between py-2 border-b">
-                                <span className="text-sm">Documento</span>
-                                <Switcher checked={editingDocument} disabled />
+                {(() => {
+                    const { TabList, TabNav, TabContent } = Tabs
+                    return (
+                        <Tabs defaultValue="config">
+                            <TabList>
+                                <TabNav value="config">Configuración</TabNav>
+                                <TabNav value="pipeline">Pipeline</TabNav>
+                            </TabList>
+                            <div className="mt-4">
+                                <TabContent value="config">
+                                    <div className="space-y-5">
+                                        <div>
+                                            <h6 className="text-sm font-medium mb-3">Checks requeridos</h6>
+                                            <div className="space-y-3">
+                                                <div className="flex items-center justify-between py-2 border-b">
+                                                    <span className="text-sm">Documento</span>
+                                                    <Switcher checked={editingDocument} disabled />
+                                                </div>
+                                                <div className="flex items-center justify-between py-2 border-b">
+                                                    <span className="text-sm">Match facial</span>
+                                                    <Switcher checked={editingMatch} onChange={setEditingMatch} />
+                                                </div>
+                                                {editingMatch && (
+                                                    <div className="pl-4">
+                                                        <label className="text-xs text-gray-400 block mb-1">Umbral de similitud</label>
+                                                        <Input type="number" step="0.01" min="0" max="1" value={editingMatchThreshold} onChange={(e) => setEditingMatchThreshold(e.target.value)} className="w-32" />
+                                                    </div>
+                                                )}
+                                                <div className="flex items-center justify-between py-2 border-b">
+                                                    <span className="text-sm">Liveness / anti-spoofing</span>
+                                                    <Switcher checked={editingLiveness} onChange={setEditingLiveness} />
+                                                </div>
+                                                {editingLiveness && (
+                                                    <div className="pl-4">
+                                                        <label className="text-xs text-gray-400 block mb-1">Modo</label>
+                                                        <Select
+                                                            size="sm"
+                                                            options={LIVENESS_MODE_OPTS}
+                                                            value={LIVENESS_MODE_OPTS.find((o) => o.value === editingLivenessMode) ?? null}
+                                                            onChange={(o) => setEditingLivenessMode(o?.value ?? 'passive')}
+                                                        />
+                                                    </div>
+                                                )}
+                                                <div className="flex items-center justify-between py-2 border-b">
+                                                    <span className="text-sm">AML / screening</span>
+                                                    <Switcher checked={editingAml} onChange={setEditingAml} />
+                                                </div>
+                                                {editingAml && (
+                                                    <div className="pl-4">
+                                                        <label className="text-xs text-gray-400 block mb-1">Al accionar</label>
+                                                        <Select
+                                                            size="sm"
+                                                            options={AML_ONMATCH_OPTS}
+                                                            value={AML_ONMATCH_OPTS.find((o) => o.value === editingAmlOnMatch) ?? null}
+                                                            onChange={(o) => setEditingAmlOnMatch(o?.value ?? 'review')}
+                                                        />
+                                                    </div>
+                                                )}
+                                            </div>
+                                        </div>
+                                        <div>
+                                            <h6 className="text-sm font-medium mb-2">Modo de revisión</h6>
+                                            <Select
+                                                options={MODE_OPTS}
+                                                value={MODE_OPTS.find((m) => m.value === editingReview) ?? null}
+                                                onChange={(o) => setEditingReview(o?.value ?? 'auto')}
+                                            />
+                                        </div>
+                                    </div>
+                                </TabContent>
+                                <TabContent value="pipeline">
+                                    <div className="space-y-2">
+                                        <p className="text-sm text-gray-500 mb-3">
+                                            Activá, desactivá o reordenás los checks del pipeline para este workflow.
+                                            El orden de ejecución real está fijo por dependencias de datos; el número
+                                            de posición se usa en el editor.
+                                        </p>
+                                        {pipelineChecks.map((check, idx) => (
+                                            <Card key={check.key} className="p-3">
+                                                <div className="flex items-center gap-3">
+                                                    <div className="flex flex-col gap-1">
+                                                        <Button
+                                                            size="xs"
+                                                            variant="plain"
+                                                            disabled={idx === 0}
+                                                            icon={<PiArrowUp />}
+                                                            onClick={() => {
+                                                                const next = [...pipelineChecks]
+                                                                ;[next[idx - 1], next[idx]] = [next[idx], next[idx - 1]]
+                                                                setPipelineChecks(next)
+                                                            }}
+                                                        />
+                                                        <Button
+                                                            size="xs"
+                                                            variant="plain"
+                                                            disabled={idx === pipelineChecks.length - 1}
+                                                            icon={<PiArrowDown />}
+                                                            onClick={() => {
+                                                                const next = [...pipelineChecks]
+                                                                ;[next[idx + 1], next[idx]] = [next[idx], next[idx + 1]]
+                                                                setPipelineChecks(next)
+                                                            }}
+                                                        />
+                                                    </div>
+                                                    <Switcher
+                                                        checked={check.enabled}
+                                                        onChange={(val: boolean) => {
+                                                            const next = [...pipelineChecks]
+                                                            next[idx] = { ...next[idx], enabled: val }
+                                                            setPipelineChecks(next)
+                                                        }}
+                                                    />
+                                                    <div className="flex-1">
+                                                        <span className="font-medium text-sm">{check.label}</span>
+                                                        <span className="ml-2 text-xs text-gray-400">{check.key}</span>
+                                                    </div>
+                                                    {['liveness', 'match', 'aml', 'face_search'].includes(check.key) && (
+                                                        <Input
+                                                            size="sm"
+                                                            placeholder="threshold"
+                                                            className="w-28"
+                                                            value={String(check.config?.threshold ?? '')}
+                                                            onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
+                                                                const val = e.target.value
+                                                                const next = [...pipelineChecks]
+                                                                next[idx] = {
+                                                                    ...next[idx],
+                                                                    config: { ...next[idx].config, threshold: val ? Number(val) : undefined },
+                                                                }
+                                                                setPipelineChecks(next)
+                                                            }}
+                                                        />
+                                                    )}
+                                                    {check.key === 'age_estimation' && (
+                                                        <Input
+                                                            size="sm"
+                                                            placeholder="minAge"
+                                                            className="w-24"
+                                                            value={String(check.config?.minAge ?? '')}
+                                                            onChange={(e: React.ChangeEvent<HTMLInputElement>) => {
+                                                                const val = e.target.value
+                                                                const next = [...pipelineChecks]
+                                                                next[idx] = {
+                                                                    ...next[idx],
+                                                                    config: { ...next[idx].config, minAge: val ? Number(val) : undefined },
+                                                                }
+                                                                setPipelineChecks(next)
+                                                            }}
+                                                        />
+                                                    )}
+                                                </div>
+                                            </Card>
+                                        ))}
+                                    </div>
+                                    <div className="mt-3 text-sm text-gray-500">
+                                        LoA efectivo:{' '}
+                                        <strong>
+                                            {pipelineChecks.find(c => c.key === 'liveness' && c.enabled) ? 'L3'
+                                                : pipelineChecks.find(c => c.key === 'match' && c.enabled) ? 'L2'
+                                                : 'L1'}
+                                        </strong>
+                                        {' '}(derivado de checks activos)
+                                    </div>
+                                </TabContent>
                             </div>
-                            <div className="flex items-center justify-between py-2 border-b">
-                                <span className="text-sm">Match facial</span>
-                                <Switcher checked={editingMatch} onChange={setEditingMatch} />
-                            </div>
-                            {editingMatch && (
-                                <div className="pl-4">
-                                    <label className="text-xs text-gray-400 block mb-1">Umbral de similitud</label>
-                                    <Input type="number" step="0.01" min="0" max="1" value={editingMatchThreshold} onChange={(e) => setEditingMatchThreshold(e.target.value)} className="w-32" />
-                                </div>
-                            )}
-                            <div className="flex items-center justify-between py-2 border-b">
-                                <span className="text-sm">Liveness / anti-spoofing</span>
-                                <Switcher checked={editingLiveness} onChange={setEditingLiveness} />
-                            </div>
-                            {editingLiveness && (
-                                <div className="pl-4">
-                                    <label className="text-xs text-gray-400 block mb-1">Modo</label>
-                                    <Select
-                                        size="sm"
-                                        options={LIVENESS_MODE_OPTS}
-                                        value={LIVENESS_MODE_OPTS.find((o) => o.value === editingLivenessMode) ?? null}
-                                        onChange={(o) => setEditingLivenessMode(o?.value ?? 'passive')}
-                                    />
-                                </div>
-                            )}
-                            <div className="flex items-center justify-between py-2 border-b">
-                                <span className="text-sm">AML / screening</span>
-                                <Switcher checked={editingAml} onChange={setEditingAml} />
-                            </div>
-                            {editingAml && (
-                                <div className="pl-4">
-                                    <label className="text-xs text-gray-400 block mb-1">Al accionar</label>
-                                    <Select
-                                        size="sm"
-                                        options={AML_ONMATCH_OPTS}
-                                        value={AML_ONMATCH_OPTS.find((o) => o.value === editingAmlOnMatch) ?? null}
-                                        onChange={(o) => setEditingAmlOnMatch(o?.value ?? 'review')}
-                                    />
-                                </div>
-                            )}
-                        </div>
-                    </div>
-                    <div>
-                        <h6 className="text-sm font-medium mb-2">Modo de revisión</h6>
-                        <Select
-                            options={MODE_OPTS}
-                            value={MODE_OPTS.find((m) => m.value === editingReview) ?? null}
-                            onChange={(o) => setEditingReview(o?.value ?? 'auto')}
-                        />
-                    </div>
-                </div>
+                        </Tabs>
+                    )
+                })()}
                 <div className="mt-6 flex justify-end gap-2">
                     <Button variant="default" onClick={() => setEditing(null)}>Cancelar</Button>
                     <Button variant="solid" loading={busy} icon={<PiCheck />} onClick={handleSave}>Guardar como nueva versión</Button>

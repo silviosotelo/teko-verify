@@ -22,6 +22,7 @@ import { evidenceStore } from "../lib/evidenceStore";
 import { decodeBase64Image, assertFrameCount } from "../lib/images";
 import { ensureRasterImage } from "../lib/raster";
 import { processSession, computeChecks, finalizeFromChecks } from "../pipeline";
+import { withResolvedThresholds } from "../lib/configThresholds";
 import { realPipelineDeps } from "../pipelineDeps";
 import { webhookDispatcher } from "../webhooks/dispatcher";
 import { decision as decideVerdict } from "../modules/decision";
@@ -694,9 +695,14 @@ captureRouter.post("/:token/submit", async (req: Request, res: Response) => {
     await repos.sessions.update(session.tenantId, session.id, { state: "processing" });
 
     // El pipeline persiste todo y dispara el webhook; fail-closed garantizado adentro.
+    const policy = await withResolvedThresholds(tenant.policies, {
+      tenantId: session.tenantId,
+      appId: session.appId ?? null,
+      workflowId: session.workflowId ?? null,
+    });
     const out = await processSession(
       { ...session, state: "processing" },
-      tenant.policies,
+      policy,
       { selfie, docFront, docBack, frames, activeLiveness, proofOfAddress },
       realPipelineDeps
     );
@@ -768,7 +774,11 @@ captureRouter.post("/:token/preview", async (req: Request, res: Response) => {
 
     const out = await computeChecks(
       { ...session, state: "processing" },
-      tenant.policies,
+      await withResolvedThresholds(tenant.policies, {
+        tenantId: session.tenantId,
+        appId: session.appId ?? null,
+        workflowId: session.workflowId ?? null,
+      }),
       { selfie, docFront, docBack, frames, activeLiveness, proofOfAddress },
       realPipelineDeps
     );
@@ -854,7 +864,12 @@ captureRouter.post("/:token/confirm", async (req: Request, res: Response) => {
       res.status(409).json({ error: "incomplete_uploads", state: session.state });
       return;
     }
-    const out = await finalizeFromChecks(session, tenant.policies, selfie, realPipelineDeps);
+    const finalizePolicy = await withResolvedThresholds(tenant.policies, {
+      tenantId: session.tenantId,
+      appId: session.appId ?? null,
+      workflowId: session.workflowId ?? null,
+    });
+    const out = await finalizeFromChecks(session, finalizePolicy, selfie, realPipelineDeps);
     await emitInReviewIfNeeded(session, out);
     await recordEvent(req, session, "decision.made", {
       via: "confirm",

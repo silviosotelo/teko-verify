@@ -42,6 +42,10 @@ import type {
     TenantSubscription,
     UsageAlert,
     UsageAlertInput,
+    TenantIntegration,
+    IntegrationKind,
+    DocumentTypeDef,
+    DocFieldDef,
 } from './types'
 
 // baseURL origin-root: NO relativo a /admin-ui/.
@@ -130,6 +134,18 @@ async function requestBlob(path: string): Promise<Blob> {
     }
     if (!res.ok) throw new ApiError(res.status, `Error ${res.status}`)
     return res.blob()
+}
+
+export interface ConfigValue {
+    id: string
+    scopeType: string
+    scopeId: string | null
+    namespace: string
+    key: string
+    value: unknown
+    version: number
+    updatedBy: string
+    updatedAt: string
 }
 
 export const tekoApi = {
@@ -562,6 +578,22 @@ export const tekoApi = {
         )
     },
 
+    // ---- Config Plane (Fase 0) — config por scope, versionada ----
+    getConfig(tenantId: string, scopeType = 'tenant', scopeId?: string) {
+        const qs = new URLSearchParams({ scopeType })
+        if (scopeId) qs.set('scopeId', scopeId)
+        return request<{ scopeType: string; scopeId: string | null; values: ConfigValue[] }>(
+            'GET',
+            `/tenants/${tenantId}/config?${qs.toString()}`,
+        )
+    },
+    setConfig(
+        tenantId: string,
+        body: { scopeType: string; scopeId?: string; namespace: string; key: string; value: unknown },
+    ) {
+        return request<ConfigValue>('PUT', `/tenants/${tenantId}/config`, body)
+    },
+
     // ---- Rate limits por tenant ----
     updateTenantRateLimits(
         tenantId: string,
@@ -654,6 +686,60 @@ export const tekoApi = {
             'DELETE',
             `/tenants/${tenantId}/usage-alerts/${alertId}`,
         )
+    },
+
+    // ---- Integraciones por tenant (Fase 2) ----
+    getIntegrations(tenantId: string) {
+        return request<{ integrations: TenantIntegration[] }>(
+            'GET',
+            `/tenants/${tenantId}/integrations`,
+        )
+    },
+    putIntegration(
+        tenantId: string,
+        kind: IntegrationKind,
+        config: Record<string, unknown>,
+        enabled: boolean,
+    ) {
+        return request<{ integration: TenantIntegration }>(
+            'PUT',
+            `/tenants/${tenantId}/integrations/${kind}`,
+            { config, enabled },
+        )
+    },
+    deleteIntegration(tenantId: string, kind: IntegrationKind) {
+        return request<{ ok: boolean }>(
+            'DELETE',
+            `/tenants/${tenantId}/integrations/${kind}`,
+        )
+    },
+
+    // ---- document-types (Fase 4) -------------------------------------------
+    async getDocumentTypes(): Promise<DocumentTypeDef[]> {
+        return request<DocumentTypeDef[]>('GET', '/document-types')
+    },
+
+    async createDocumentType(data: {
+        key: string; label: string; country?: string;
+        mrzFormat?: string | null; enabled?: boolean; scopeType?: string
+    }): Promise<DocumentTypeDef> {
+        return request<DocumentTypeDef>('POST', '/document-types', data)
+    },
+
+    async putDocumentType(key: string, patch: Partial<DocumentTypeDef>): Promise<DocumentTypeDef> {
+        return request<DocumentTypeDef>('PUT', `/document-types/${key}`, patch)
+    },
+
+    async deleteDocumentType(key: string): Promise<{ deleted: boolean }> {
+        return request<{ deleted: boolean }>('DELETE', `/document-types/${key}`)
+    },
+
+    async getDocumentTypeFields(key: string): Promise<DocFieldDef[]> {
+        return request<DocFieldDef[]>('GET', `/document-types/${key}/fields`)
+    },
+
+    async deleteDocumentTypeField(docKey: string, fieldId: string): Promise<{ deleted: boolean }> {
+        return request<{ deleted: boolean }>('DELETE', `/document-types/${docKey}/fields/${fieldId}`)
     },
 }
 

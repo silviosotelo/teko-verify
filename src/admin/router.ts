@@ -38,6 +38,9 @@ import { mergePolicy } from "../lib/policy";
 import { requestContext } from "../lib/requestContext";
 import { analyzeDeviceIp } from "../lib/deviceIp";
 import { resolveTestSessionTtlSec } from "./testSessionTtl";
+import { parseConfigScope, isValidConfigPut } from "./configValidation";
+import { maskConfig, mergeConfig } from "./integrationHelpers";
+import { isValidKind } from "../db/repos/tenantIntegrations";
 import { decodeBase64Image } from "../lib/images";
 import { ensureRasterImage } from "../lib/raster";
 import { isMailerConfigured, isValidEmail, sendVerificationEmail } from "../lib/mailer";
@@ -86,6 +89,9 @@ import type {
 } from "../types";
 import { WEBHOOK_EVENTS } from "../types";
 import { getQuotaStatus } from "../lib/billing";
+import { isValidDocTypePost, isValidDocTypePatch } from "./docTypeValidation";
+import * as docTypesRepo from "../db/repos/documentTypes";
+import * as fieldsRepo from "../db/repos/extractionFields";
 
 /** Base pública para construir el verifyUrl de la sesión de test con cámara. */
 const PUBLIC_BASE_URL = (
@@ -2865,3 +2871,250 @@ adminRouter.post(
     res.json({ delivery });
   }
 );
+
+// ---- Config Plane (Fase 0) — config por scope, versionada + auditada --------- //
+
+// GET /admin/tenants/:id/config?scopeType= → valores vigentes del scope.
+// Nota: ?scopeId= NO aplica — el scope 'tenant' ancla al :id de la ruta (scopeId ignorado).
+adminRouter.get(
+  "/tenants/:id/config",
+  requirePermission("manage_tenants"),
+  async (req: Request, res: Response) => {
+    const tenant = await repos.tenants.getById(req.params.id);
+    if (!tenant) {
+      res.status(404).json({ error: "tenant_not_found" });
+      return;
+    }
+    const scope = parseConfigScope(req.query as Record<string, unknown>, tenant.id);
+    if (!scope) {
+      res.status(400).json({ error: "invalid_scope" });
+      return;
+    }
+    const values = await repos.configValues.listByScope(scope.scopeType, scope.scopeId);
+    res.json({ scopeType: scope.scopeType, scopeId: scope.scopeId, values });
+  }
+);
+
+// PUT /admin/tenants/:id/config {scopeType, scopeId?, namespace, key, value}
+// → crea una NUEVA versión de la clave en ese scope. set() escribe config_audit.
+//
+// DECISIÓN FASE 0: el permiso manage_tenants (solo owner en RBAC) protege TANTO
+// el scope 'system' como 'tenant'. Esto es INTENCIONAL: en Fase 0 no existe un
+// ownership check que permita a un tenant-admin editar su propia config. Ese
+// permiso más fino llegará en Fase 1, donde se verificará que el operador es
+// dueño del tenant de la ruta antes de reducir el requisito a manage_config
+// (o equivalente) para scope 'tenant'. Por ahora, solo platform-owners pueden
+// tocar config de cualquier scope.
+adminRouter.put(
+  "/tenants/:id/config",
+  requirePermission("manage_tenants"),
+  async (req: Request, res: Response) => {
+    const tenant = await repos.tenants.getById(req.params.id);
+    if (!tenant) {
+      res.status(404).json({ error: "tenant_not_found" });
+      return;
+    }
+    const scope = parseConfigScope(
+      { scopeType: req.body?.scopeType, scopeId: req.body?.scopeId },
+      tenant.id
+    );
+    if (!scope) {
+      res.status(400).json({ error: "invalid_scope" });
+      return;
+    }
+    if (!isValidConfigPut(req.body)) {
+      res.status(400).json({ error: "namespace_key_value_required" });
+      return;
+    }
+    const created = await repos.configValues.set({
+      scopeType: scope.scopeType,
+      scopeId: scope.scopeId,
+      namespace: req.body.namespace,
+      key: req.body.key,
+      value: req.body.value,
+      actor: `admin:${req.adminOperator?.operatorId ?? "?"}`,
+    });
+    res.json(created);
+  }
+);
+
+// ─── GET /admin/tenants/:id/integrations ─────────────────────────────────── //
+// Lists all integrations for a tenant. Secret config fields are ALWAYS masked
+// ("***") in the response — the clear-text credential never leaves the server.
+adminRouter.get(
+  "/tenants/:id/integrations",
+  requirePermission("manage_tenants"),
+  async (req: Request, res: Response) => {
+    const tenant = await repos.tenants.getById(req.params.id);
+    if (!tenant) return res.status(404).json({ error: "tenant not found" });
+    const list = await repos.tenantIntegrations.listByTenant(req.params.id);
+    return res.json({
+      integrations: list.map((ti) => ({ ...ti, config: maskConfig(ti.config) })),
+    });
+  }
+);
+
+// ─── PUT /admin/tenants/:id/integrations/:kind ───────────────────────────── //
+// Creates or updates the provider config for a tenant integration.
+//
+// SECRET MERGE: if the incoming config contains a field with value "***" (the
+// sentinel the UI shows for masked secrets), we do NOT overwrite the existing
+// encrypted value — we read the existing decrypted row and overlay only the
+// fields whose value is NOT "***". This means toggling `enabled` or editing a
+// non-secret field never wipes a stored password/key.
+adminRouter.put(
+  "/tenants/:id/integrations/:kind",
+  requirePermission("manage_tenants"),
+  async (req: Request, res: Response) => {
+    const { id, kind } = req.params;
+    if (!isValidKind(kind)) {
+      return res
+        .status(400)
+        .json({ error: `invalid kind: ${kind}. Valid: smtp, storage, aml, sms` });
+    }
+    const tenant = await repos.tenants.getById(id);
+    if (!tenant) return res.status(404).json({ error: "tenant not found" });
+
+    const { config, enabled } = req.body as {
+      config?: Record<string, unknown>;
+      enabled?: boolean;
+    };
+    if (!config || typeof config !== "object" || Array.isArray(config)) {
+      return res.status(400).json({ error: "body.config must be a plain object" });
+    }
+
+    // Server-side merge: read existing decrypted config as the base, then
+    // overlay only incoming fields that are NOT the masked sentinel "***".
+    // We do NOT gate on existing.enabled — a disabled-but-configured row still
+    // has a real secret that must survive a re-enable. The fail-closed path in
+    // the repo already returns config={} when decrypt fails, so those rows
+    // contribute nothing to the base (correct).
+    let existingConfig: Record<string, unknown> | null = null;
+    try {
+      const existing = await repos.tenantIntegrations.getByKind(id, kind);
+      if (existing) existingConfig = existing.config;
+    } catch {
+      // If the existing-row read fails, proceed with incoming fields only.
+    }
+    const mergedConfig = mergeConfig(existingConfig, config);
+
+    const actor = `admin:${req.adminOperator?.operatorId ?? "?"}`;
+    try {
+      const ti = await repos.tenantIntegrations.upsert(
+        id,
+        kind,
+        mergedConfig,
+        enabled !== false,
+        actor
+      );
+      return res.json({ integration: { ...ti, config: maskConfig(ti.config) } });
+    } catch (e) {
+      // encryptConfig throws if TEKO_SECRETS_KEY is missing.
+      console.error(`[admin] PUT integrations failed: ${(e as Error).message}`);
+      return res
+        .status(500)
+        .json({
+          error:
+            "failed to save integration — TEKO_SECRETS_KEY may not be configured",
+        });
+    }
+  }
+);
+
+// ---- Tipos de documento + campos (Fase 4) -------------------------------- //
+
+const SYSTEM_PARSERS_F4    = new Set(['ci_py', 'passport'])
+const VALID_FIELD_TYPES_F4 = new Set(['string', 'date', 'boolean', 'number'])
+
+adminRouter.get('/document-types', async (_req: Request, res: Response) => {
+  res.json(await docTypesRepo.listDocumentTypes())
+})
+
+adminRouter.post('/document-types', requirePermission('manage_tenants'),
+  async (req: Request, res: Response) => {
+    if (!isValidDocTypePost(req.body)) {
+      res.status(400).json({ error: 'invalid_doc_type_input' }); return
+    }
+    if (await docTypesRepo.getDocumentType(req.body.key)) {
+      res.status(409).json({ error: 'doc_type_key_exists' }); return
+    }
+    const created = await docTypesRepo.upsertDocumentType({
+      key: req.body.key, label: req.body.label,
+      country: typeof req.body.country === 'string' ? req.body.country : 'PY',
+      mrzFormat: (req.body.mrzFormat ?? null) as 'td1' | 'td3' | null,
+      enabled: typeof req.body.enabled === 'boolean' ? req.body.enabled : true,
+      scopeType: (req.body.scopeType ?? 'system') as 'system' | 'tenant',
+      scopeId: req.body.scopeId ?? null,
+    })
+    res.status(201).json(created)
+  }
+)
+
+adminRouter.put('/document-types/:key', requirePermission('manage_tenants'),
+  async (req: Request, res: Response) => {
+    const existing = await docTypesRepo.getDocumentType(req.params.key)
+    if (!existing) { res.status(404).json({ error: 'doc_type_not_found' }); return }
+    if (!isValidDocTypePatch(req.body)) {
+      res.status(400).json({ error: 'invalid_doc_type_patch' }); return
+    }
+    res.json(await docTypesRepo.upsertDocumentType({
+      ...existing,
+      label:      typeof req.body.label   === 'string'  ? req.body.label                            : existing.label,
+      country:    typeof req.body.country === 'string'  ? req.body.country                          : existing.country,
+      mrzFormat:  req.body.mrzFormat  !== undefined     ? req.body.mrzFormat as 'td1' | 'td3' | null : existing.mrzFormat,
+      enabled:    typeof req.body.enabled === 'boolean' ? req.body.enabled                          : existing.enabled,
+    }))
+  }
+)
+
+adminRouter.delete('/document-types/:key', requirePermission('manage_tenants'),
+  async (req: Request, res: Response) => {
+    const existing = await docTypesRepo.getDocumentType(req.params.key)
+    if (!existing) { res.status(404).json({ error: 'doc_type_not_found' }); return }
+    if (SYSTEM_PARSERS_F4.has(req.params.key)) {
+      res.status(409).json({ error: 'cannot_delete_system_doc_type' }); return
+    }
+    res.json({ deleted: await docTypesRepo.deleteDocumentType(req.params.key) })
+  }
+)
+
+adminRouter.get('/document-types/:key/fields', async (req: Request, res: Response) => {
+  res.json(await fieldsRepo.listFieldsForDocType(req.params.key))
+})
+
+adminRouter.post('/document-types/:key/fields', requirePermission('manage_tenants'),
+  async (req: Request, res: Response) => {
+    const b = req.body ?? {}
+    const key   = typeof b.key   === 'string' && b.key.trim()   ? b.key.trim()   : null
+    const label = typeof b.label === 'string' && b.label.trim() ? b.label.trim() : null
+    const path  = typeof b.path  === 'string' && b.path.trim()  ? b.path.trim()  : null
+    const type  = VALID_FIELD_TYPES_F4.has(b.type)
+      ? b.type as 'string' | 'date' | 'boolean' | 'number' : null
+    if (!key || !label || !path || !type) {
+      res.status(400).json({ error: 'key_label_path_type_required' }); return
+    }
+    const parent = await docTypesRepo.getDocumentType(req.params.key)
+    if (!parent) { res.status(404).json({ error: 'doc_type_not_found' }); return }
+    res.status(201).json(await fieldsRepo.createField({
+      docTypeKey: req.params.key, key, label, type, path,
+      validation: (b.validation && typeof b.validation === 'object') ? b.validation : {},
+      displayOrder: typeof b.displayOrder === 'number' ? b.displayOrder : 0,
+    }))
+  }
+)
+
+adminRouter.put('/document-types/:key/fields/:fieldId', requirePermission('manage_tenants'),
+  async (req: Request, res: Response) => {
+    const updated = await fieldsRepo.updateField(req.params.fieldId, req.body ?? {})
+    if (!updated) { res.status(404).json({ error: 'field_not_found' }); return }
+    res.json(updated)
+  }
+)
+
+adminRouter.delete('/document-types/:key/fields/:fieldId', requirePermission('manage_tenants'),
+  async (req: Request, res: Response) => {
+    const deleted = await fieldsRepo.deleteField(req.params.fieldId)
+    if (!deleted) { res.status(404).json({ error: 'field_not_found' }); return }
+    res.json({ deleted })
+  }
+)

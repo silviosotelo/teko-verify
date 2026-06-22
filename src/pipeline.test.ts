@@ -270,6 +270,21 @@ describe("processSession — camino verified (L3)", () => {
     expect(spy.sessionUpdates.some((u) => u.state === "verified")).toBe(true);
   });
 
+  it("L2 verifica con quality+document+match (sin liveness), LoA alcanzado = L2 (no-regresión)", async () => {
+    const modules = modulesFor({ quality: PASS_QUALITY, document: makeDocument(true), match: "pass" });
+    const out = await processSession(
+      makeSession({ workflowSnapshot: workflowDefForLoA("L2"), assuranceRequired: "L2" }),
+      makePolicy({ assuranceRequired: "L2" }),
+      IMAGES,
+      makeDeps(modules, spy)
+    );
+    expect(out.state).toBe("verified");
+    expect(out.result?.loa).toBe("L2");
+    // No corre liveness para L2.
+    expect(spy.checks.map((c) => c.type).sort()).toEqual(["document", "match", "quality"]);
+    expect(spy.identities).toHaveLength(1);
+  });
+
   it("L1 verifica con sólo quality+document (sin match ni liveness)", async () => {
     const modules = modulesFor({ quality: PASS_QUALITY, document: makeDocument(true), match: "pass" });
     const out = await processSession(makeSession({ assuranceRequired: "L1" }), makePolicy({ assuranceRequired: "L1" }), IMAGES, makeDeps(modules, spy));
@@ -463,5 +478,149 @@ describe("applyReviewDecision — decisión humana (P0 #1)", () => {
     expect(out.state).toBe("rejected");
     expect(spy.identities).toHaveLength(0);
     expect(spy.webhooks).toEqual([{ event: "session.rejected", state: "rejected" }]);
+  });
+});
+
+describe("pipeline.checks configuration (Fase 3)", () => {
+  let spy: SpyState;
+  beforeEach(() => {
+    spy = freshSpy();
+  });
+
+  it("liveness disabled in pipeline.checks → liveness module never called even at L3", async () => {
+    const def = {
+      ...workflowDefForLoA("L3"),
+      pipeline: { checks: [{ key: "liveness", enabled: false, order: 1 }] },
+    };
+    const session = makeSession({ workflowSnapshot: def, assuranceRequired: "L3" });
+    const livenessSpy = vi.fn().mockResolvedValue({ score: 0.99, passed: true, attackType: "none" });
+    const modules: PipelineModules = {
+      ...modulesFor({ quality: PASS_QUALITY, liveness: PASS_LIVENESS, document: makeDocument(true), match: "pass" }),
+      liveness: livenessSpy,
+    };
+    await processSession(session, makePolicy(), IMAGES, makeDeps(modules, spy));
+    expect(livenessSpy).not.toHaveBeenCalled();
+  });
+
+  it("aml disabled in pipeline.checks → aml module never called even when aml.required=true", async () => {
+    const def: WorkflowDefinition = {
+      document: { required: true },
+      match: { required: true },
+      aml: { required: true, threshold: 0.8 },
+      review: { mode: "auto" },
+      pipeline: { checks: [{ key: "aml", enabled: false, order: 4 }] },
+    };
+    const session = makeSession({ workflowSnapshot: def, assuranceRequired: "L2" });
+    const amlSpy = vi.fn().mockResolvedValue({
+      passed: true,
+      decision: "clear",
+      hits: [],
+      topScore: 0,
+      threshold: 0.8,
+      query: { nombres: "", apellidos: "", normalized: "" },
+      provider: "test",
+      datasetVersion: null,
+    });
+    const modules: PipelineModules = {
+      ...modulesFor({ quality: PASS_QUALITY, document: makeDocument(true), match: "pass" }),
+      aml: amlSpy,
+    };
+    await processSession(session, makePolicy({ assuranceRequired: "L2" }), IMAGES, makeDeps(modules, spy));
+    expect(amlSpy).not.toHaveBeenCalled();
+  });
+
+  it("no pipeline.checks → behavior identical to default (regression)", async () => {
+    const session = makeSession({ workflowSnapshot: workflowDefForLoA("L3"), assuranceRequired: "L3" });
+    const modules = modulesFor({ quality: PASS_QUALITY, liveness: PASS_LIVENESS, document: makeDocument(true), match: "pass" });
+    const result = await processSession(session, makePolicy(), IMAGES, makeDeps(modules, spy));
+    expect(result.state).toBe("verified");
+    expect(result.result?.loa).toBe("L3");
+  });
+
+  it("disabling match in pipeline.checks → match check not persisted, LoA is L1", async () => {
+    const def: WorkflowDefinition = {
+      document: { required: true },
+      match: { required: true },
+      review: { mode: "auto" },
+      pipeline: { checks: [{ key: "match", enabled: false, order: 3 }] },
+    };
+    const session = makeSession({ workflowSnapshot: def, assuranceRequired: "L1" });
+    const modules = modulesFor({ quality: PASS_QUALITY, document: makeDocument(true), match: "pass" });
+    const result = await processSession(session, makePolicy({ assuranceRequired: "L1" }), IMAGES, makeDeps(modules, spy));
+    expect(spy.checks.some((c) => c.type === "match")).toBe(false);
+    expect(result.state).toBe("verified");
+    expect(result.result?.loa).toBe("L1");
+  });
+
+  // T5: per-check param overrides from resolver config
+  it("match threshold from pipeline.checks config overrides workflow threshold (no-crash, happy path)", async () => {
+    const def: WorkflowDefinition = {
+      document: { required: true },
+      match: { required: true, threshold: 0.4 },
+      review: { mode: "auto" },
+      pipeline: {
+        checks: [{ key: "match", enabled: true, order: 3, config: { threshold: 0.7 } }],
+      },
+    };
+    const session = makeSession({ workflowSnapshot: def, assuranceRequired: "L2" });
+    const deps = makeDeps(
+      modulesFor({ quality: PASS_QUALITY, document: makeDocument(true), match: "pass" }),
+      spy
+    );
+    const result = await processSession(session, makePolicy({ assuranceRequired: "L2" }), IMAGES, deps);
+    // Default mocks (cosine=1.0) exceed any threshold → verified regardless
+    expect(result.state).toBe("verified");
+    expect(result.result?.loa).toBe("L2");
+  });
+
+  it("match config threshold overrides policy threshold — discriminating (cosine=0.6 passes 0.5 but fails 0.9)", async () => {
+    const def: WorkflowDefinition = {
+      document: { required: true },
+      match: { required: true },
+      review: { mode: "auto" },
+      pipeline: {
+        checks: [{ key: "match", enabled: true, order: 3, config: { threshold: 0.9 } }],
+      },
+    };
+    const session = makeSession({ workflowSnapshot: def, assuranceRequired: "L2" });
+    // selfie=[1,0,0], docface=[0.6,0.8,0] → cosine=0.6 (0.6²+0.8²=1 so already unit-length)
+    const selfieVec = new Float32Array([1, 0, 0]);
+    const docFaceVec = new Float32Array([0.6, 0.8, 0]);
+    const modules: PipelineModules = {
+      ...modulesFor({ quality: PASS_QUALITY, document: makeDocument(true), match: "pass" }),
+      embed: async (image) => (image.equals(Buffer.from("selfie")) ? selfieVec : docFaceVec),
+    };
+    // policy matchCosine=0.5 → without override cosine 0.6 would pass → verified
+    // pipeline.checks config threshold=0.9 → cosine 0.6 fails → rejected
+    const result = await processSession(
+      session,
+      makePolicy({ assuranceRequired: "L2", thresholds: { matchCosine: 0.5 } }),
+      IMAGES,
+      makeDeps(modules, spy)
+    );
+    expect(result.state).toBe("rejected");
+  });
+
+  it("match config with invalid threshold (string) falls back safely — fail-closed NaN guard", async () => {
+    const def: WorkflowDefinition = {
+      document: { required: true },
+      match: { required: true },
+      review: { mode: "auto" },
+      pipeline: {
+        // 'not-a-number' without the guard would become NaN → 1.0 >= NaN = false → rejected
+        checks: [{ key: "match", enabled: true, order: 3, config: { threshold: "not-a-number" } }],
+      },
+    };
+    const session = makeSession({ workflowSnapshot: def, assuranceRequired: "L2" });
+    // cosine=1.0 passes any valid threshold; NaN would cause false → rejected (fail)
+    const modules = modulesFor({ quality: PASS_QUALITY, document: makeDocument(true), match: "pass" });
+    const result = await processSession(
+      session,
+      makePolicy({ assuranceRequired: "L2" }),
+      IMAGES,
+      makeDeps(modules, spy)
+    );
+    // Guard must discard the string and fall back → verified (no NaN to engine)
+    expect(result.state).toBe("verified");
   });
 });

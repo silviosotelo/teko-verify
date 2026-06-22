@@ -126,6 +126,73 @@ describe("decision — caminos verified legítimos (sin regresión)", () => {
   });
 });
 
+/**
+ * SECURITY INVARIANT — "nonsensical config" edge case (T3 Fase 3 resolver concern).
+ *
+ * A workflow definition like:
+ *   { liveness.required:true, match.required:true,
+ *     pipeline.checks:[{key:'match', enabled:false}] }
+ * yields assuranceRequired=L3 BUT resolveCheckList disables match → match never runs →
+ * checks.match is undefined when decision() is called.
+ *
+ * decision() MUST be fail-closed: match absent means the L3 ladder cannot be completed,
+ * so the session is REJECTED (assurance_not_met), NEVER "verified".
+ *
+ * These tests anchor that invariant before T4 consumes the resolver.
+ */
+describe("decision — fail-closed invariant: check ausente en LoA requerido (nonsensical config)", () => {
+  it("L3 con match AUSENTE (undefined) → rejected, nunca verified", () => {
+    // Simula el nonsensical config: assuranceRequired=L3 pero match no corrió.
+    const checks: PipelineChecks = {
+      quality: QUALITY_OK,
+      document: makeDoc(true),
+      // match: undefined — no corrió
+      liveness: LIVE_PASS,
+    };
+    const d = decision(checks, policy("L3"));
+    expect(d.verdict).toBe("rejected");
+    expect(d.loa).toBe("L0");
+    expect(d.reasons.some((r) => r.startsWith("assurance_not_met"))).toBe(true);
+  });
+
+  it("L3 con match Y liveness ambos AUSENTES → rejected (no verified)", () => {
+    const checks: PipelineChecks = {
+      quality: QUALITY_OK,
+      document: makeDoc(true),
+      // match: undefined, liveness: undefined
+    };
+    const d = decision(checks, policy("L3"));
+    expect(d.verdict).toBe("rejected");
+    expect(d.loa).toBe("L0");
+    expect(d.reasons.some((r) => r.startsWith("assurance_not_met"))).toBe(true);
+  });
+
+  it("L2 con match AUSENTE → rejected (no verified)", () => {
+    const checks: PipelineChecks = {
+      quality: QUALITY_OK,
+      document: makeDoc(true),
+      // match: undefined
+    };
+    const d = decision(checks, policy("L2"));
+    expect(d.verdict).toBe("rejected");
+    expect(d.loa).toBe("L0");
+    expect(d.reasons.some((r) => r.startsWith("assurance_not_met"))).toBe(true);
+  });
+
+  it("liveness AUSENTE con assuranceRequired=L3 (variant: match corre) → rejected (ya existía, confirma escalera)", () => {
+    // Re-ancla la escalera: aunque match pasa, sin liveness no hay L3.
+    const checks: PipelineChecks = {
+      quality: QUALITY_OK,
+      document: makeDoc(true),
+      match: MATCH_PASS,
+      // liveness: undefined
+    };
+    const d = decision(checks, policy("L3"));
+    expect(d.verdict).toBe("rejected");
+    expect(d.reasons.some((r) => r.startsWith("assurance_not_met"))).toBe(true);
+  });
+});
+
 describe("match — coseno fail-closed con embeddings inválidos", () => {
   it("embedding con NaN → coseno -1, passed false (no NaN/null)", () => {
     const r = match(new Float32Array([NaN, 0, 0]), new Float32Array([1, 0, 0]), 0.5);

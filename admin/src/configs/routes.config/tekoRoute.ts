@@ -125,6 +125,27 @@ const tekoRoute: Routes = [
         authority: [],
         meta: { pageContainerType: 'contained' },
     },
+    {
+        key: 'teko.configuracion',
+        path: '/configuracion',
+        component: lazy(() => import('@/views/teko/Configuracion')),
+        authority: [],
+        meta: { pageContainerType: 'contained' },
+    },
+    {
+        key: 'teko.configCenter',
+        path: '/config-center',
+        component: lazy(() => import('@/views/teko/ConfigCenter')),
+        authority: [],
+        meta: { pageContainerType: 'contained' },
+    },
+    {
+        key: 'teko.documentTypes',
+        path: '/document-types',
+        component: lazy(() => import('@/views/teko/DocumentTypes')),
+        authority: [],
+        meta: { pageContainerType: 'contained' },
+    },
 ]
 
 export default tekoRoute

@@ -379,6 +379,14 @@ export interface SessionEventsResponse {
 // ---- Workflows (configurables + versionados) — P0 #1 ----
 export type ReviewMode = 'auto' | 'always' | 'on_borderline'
 
+// ---- Configurable pipeline (Fase 3) ----
+export interface PipelineCheckEntry {
+    key: string
+    enabled: boolean
+    order: number
+    config?: Record<string, unknown>
+}
+
 export interface WorkflowDefinition {
     document?: { required: boolean }
     liveness?: { required: boolean; mode?: 'active' | 'passive'; threshold?: number }
@@ -387,6 +395,8 @@ export interface WorkflowDefinition {
     aml?: { required: boolean; threshold?: number; onMatch?: 'review' | 'flag' }
     // Cuestionario custom (P2): referencia a un questionnaires.id del tenant.
     questionnaire?: { questionnaireId: string; required?: boolean }
+    // Configurable pipeline (Fase 3). Absent = backward compat (derive from required fields).
+    pipeline?: { checks: PipelineCheckEntry[] }
     review?: {
         mode: ReviewMode
         borderlineBand?: {
@@ -671,6 +681,50 @@ export interface UsageAlertInput {
     channel: UsageAlertChannel
     target: string
     enabled: boolean
+}
+
+// ---- Integraciones por tenant (Fase 2) ----
+export type IntegrationKind = 'smtp' | 'storage' | 'aml' | 'sms'
+
+export interface TenantIntegration {
+    id: string
+    tenantId: string
+    kind: IntegrationKind
+    config: Record<string, unknown> // secret fields masked as "***" from API
+    enabled: boolean
+    updatedBy: string
+    createdAt: string
+    updatedAt: string
+}
+
+// ---- Documentos & Campos (Fase 4 — T6) ----
+export interface DocumentTypeDef {
+    key: string
+    label: string
+    country: string
+    mrzFormat: 'td1' | 'td3' | null
+    enabled: boolean
+    scopeType: 'system' | 'tenant'
+    scopeId: string | null
+    createdAt: string
+    updatedAt: string
+}
+
+export interface DocFieldDef {
+    id: string
+    docTypeKey: string
+    key: string
+    label: string
+    type: 'string' | 'date' | 'boolean' | 'number'
+    path: string
+    validation: {
+        required?: boolean
+        regex?: string
+        dateRange?: { minIso?: string; maxIso?: string }
+        normalize?: string
+    }
+    displayOrder: number
+    createdAt: string
 }
 
 // Identidad rica extraída del documento (checks[document].detail.extracted).

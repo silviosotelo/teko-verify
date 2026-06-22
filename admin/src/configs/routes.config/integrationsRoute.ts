@@ -23,6 +23,13 @@ const integrationsRoute: Routes = [
         authority: [],
         meta: { pageContainerType: 'contained' },
     },
+    {
+        key: 'integrations.providers',
+        path: '/integrations/providers',
+        component: lazy(() => import('@/views/teko/TenantIntegrations')),
+        authority: [],
+        meta: { pageContainerType: 'contained' },
+    },
 ]
 
 export default integrationsRoute
