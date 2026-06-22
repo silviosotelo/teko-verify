@@ -551,4 +551,76 @@ describe("pipeline.checks configuration (Fase 3)", () => {
     expect(result.state).toBe("verified");
     expect(result.result?.loa).toBe("L1");
   });
+
+  // T5: per-check param overrides from resolver config
+  it("match threshold from pipeline.checks config overrides workflow threshold (no-crash, happy path)", async () => {
+    const def: WorkflowDefinition = {
+      document: { required: true },
+      match: { required: true, threshold: 0.4 },
+      review: { mode: "auto" },
+      pipeline: {
+        checks: [{ key: "match", enabled: true, order: 3, config: { threshold: 0.7 } }],
+      },
+    };
+    const session = makeSession({ workflowSnapshot: def, assuranceRequired: "L2" });
+    const deps = makeDeps(
+      modulesFor({ quality: PASS_QUALITY, document: makeDocument(true), match: "pass" }),
+      spy
+    );
+    const result = await processSession(session, makePolicy({ assuranceRequired: "L2" }), IMAGES, deps);
+    // Default mocks (cosine=1.0) exceed any threshold → verified regardless
+    expect(result.state).toBe("verified");
+    expect(result.result?.loa).toBe("L2");
+  });
+
+  it("match config threshold overrides policy threshold — discriminating (cosine=0.6 passes 0.5 but fails 0.9)", async () => {
+    const def: WorkflowDefinition = {
+      document: { required: true },
+      match: { required: true },
+      review: { mode: "auto" },
+      pipeline: {
+        checks: [{ key: "match", enabled: true, order: 3, config: { threshold: 0.9 } }],
+      },
+    };
+    const session = makeSession({ workflowSnapshot: def, assuranceRequired: "L2" });
+    // selfie=[1,0,0], docface=[0.6,0.8,0] → cosine=0.6 (0.6²+0.8²=1 so already unit-length)
+    const selfieVec = new Float32Array([1, 0, 0]);
+    const docFaceVec = new Float32Array([0.6, 0.8, 0]);
+    const modules: PipelineModules = {
+      ...modulesFor({ quality: PASS_QUALITY, document: makeDocument(true), match: "pass" }),
+      embed: async (image) => (image.equals(Buffer.from("selfie")) ? selfieVec : docFaceVec),
+    };
+    // policy matchCosine=0.5 → without override cosine 0.6 would pass → verified
+    // pipeline.checks config threshold=0.9 → cosine 0.6 fails → rejected
+    const result = await processSession(
+      session,
+      makePolicy({ assuranceRequired: "L2", thresholds: { matchCosine: 0.5 } }),
+      IMAGES,
+      makeDeps(modules, spy)
+    );
+    expect(result.state).toBe("rejected");
+  });
+
+  it("match config with invalid threshold (string) falls back safely — fail-closed NaN guard", async () => {
+    const def: WorkflowDefinition = {
+      document: { required: true },
+      match: { required: true },
+      review: { mode: "auto" },
+      pipeline: {
+        // 'not-a-number' without the guard would become NaN → 1.0 >= NaN = false → rejected
+        checks: [{ key: "match", enabled: true, order: 3, config: { threshold: "not-a-number" } }],
+      },
+    };
+    const session = makeSession({ workflowSnapshot: def, assuranceRequired: "L2" });
+    // cosine=1.0 passes any valid threshold; NaN would cause false → rejected (fail)
+    const modules = modulesFor({ quality: PASS_QUALITY, document: makeDocument(true), match: "pass" });
+    const result = await processSession(
+      session,
+      makePolicy({ assuranceRequired: "L2" }),
+      IMAGES,
+      makeDeps(modules, spy)
+    );
+    // Guard must discard the string and fall back → verified (no NaN to engine)
+    expect(result.state).toBe("verified");
+  });
 });

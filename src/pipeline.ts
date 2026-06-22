@@ -403,11 +403,14 @@ function amlInputFrom(document: DocumentResult): AmlInput {
 async function runAml(
   deps: PipelineDeps,
   session: VerificationSession,
-  document: DocumentResult
+  document: DocumentResult,
+  configOverride?: Record<string, unknown>
 ): Promise<AmlResult | undefined> {
   const cfg = session.workflowSnapshot?.aml;
   if (!cfg?.required) return undefined;
   const input = amlInputFrom(document);
+  // T5: config override takes precedence; fall back to workflow threshold (fail-closed on invalid).
+  const threshold = toSafeNum(configOverride?.threshold) ?? cfg.threshold;
   const failClosed = (error: string): AmlResult => ({
     query: {
       nombres: input.nombres,
@@ -419,7 +422,7 @@ async function runAml(
     hits: [],
     topScore: 0,
     decision: "potential_match",
-    threshold: cfg.threshold ?? 0,
+    threshold: threshold ?? 0,
     provider: "unavailable",
     datasetVersion: null,
     passed: false,
@@ -427,7 +430,7 @@ async function runAml(
   });
   if (!deps.modules.aml) return failClosed("aml_provider_unavailable");
   try {
-    return await deps.modules.aml(input, { threshold: cfg.threshold });
+    return await deps.modules.aml(input, { threshold });
   } catch (e) {
     return failClosed(e instanceof Error ? e.message : String(e));
   }
@@ -445,14 +448,17 @@ async function runFaceSearch(
   deps: PipelineDeps,
   session: VerificationSession,
   selfieEmb: Float32Array | null,
-  currentCi: string
+  currentCi: string,
+  configOverride?: Record<string, unknown>
 ): Promise<FaceSearchResult | undefined> {
   const cfg = session.workflowSnapshot?.faceSearch;
   if (!cfg?.required) return undefined;
+  // T5: config override takes precedence; fall back to workflow threshold (fail-closed on invalid).
+  const threshold = toSafeNum(configOverride?.threshold) ?? cfg.threshold;
   const failClosed = (error: string): FaceSearchResult => ({
     matches: [],
     topCosine: 0,
-    threshold: cfg.threshold ?? 0,
+    threshold: threshold ?? 0,
     gallerySize: 0,
     // Fail-closed: tratamos la indisponibilidad como sospecha de duplicado para que
     // onDuplicate:'review' rutee a revisión (no dejamos pasar en silencio).
@@ -472,7 +478,7 @@ async function runFaceSearch(
         currentSessionId: session.id,
         currentCi,
       },
-      { threshold: cfg.threshold }
+      { threshold }
     );
   } catch (e) {
     return failClosed(e instanceof Error ? e.message : String(e));
@@ -499,12 +505,16 @@ async function runProofOfAddress(
   deps: PipelineDeps,
   session: VerificationSession,
   document: DocumentResult,
-  image: Buffer | undefined
+  image: Buffer | undefined,
+  configOverride?: Record<string, unknown>
 ): Promise<ProofOfAddressResult | undefined> {
   const cfg = session.workflowSnapshot?.proofOfAddress;
   if (!cfg?.required) return undefined;
   const identityName = identityNameFrom(document);
-  const maxAgeMonths = cfg.maxAgeMonths ?? 3;
+  // T5: config overrides take precedence over workflow values (fail-closed on invalid types).
+  const maxAgeMonths = toSafeNum(configOverride?.maxAgeMonths) ?? cfg.maxAgeMonths ?? 3;
+  const requireNameMatch = toSafeBool(configOverride?.requireNameMatch) ?? cfg.requireNameMatch;
+  const nameThreshold = toSafeNum(configOverride?.nameThreshold) ?? cfg.nameThreshold;
   const failClosed = (error: string): ProofOfAddressResult => ({
     holderName: "",
     addressLines: [],
@@ -525,9 +535,9 @@ async function runProofOfAddress(
   try {
     return await deps.modules.proofOfAddress(image, {
       identityName,
-      maxAgeMonths: cfg.maxAgeMonths,
-      requireNameMatch: cfg.requireNameMatch,
-      nameThreshold: cfg.nameThreshold,
+      maxAgeMonths,
+      requireNameMatch,
+      nameThreshold,
     });
   } catch (e) {
     return failClosed(e instanceof Error ? e.message : String(e));
@@ -544,22 +554,25 @@ async function runProofOfAddress(
 async function runAgeEstimation(
   deps: PipelineDeps,
   session: VerificationSession,
-  selfie: Buffer
+  selfie: Buffer,
+  configOverride?: Record<string, unknown>
 ): Promise<AgeEstimationResult | undefined> {
   const cfg = session.workflowSnapshot?.ageEstimation;
   if (!cfg?.required) return undefined;
+  // T5: config override takes precedence; fall back to workflow minAge (fail-closed on invalid).
+  const minAge = toSafeNum(configOverride?.minAge) ?? cfg.minAge;
   const failClosed = (error: string): AgeEstimationResult => ({
     estimatedAge: 0,
     range: "",
     confidence: 0,
-    minAge: cfg.minAge,
+    minAge,
     underage: false,
     passed: false,
     error,
   });
   if (!deps.modules.ageEstimation) return failClosed("age_estimation_unavailable");
   try {
-    return await deps.modules.ageEstimation(selfie, deps.engine, { minAge: cfg.minAge });
+    return await deps.modules.ageEstimation(selfie, deps.engine, { minAge });
   } catch (e) {
     return failClosed(e instanceof Error ? e.message : String(e));
   }
@@ -567,6 +580,24 @@ async function runAgeEstimation(
 
 function nowIso(): string {
   return new Date().toISOString();
+}
+
+/**
+ * Fail-closed numeric coercion for per-check config overrides (T5).
+ * Returns the value only if it is a finite number; otherwise returns undefined
+ * so callers fall back to the existing policy threshold. This prevents NaN from
+ * reaching the engine when a config entry is a non-numeric value (e.g. a string).
+ */
+function toSafeNum(v: unknown): number | undefined {
+  return typeof v === "number" && Number.isFinite(v) ? v : undefined;
+}
+
+/**
+ * Fail-closed boolean coercion for per-check config overrides (T5).
+ * Returns the value only when it is strictly boolean; otherwise returns undefined.
+ */
+function toSafeBool(v: unknown): boolean | undefined {
+  return typeof v === "boolean" ? v : undefined;
 }
 
 /**
@@ -622,6 +653,11 @@ export async function processSession(
     ? resolveCheckList(session.workflowSnapshot)
     : null;
 
+  // T5: extract per-check config overrides (empty object when not present → no-regression).
+  const qualityConfig = resolvedChecks?.get("quality")?.config ?? {};
+  const livenessConfig = resolvedChecks?.get("liveness")?.config ?? {};
+  const matchConfig = resolvedChecks?.get("match")?.config ?? {};
+
   try {
     // === 0) NORMALIZA DOCUMENTO PDF→imagen (cédula escaneada) ============== //
     // Si docFront/docBack llegaron como PDF, rasteriza a PNG ANTES de cualquier
@@ -632,7 +668,8 @@ export async function processSession(
     const quality = await deps.modules.quality(
       images.selfie,
       deps.engine,
-      policy.thresholds?.qualityGlassesPct
+      // T5: config override (fail-closed: non-finite ignored) ?? policy threshold.
+      toSafeNum(qualityConfig.glassesMaxPct) ?? policy.thresholds?.qualityGlassesPct
     );
 
     if (!quality.passed) {
@@ -697,7 +734,8 @@ export async function processSession(
       liveness = await deps.modules.liveness(images.selfie, deps.engine, {
         frames: images.frames,
         challenge,
-        threshold: policy.thresholds?.livenessScore,
+        // T5: config override (fail-closed) ?? policy threshold.
+        threshold: toSafeNum(livenessConfig.threshold) ?? policy.thresholds?.livenessScore,
         activeLiveness: images.activeLiveness,
       });
       if (!liveness.passed) {
@@ -730,7 +768,12 @@ export async function processSession(
         // Fail-closed: sin embeddings no hay match → rechazo.
         return await rejectAt(deps, session, images, "match", ["match_embeddings_unavailable"], { quality, liveness, document });
       }
-      matchRes = matchEmbeddings(selfieEmb, docFaceEmb, policy.thresholds?.matchCosine);
+      // T5: config override (fail-closed) ?? policy threshold.
+      matchRes = matchEmbeddings(
+        selfieEmb,
+        docFaceEmb,
+        toSafeNum(matchConfig.threshold) ?? policy.thresholds?.matchCosine
+      );
       if (!matchRes.passed) {
         return await rejectAt(deps, session, images, "match", ["face_match_failed", `cosine=${matchRes.cosine.toFixed(3)}`], { quality, liveness, document, match: matchRes });
       }
@@ -740,7 +783,7 @@ export async function processSession(
     // Cruza la identidad extraída contra el dataset LOCAL de sanciones/PEP. No
     // corta el flujo: el ruteo a revisión lo decide el workflow (aml.onMatch).
     const aml = resolvedChecks?.get("aml")?.enabled !== false
-      ? await runAml(deps, session, document)
+      ? await runAml(deps, session, document, resolvedChecks?.get("aml")?.config)
       : undefined;
 
     // === 4.ter) FACE SEARCH 1:N (señal/score, NO rechazo duro) — P1 #2 ==== //
@@ -754,19 +797,20 @@ export async function processSession(
         deps,
         session,
         selfieEmb,
-        extractedFrom(document)?.ci ?? ""
+        extractedFrom(document)?.ci ?? "",
+        resolvedChecks?.get("face_search")?.config
       );
     }
 
     // COMPROBANTE DE DOMICILIO (señal/score, NO rechazo duro) — P1 #4. Corre si el
     // workflow lo exige y el titular subió el comprobante. Ver runProofOfAddress.
     const proofOfAddress = resolvedChecks?.get("proof_of_address")?.enabled !== false
-      ? await runProofOfAddress(deps, session, document, images.proofOfAddress)
+      ? await runProofOfAddress(deps, session, document, images.proofOfAddress, resolvedChecks?.get("proof_of_address")?.config)
       : undefined;
 
     // ESTIMACIÓN DE EDAD (señal/score) — P2. Corre si el workflow lo exige. Ver runAgeEstimation.
     const ageEstimation = resolvedChecks?.get("age_estimation")?.enabled !== false
-      ? await runAgeEstimation(deps, session, images.selfie)
+      ? await runAgeEstimation(deps, session, images.selfie, resolvedChecks?.get("age_estimation")?.config)
       : undefined;
 
     // === 5) DECISION (fusión + LoA) ======================================= //
@@ -1041,6 +1085,12 @@ export async function computeChecks(
   const resolvedChecks = session.workflowSnapshot
     ? resolveCheckList(session.workflowSnapshot)
     : null;
+
+  // T5: extract per-check config overrides (empty object when not present → no-regression).
+  const qualityConfig = resolvedChecks?.get("quality")?.config ?? {};
+  const livenessConfig = resolvedChecks?.get("liveness")?.config ?? {};
+  const matchConfig = resolvedChecks?.get("match")?.config ?? {};
+
   try {
     // === 0) NORMALIZA DOCUMENTO PDF→imagen (cédula escaneada) ============== //
     // Si docFront/docBack llegaron como PDF, rasteriza a PNG ANTES de cualquier
@@ -1051,7 +1101,8 @@ export async function computeChecks(
     const quality = await deps.modules.quality(
       images.selfie,
       deps.engine,
-      policy.thresholds?.qualityGlassesPct
+      // T5: config override (fail-closed: non-finite ignored) ?? policy threshold.
+      toSafeNum(qualityConfig.glassesMaxPct) ?? policy.thresholds?.qualityGlassesPct
     );
     if (!quality.passed) {
       const out = await deps.withTransaction(async (tx) => {
@@ -1112,7 +1163,8 @@ export async function computeChecks(
       liveness = await deps.modules.liveness(images.selfie, deps.engine, {
         frames: images.frames,
         challenge,
-        threshold: policy.thresholds?.livenessScore,
+        // T5: config override (fail-closed) ?? policy threshold.
+        threshold: toSafeNum(livenessConfig.threshold) ?? policy.thresholds?.livenessScore,
         activeLiveness: images.activeLiveness,
       });
     }
@@ -1131,7 +1183,10 @@ export async function computeChecks(
         : null;
       if (!docFaceEmb) docFaceEmb = await deps.modules.embed(images.docFront);
       if (selfieEmb && docFaceEmb) {
-        matchRes = matchEmbeddings(selfieEmb, docFaceEmb, policy.thresholds?.matchCosine);
+        // T5: config override (fail-closed) ?? policy threshold.
+        const effectiveMatchThreshold =
+          toSafeNum(matchConfig.threshold) ?? policy.thresholds?.matchCosine;
+        matchRes = matchEmbeddings(selfieEmb, docFaceEmb, effectiveMatchThreshold);
       } else {
         // Fail-closed: sin embeddings, match no superado (cosine 0). La decisión en
         // /confirm lo tratará como rechazo duro, pero el operador igual lo ve en revisión.
@@ -1143,7 +1198,7 @@ export async function computeChecks(
     // exige; usa la identidad extraída por `document` (aunque document no haya pasado,
     // se intenta el cruce con lo que se haya extraído). Ver runAml (fail-closed).
     const aml = resolvedChecks?.get("aml")?.enabled !== false
-      ? await runAml(deps, session, document)
+      ? await runAml(deps, session, document, resolvedChecks?.get("aml")?.config)
       : undefined;
 
     // FACE SEARCH 1:N (señal/score, NO rechazo duro) — P1 #2. Dedup/anti-fraude +
@@ -1156,20 +1211,21 @@ export async function computeChecks(
         deps,
         session,
         selfieEmb,
-        extractedFrom(document)?.ci ?? ""
+        extractedFrom(document)?.ci ?? "",
+        resolvedChecks?.get("face_search")?.config
       );
     }
 
     // COMPROBANTE DE DOMICILIO (señal/score, NO rechazo duro) — P1 #4. Corre si el
     // workflow lo exige y el titular subió el comprobante. Ver runProofOfAddress.
     const proofOfAddress = resolvedChecks?.get("proof_of_address")?.enabled !== false
-      ? await runProofOfAddress(deps, session, document, images.proofOfAddress)
+      ? await runProofOfAddress(deps, session, document, images.proofOfAddress, resolvedChecks?.get("proof_of_address")?.config)
       : undefined;
 
     // ESTIMACIÓN DE EDAD (señal/score) — P2. Se computa y persiste para mostrarse en la
     // revisión; el rechazo duro por edad (onUnderage:reject) lo aplica /confirm (finalize).
     const ageEstimation = resolvedChecks?.get("age_estimation")?.enabled !== false
-      ? await runAgeEstimation(deps, session, images.selfie)
+      ? await runAgeEstimation(deps, session, images.selfie, resolvedChecks?.get("age_estimation")?.config)
       : undefined;
 
     const checks: PipelineChecks = {
