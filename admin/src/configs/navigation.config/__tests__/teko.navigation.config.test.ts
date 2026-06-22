@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import tekoNavigationConfig from '../teko.navigation.config'
 import navigationConfig from '../index'
 import { NAV_ITEM_TYPE_TITLE, NAV_ITEM_TYPE_ITEM } from '@/constants/navigation.constant'
+import { protectedRoutes } from '../../routes.config/routes.config'
 
 // Helper: flatten all leaf keys from a tree
 function flatLeafKeys(tree: typeof tekoNavigationConfig): string[] {
@@ -96,6 +97,44 @@ describe('teko.navigation.config (raw)', () => {
         for (const p of required) {
             expect(paths, `missing path ${p}`).toContain(p)
         }
+    })
+})
+
+describe('route registration coverage', () => {
+    it('every leaf nav path is registered as a protected route', () => {
+        const registeredPaths = new Set(protectedRoutes.map(r => r.path))
+        function walkNavPaths(items: typeof tekoNavigationConfig): string[] {
+            const ps: string[] = []
+            for (const i of items) {
+                if (i.path && i.type === NAV_ITEM_TYPE_ITEM) ps.push(i.path)
+                if (i.subMenu?.length) ps.push(...walkNavPaths(i.subMenu))
+            }
+            return ps
+        }
+        // Exclude 'guias' section: its routes use wildcards (e.g. /guide/documentation/*)
+        // so nav deep-links like /guide/documentation/introduction intentionally won't
+        // exact-match a registered path.
+        const nonGuideNav = tekoNavigationConfig.filter(s => s.key !== 'guias')
+        const navPaths = walkNavPaths(nonGuideNav)
+        // /config-center is added in T6; mark as expected-missing until then
+        const pendingT6 = new Set(['/config-center'])
+        for (const p of navPaths) {
+            if (pendingT6.has(p)) continue
+            expect(registeredPaths, `nav path ${p} has no route`).toContain(p)
+        }
+    })
+
+    it('integrations paths are registered (was 404 before this fix)', () => {
+        const paths = protectedRoutes.map(r => r.path)
+        expect(paths).toContain('/integrations/connectors')
+        expect(paths).toContain('/integrations/oauth')
+        expect(paths).toContain('/integrations/zapier')
+    })
+
+    it('reminders paths are registered (was 404 before this fix)', () => {
+        const paths = protectedRoutes.map(r => r.path)
+        expect(paths).toContain('/reminders/automated')
+        expect(paths).toContain('/reminders/scheduling')
     })
 })
 
