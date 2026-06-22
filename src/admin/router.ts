@@ -3093,6 +3093,8 @@ adminRouter.post('/document-types/:key/fields', requirePermission('manage_tenant
     if (!key || !label || !path || !type) {
       res.status(400).json({ error: 'key_label_path_type_required' }); return
     }
+    const parent = await docTypesRepo.getDocumentType(req.params.key)
+    if (!parent) { res.status(404).json({ error: 'doc_type_not_found' }); return }
     res.status(201).json(await fieldsRepo.createField({
       docTypeKey: req.params.key, key, label, type, path,
       validation: (b.validation && typeof b.validation === 'object') ? b.validation : {},

@@ -33,7 +33,7 @@ export function getFieldValue(extracted: ExtractedDocument, path: string): unkno
 const RECOGNIZED_RULE_KEYS = new Set<string>(['required', 'regex', 'normalize', 'dateRange'])
 
 /** ISO date pattern YYYY-MM-DD — required for safe lexicographic dateRange comparison. */
-const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}/
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/
 
 export function validateField(value: unknown, rules: FieldValidationRules): ValidationResult {
   try {

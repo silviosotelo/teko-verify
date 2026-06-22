@@ -121,6 +121,16 @@ describe('validateField', () => {
   it('dateRange valor válido dentro de ambos límites → ok (no regresión)', () => {
     expect(validateField('2023-07-01', { dateRange: { minIso: '2020-01-01', maxIso: '2025-12-31' } })).toEqual({ ok: true })
   })
+
+  // --- Fix ISO_DATE_RE ancla $ : datetime-con-sufijo ya no pasa la guardia ---
+  it('dateRange con valor datetime ISO (2026-01-01T12:00:00Z) → ok:false, reason invalid_date', () => {
+    const result = validateField('2026-01-01T12:00:00Z', { dateRange: { maxIso: '2026-12-31' } })
+    expect(result.ok).toBe(false)
+    expect(result.reason).toBe('invalid_date')
+  })
+  it('dateRange fecha YYYY-MM-DD válida sigue pasando (no regresión ancla $)', () => {
+    expect(validateField('2026-01-01', { dateRange: { maxIso: '2026-12-31' } })).toEqual({ ok: true })
+  })
 })
 
 describe('validateExtracted — espejo ci_py', () => {
