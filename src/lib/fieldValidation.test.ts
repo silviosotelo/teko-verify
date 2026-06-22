@@ -84,6 +84,43 @@ describe('validateField', () => {
   it('regex inválido (sintaxis) → fail-closed { ok:false }', () => {
     expect(validateField('texto', { regex:'[invalid(' }).ok).toBe(false)
   })
+
+  // --- Fix: unknown rules → fail-closed ---
+  it('regla desconocida minLength → ok:false, reason unknown_rule', () => {
+    const result = validateField('hola', { minLength: 5 } as unknown as import('../db/repos/extractionFields').FieldValidationRules)
+    expect(result.ok).toBe(false)
+    expect(result.reason).toBe('unknown_rule')
+  })
+  it('regla desconocida foo → ok:false, reason unknown_rule', () => {
+    const result = validateField('hola', { foo: 'bar' } as unknown as import('../db/repos/extractionFields').FieldValidationRules)
+    expect(result.ok).toBe(false)
+    expect(result.reason).toBe('unknown_rule')
+  })
+  it('regex con tipo inválido (número) → ok:false, no crashea', () => {
+    const result = validateField('texto', { regex: 42 } as unknown as import('../db/repos/extractionFields').FieldValidationRules)
+    expect(result.ok).toBe(false)
+  })
+
+  // --- Fix: dateRange requiere formato ISO ---
+  it('dateRange con valor N/A → ok:false, reason invalid_date', () => {
+    const result = validateField('N/A', { dateRange: { minIso: '2020-01-01' } })
+    expect(result.ok).toBe(false)
+    expect(result.reason).toBe('invalid_date')
+  })
+  it('dateRange con valor vacío → ok (skip dateRange si vacío)', () => {
+    expect(validateField('', { dateRange: { minIso: '2020-01-01' } })).toEqual({ ok: true })
+  })
+  it('dateRange con formato slash (2020/01/01) → ok:false, reason invalid_date', () => {
+    const result = validateField('2020/01/01', { dateRange: { minIso: '2020-01-01' } })
+    expect(result.ok).toBe(false)
+    expect(result.reason).toBe('invalid_date')
+  })
+  it('dateRange maxIso cumplido → ok (no regresión)', () => {
+    expect(validateField('2024-06-15', { dateRange: { maxIso: '2025-12-31' } })).toEqual({ ok: true })
+  })
+  it('dateRange valor válido dentro de ambos límites → ok (no regresión)', () => {
+    expect(validateField('2023-07-01', { dateRange: { minIso: '2020-01-01', maxIso: '2025-12-31' } })).toEqual({ ok: true })
+  })
 })
 
 describe('validateExtracted — espejo ci_py', () => {
