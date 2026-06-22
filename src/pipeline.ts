@@ -511,8 +511,11 @@ async function runProofOfAddress(
   const cfg = session.workflowSnapshot?.proofOfAddress;
   if (!cfg?.required) return undefined;
   const identityName = identityNameFrom(document);
-  // T5: config overrides take precedence over workflow values (fail-closed on invalid types).
-  const maxAgeMonths = toSafeNum(configOverride?.maxAgeMonths) ?? cfg.maxAgeMonths ?? 3;
+  // T5: config overrides take precedence; fail-closed on invalid types.
+  // maxAgeOverride is what gets passed to the module (undefined → module uses its own default).
+  // maxAgeMonths (with ?3 fallback) is only for the failClosed display value.
+  const maxAgeOverride = toSafeNum(configOverride?.maxAgeMonths) ?? cfg.maxAgeMonths;
+  const maxAgeMonths = maxAgeOverride ?? 3;
   const requireNameMatch = toSafeBool(configOverride?.requireNameMatch) ?? cfg.requireNameMatch;
   const nameThreshold = toSafeNum(configOverride?.nameThreshold) ?? cfg.nameThreshold;
   const failClosed = (error: string): ProofOfAddressResult => ({
@@ -535,7 +538,8 @@ async function runProofOfAddress(
   try {
     return await deps.modules.proofOfAddress(image, {
       identityName,
-      maxAgeMonths,
+      // Pass maxAgeOverride (possibly undefined) — module applies its own default, no regression.
+      maxAgeMonths: maxAgeOverride,
       requireNameMatch,
       nameThreshold,
     });
