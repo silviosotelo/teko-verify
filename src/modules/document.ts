@@ -40,6 +40,30 @@ import type {
 } from "../types";
 import { OCR_SIDECAR_URL } from "../config";
 import { CI_MAX_AGE_YEARS } from "../config";
+import { validateExtracted } from "../lib/fieldValidation";
+import type { FieldDefinition } from "../db/repos/extractionFields";
+
+/**
+ * Fase 4 — paths requeridos por tipo. Son la fuente de verdad:
+ *   - El seed SQL (T1) debe tener required=true en exactamente estos paths.
+ *   - Los tests de mirror (T4 paso 8) aseguran que DB y constante coinciden.
+ * Si se cambia el hardcodeado, actualizar también estas constantes y el seed.
+ */
+export const REQUIRED_PATHS_CI_PY = [
+  'titular.apellidos',
+  'titular.nombres',
+  'documento.numeroCedula',
+  'titular.fechaNacimiento',
+  'documentoFisico.fechaVencimiento',
+] as const
+
+export const REQUIRED_PATHS_PASSPORT = [
+  'titular.apellidos',
+  'titular.nombres',
+  'documento.numeroCedula',
+  'titular.fechaNacimiento',
+  'documentoFisico.fechaVencimiento',
+] as const
 
 // ---------------------------------------------------------------------------
 // Puertos inyectables (contratos mínimos) — implementaciones reales más abajo.
@@ -2288,6 +2312,12 @@ export interface DocumentDeps {
     * 0 = no aplicar límite de edad.
     */
   maxDocumentAgeYears?: number;
+  /**
+   * Fase 4: definiciones de campos cargadas desde DB por el callsite.
+   * Cuando `undefined`, los extractores usan el chequeo hardcodeado original.
+   * Esto garantiza cero regresión en todos los tests que no inyectan DB.
+   */
+  fieldDefs?: FieldDefinition[];
 }
 
 /**
@@ -2324,6 +2354,23 @@ export class DocumentModule {
     deps: DocumentDeps,
     documentType: DocumentType = "ci_py"
   ): Promise<DocumentResult> {
+    // Fail-closed: tipo no implementado en código → passed=false explícito,
+    // no cae silenciosamente en runCedulaPy.
+    if (documentType !== 'ci_py' && documentType !== 'passport') {
+      return {
+        documentType,
+        passed: false,
+        extracted: emptyExtracted(),
+        authenticity: {
+          consistent: false,
+          checks: [{ name: 'unknown_doc_type', passed: false, detail: `tipo sin parser: ${documentType}` }],
+        },
+        ocr: { rawText: '', fields: {}, confidence: 0 },
+        barcode: { format: '', text: '' },
+        docFaceCrop: null,
+        mrz: { ...EMPTY_MRZ },
+      }
+    }
     if (documentType === "passport") return this.runPassport(front, deps);
     return this.runCedulaPy(front, back, deps);
   }
@@ -2396,12 +2443,16 @@ export class DocumentModule {
 
     // Autenticidad: presencia de campos + check digits ICAO + no vencido. DUROS.
     const checks: AuthenticityCheck[] = [];
-    const requiredPresent =
-      !!extracted.titular.apellidos &&
-      !!extracted.titular.nombres &&
-      !!extracted.documento.numeroCedula &&
-      !!extracted.titular.fechaNacimiento &&
-      !!extracted.documentoFisico.fechaVencimiento;
+    // Fase 4: data-driven cuando fieldDefs inyectado; fallback hardcodeado cuando no.
+    const requiredPresent = deps.fieldDefs
+      ? validateExtracted(extracted, deps.fieldDefs).requiredPresent
+      : (
+          !!extracted.titular.apellidos &&
+          !!extracted.titular.nombres &&
+          !!extracted.documento.numeroCedula &&
+          !!extracted.titular.fechaNacimiento &&
+          !!extracted.documentoFisico.fechaVencimiento
+        )
     checks.push({
       name: "mrz_fields_present",
       passed: requiredPresent,
@@ -2602,12 +2653,16 @@ export class DocumentModule {
 
     // passed (CAMBIO CLAVE): campos impresos requeridos + no vencido + foto recortable.
     // El MRZ ya NO decide.
-    const requiredPresent =
-      !!extracted.titular.apellidos &&
-      !!extracted.titular.nombres &&
-      !!extracted.documento.numeroCedula &&
-      !!extracted.titular.fechaNacimiento &&
-      !!extracted.documentoFisico.fechaVencimiento;
+    // Fase 4: data-driven cuando fieldDefs inyectado; fallback hardcodeado cuando no.
+    const requiredPresent = deps.fieldDefs
+      ? validateExtracted(extracted, deps.fieldDefs).requiredPresent
+      : (
+          !!extracted.titular.apellidos &&
+          !!extracted.titular.nombres &&
+          !!extracted.documento.numeroCedula &&
+          !!extracted.titular.fechaNacimiento &&
+          !!extracted.documentoFisico.fechaVencimiento
+        )
     const passed =
       requiredPresent &&
       notExpired(extracted.documentoFisico.fechaVencimiento, deps.maxDocumentAgeYears ?? 0) &&
