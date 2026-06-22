@@ -4,7 +4,7 @@ import SideNavToggle from '@/components/template/SideNavToggle'
 import MobileNav from '@/components/template/MobileNav'
 import UserProfileDropdown from '@/components//template/UserProfileDropdown'
 import LayoutBase from '@/components//template/LayoutBase'
-import TenantSelector from '@/teko/TenantSelector'
+import ScopeHeader from '@/teko/ScopeHeader'
 import useResponsive from '@/utils/hooks/useResponsive'
 import { LAYOUT_COLLAPSIBLE_SIDE } from '@/constants/theme.constant'
 import type { CommonProps } from '@/@types/common'
@@ -30,7 +30,7 @@ const CollapsibleSide = ({ children }: CommonProps) => {
                         }
                         headerEnd={
                             <>
-                                <TenantSelector />
+                                <ScopeHeader />
                                 <UserProfileDropdown hoverable={false} />
                             </>
                         }

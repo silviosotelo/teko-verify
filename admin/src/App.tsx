@@ -3,6 +3,7 @@ import Theme from '@/components/template/Theme'
 import Layout from '@/components/layouts'
 import { AuthProvider } from '@/auth'
 import { TenantProvider } from '@/teko/TenantContext'
+import { AppProvider } from '@/teko/AppContext'
 import Views from '@/views'
 import appConfig from './configs/app.config'
 import './locales'
@@ -17,9 +18,11 @@ function App() {
             <BrowserRouter basename="/admin-ui">
                 <AuthProvider>
                     <TenantProvider>
-                        <Layout>
-                            <Views />
-                        </Layout>
+                        <AppProvider>
+                            <Layout>
+                                <Views />
+                            </Layout>
+                        </AppProvider>
                     </TenantProvider>
                 </AuthProvider>
             </BrowserRouter>
