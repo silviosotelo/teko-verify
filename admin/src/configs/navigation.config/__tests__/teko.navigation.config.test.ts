@@ -116,10 +116,7 @@ describe('route registration coverage', () => {
         // exact-match a registered path.
         const nonGuideNav = tekoNavigationConfig.filter(s => s.key !== 'guias')
         const navPaths = walkNavPaths(nonGuideNav)
-        // /config-center is added in T6; mark as expected-missing until then
-        const pendingT6 = new Set(['/config-center'])
         for (const p of navPaths) {
-            if (pendingT6.has(p)) continue
             expect(registeredPaths, `nav path ${p} has no route`).toContain(p)
         }
     })
