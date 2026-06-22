@@ -1,10 +1,11 @@
 import tekoNavigationConfig from './teko.navigation.config'
 import { isNavKeyEnabled } from '@/teko/features'
+import { NAV_ITEM_TYPE_COLLAPSE } from '@/constants/navigation.constant'
 import type { NavigationTree } from '@/@types/navigation'
 
-// Oculta del sidebar los items cuya feature está apagada (FEATURES en
-// src/teko/features.ts). Recursivo sobre subMenu: si un item gated tiene flag
-// false se descarta; los no-gated se mantienen. No borra rutas ni archivos.
+// Oculta los items cuya feature está apagada. Recursivo sobre subMenu.
+// Además poda COLLAPSE parents que quedan con subMenu vacío tras el filtrado
+// (evita renders de acordeón vacíos cuando todos sus hijos están gateados).
 function filterByFeatures(tree: NavigationTree[]): NavigationTree[] {
     return tree
         .filter((item) => isNavKeyEnabled(item.key))
@@ -12,6 +13,11 @@ function filterByFeatures(tree: NavigationTree[]): NavigationTree[] {
             ...item,
             subMenu: item.subMenu ? filterByFeatures(item.subMenu) : [],
         }))
+        .filter(
+            (item) =>
+                item.type !== NAV_ITEM_TYPE_COLLAPSE ||
+                (item.subMenu?.length ?? 0) > 0,
+        )
 }
 
 const navigationConfig: NavigationTree[] = filterByFeatures([

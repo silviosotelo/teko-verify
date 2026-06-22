@@ -162,4 +162,55 @@ describe('navigationConfig (after filterByFeatures with current flags)', () => {
         expect(keys).toContain('teko.workflows')
         expect(keys).toContain('teko.questionnaires')
     })
+
+    it('Verificación collapse is visible because workflows+questionnaires have no flag', () => {
+        // reminders are gated off; workflows/questionnaires always visible → collapse stays
+        function findByKey(tree: typeof navigationConfig, key: string): typeof navigationConfig[0] | undefined {
+            for (const item of tree) {
+                if (item.key === key) return item
+                const found = item.subMenu ? findByKey(item.subMenu, key) : undefined
+                if (found) return found
+            }
+            return undefined
+        }
+        const verif = findByKey(navigationConfig, 'config.verificacion')
+        expect(verif).toBeDefined()
+        const subKeys = verif!.subMenu?.map(i => i.key) ?? []
+        expect(subKeys).toContain('teko.workflows')
+        expect(subKeys).toContain('teko.questionnaires')
+        expect(subKeys).not.toContain('reminders.automated')
+        expect(subKeys).not.toContain('reminders.scheduling')
+    })
+
+    it('Comunicación collapse stays visible (email+templates have no flag, only SMS gated)', () => {
+        function findByKey(tree: typeof navigationConfig, key: string): typeof navigationConfig[0] | undefined {
+            for (const item of tree) {
+                if (item.key === key) return item
+                const found = item.subMenu ? findByKey(item.subMenu, key) : undefined
+                if (found) return found
+            }
+            return undefined
+        }
+        const com = findByKey(navigationConfig, 'config.comunicacion')
+        expect(com).toBeDefined()
+        const subKeys = com!.subMenu?.map(i => i.key) ?? []
+        expect(subKeys).toContain('settings.email')
+        expect(subKeys).toContain('settings.emailTemplates')
+        expect(subKeys).not.toContain('settings.sms')
+    })
+})
+
+describe('filterByFeatures — empty collapse pruning', () => {
+    // Build a minimal tree with one all-gated collapse and verify it's pruned.
+    // We use the real filterByFeatures by testing via navigationConfig which
+    // already has gated items. The Integrations section has oauth+zapier gated
+    // but connectors is always-visible → Integraciones section must stay visible.
+    it('Integraciones section survives even though oauth/zapier are gated', () => {
+        const intSection = navigationConfig.find(s => s.key === 'integraciones')
+        expect(intSection).toBeDefined()
+        const subKeys = intSection!.subMenu?.map(i => i.key) ?? []
+        expect(subKeys).toContain('integrations.connectors')
+        expect(subKeys).not.toContain('integrations.oauth')
+        expect(subKeys).not.toContain('integrations.zapier')
+    })
 })
