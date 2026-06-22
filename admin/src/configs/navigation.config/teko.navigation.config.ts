@@ -354,6 +354,16 @@ const tekoNavigationConfig: NavigationTree[] = [
                 authority: [],
                 subMenu: [],
             },
+            {
+                key: 'integrations.providers',
+                path: '/integrations/providers',
+                title: 'Proveedores',
+                translateKey: 'nav.integrations.providers',
+                icon: 'plugZap',
+                type: NAV_ITEM_TYPE_ITEM,
+                authority: [],
+                subMenu: [],
+            },
         ],
     },
 

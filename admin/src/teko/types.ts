@@ -673,6 +673,20 @@ export interface UsageAlertInput {
     enabled: boolean
 }
 
+// ---- Integraciones por tenant (Fase 2) ----
+export type IntegrationKind = 'smtp' | 'storage' | 'aml' | 'sms'
+
+export interface TenantIntegration {
+    id: string
+    tenantId: string
+    kind: IntegrationKind
+    config: Record<string, unknown> // secret fields masked as "***" from API
+    enabled: boolean
+    updatedBy: string
+    createdAt: string
+    updatedAt: string
+}
+
 // Identidad rica extraída del documento (checks[document].detail.extracted).
 export interface ExtractedDocument {
     documento?: {

@@ -42,6 +42,8 @@ import type {
     TenantSubscription,
     UsageAlert,
     UsageAlertInput,
+    TenantIntegration,
+    IntegrationKind,
 } from './types'
 
 // baseURL origin-root: NO relativo a /admin-ui/.
@@ -681,6 +683,32 @@ export const tekoApi = {
         return request<void>(
             'DELETE',
             `/tenants/${tenantId}/usage-alerts/${alertId}`,
+        )
+    },
+
+    // ---- Integraciones por tenant (Fase 2) ----
+    getIntegrations(tenantId: string) {
+        return request<{ integrations: TenantIntegration[] }>(
+            'GET',
+            `/tenants/${tenantId}/integrations`,
+        )
+    },
+    putIntegration(
+        tenantId: string,
+        kind: IntegrationKind,
+        config: Record<string, unknown>,
+        enabled: boolean,
+    ) {
+        return request<{ integration: TenantIntegration }>(
+            'PUT',
+            `/tenants/${tenantId}/integrations/${kind}`,
+            { config, enabled },
+        )
+    },
+    deleteIntegration(tenantId: string, kind: IntegrationKind) {
+        return request<{ ok: boolean }>(
+            'DELETE',
+            `/tenants/${tenantId}/integrations/${kind}`,
         )
     },
 }
