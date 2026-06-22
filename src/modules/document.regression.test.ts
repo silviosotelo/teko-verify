@@ -78,3 +78,33 @@ describe('Fase4 regresión — requiredPresent: hardcoded === validateExtracted(
     })
   }
 })
+
+/**
+ * Full-seed equivalence: the 7 optional fields in the ci_py seed (validation={})
+ * must be inert — never flip requiredPresent — because validateField({}, {}) returns
+ * {ok:true}. This closes the gap between the 5-field proxy above and the real
+ * 12-field array that listFieldsForDocType('ci_py') returns in production.
+ */
+describe('Fase4 regresión — full-seed equivalence (optional fields are inert)', () => {
+  // Full 12-field ci_py seed shape (5 required + 7 optional with {})
+  const FULL_CI_PY: FieldDefinition[] = [
+    ...MIRROR_CI_PY,
+    { id:'', docTypeKey:'ci_py', key:'sexo',            label:'', type:'string',  path:'titular.sexo',                    validation:{}, displayOrder:60, createdAt:'' },
+    { id:'', docTypeKey:'ci_py', key:'lugarNacimiento', label:'', type:'string',  path:'titular.lugarNacimiento.ciudad',  validation:{}, displayOrder:70, createdAt:'' },
+    { id:'', docTypeKey:'ci_py', key:'nacionalidad',    label:'', type:'string',  path:'titular.nacionalidad',             validation:{}, displayOrder:80, createdAt:'' },
+    { id:'', docTypeKey:'ci_py', key:'estadoCivil',     label:'', type:'string',  path:'titular.estadoCivil',              validation:{}, displayOrder:90, createdAt:'' },
+    { id:'', docTypeKey:'ci_py', key:'donante',         label:'', type:'boolean', path:'titular.donante',                  validation:{}, displayOrder:100, createdAt:'' },
+    { id:'', docTypeKey:'ci_py', key:'fechaEmision',    label:'', type:'date',    path:'documentoFisico.fechaEmision',    validation:{}, displayOrder:110, createdAt:'' },
+    { id:'', docTypeKey:'ci_py', key:'ic',              label:'', type:'string',  path:'registroInterno.ic',              validation:{}, displayOrder:120, createdAt:'' },
+  ]
+
+  it('todos presentes: full-seed === hardcoded', () => {
+    const ex = makeExtracted({ apellidos:'FRANCO', nombres:'JULIO', numeroCedula:'8354119', fechaNacimiento:'1975-04-19', fechaVencimiento:'2028-03-26' })
+    expect(validateExtracted(ex, FULL_CI_PY).requiredPresent).toBe(hardcoded(ex))
+  })
+
+  it('campo requerido ausente: full-seed === hardcoded', () => {
+    const ex = makeExtracted({ apellidos:'', nombres:'JULIO', numeroCedula:'8354119', fechaNacimiento:'1975-04-19', fechaVencimiento:'2028-03-26' })
+    expect(validateExtracted(ex, FULL_CI_PY).requiredPresent).toBe(hardcoded(ex))
+  })
+})
