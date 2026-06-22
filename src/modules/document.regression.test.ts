@@ -80,6 +80,76 @@ describe('Fase4 regresión — requiredPresent: hardcoded === validateExtracted(
 })
 
 /**
+ * Null literal fields: un campo requerido = null (no '') debe reportarse ausente en
+ * AMBAS ramas (hardcoded y validateExtracted). Ancla que `!!null === false` y que
+ * validateExtracted lee el path correctamente con null en el campo.
+ */
+describe('Fase4 regresión — null literal en campo requerido', () => {
+  function makeExtractedWithNull(field: 'apellidos'|'nombres'|'numeroCedula'|'fechaNacimiento'|'fechaVencimiento'): ExtractedDocument {
+    const base = makeExtracted({ apellidos:'FRANCO', nombres:'JULIO', numeroCedula:'8354119', fechaNacimiento:'1975-04-19', fechaVencimiento:'2028-03-26' })
+    if (field === 'apellidos')       (base.titular as unknown as Record<string,unknown>).apellidos = null
+    if (field === 'nombres')         (base.titular as unknown as Record<string,unknown>).nombres = null
+    if (field === 'numeroCedula')    (base.documento as unknown as Record<string,unknown>).numeroCedula = null
+    if (field === 'fechaNacimiento') (base.titular as unknown as Record<string,unknown>).fechaNacimiento = null
+    if (field === 'fechaVencimiento')(base.documentoFisico as unknown as Record<string,unknown>).fechaVencimiento = null
+    return base
+  }
+
+  const FIELDS = ['apellidos','nombres','numeroCedula','fechaNacimiento','fechaVencimiento'] as const
+  for (const field of FIELDS) {
+    it(`ci_py — ${field}=null → hardcoded===validateExtracted===false`, () => {
+      const ex = makeExtractedWithNull(field)
+      expect(hardcoded(ex)).toBe(false)
+      expect(validateExtracted(ex, MIRROR_CI_PY).requiredPresent).toBe(false)
+    })
+    it(`passport — ${field}=null → hardcoded===validateExtracted===false`, () => {
+      const ex = makeExtractedWithNull(field)
+      expect(hardcoded(ex)).toBe(false)
+      expect(validateExtracted(ex, MIRROR_PASSPORT).requiredPresent).toBe(false)
+    })
+  }
+})
+
+/**
+ * Fix #1 — fail-closed con fieldDefs vacío: deps.fieldDefs=[] debe producir el mismo
+ * resultado que la rama hardcodeada cuando faltan campos requeridos. Ancla que un array
+ * vacío NO produce requiredPresent=true espurio (fail-OPEN). Esta suite prueba la
+ * CONDICIÓN del ternario (deps.fieldDefs?.length), no validateExtracted directamente.
+ */
+describe('Fase4 regresión — fieldDefs=[] es fail-closed (no fail-open)', () => {
+  // Simula la condición del ternario: deps.fieldDefs?.length ? data-driven : hardcode
+  function simulateRequiredPresent(ex: ExtractedDocument, fieldDefs: FieldDefinition[]): boolean {
+    return fieldDefs?.length
+      ? validateExtracted(ex, fieldDefs).requiredPresent
+      : (
+          !!ex.titular.apellidos &&
+          !!ex.titular.nombres &&
+          !!ex.documento.numeroCedula &&
+          !!ex.titular.fechaNacimiento &&
+          !!ex.documentoFisico.fechaVencimiento
+        )
+  }
+
+  it('fieldDefs=[] con campos ausentes → mismo que hardcoded (false)', () => {
+    const ex = makeExtracted({ apellidos:'', nombres:'JULIO', numeroCedula:'8354119', fechaNacimiento:'1975-04-19', fechaVencimiento:'2028-03-26' })
+    expect(simulateRequiredPresent(ex, [])).toBe(hardcoded(ex))
+    expect(simulateRequiredPresent(ex, [])).toBe(false)
+  })
+
+  it('fieldDefs=[] con todos presentes → mismo que hardcoded (true)', () => {
+    const ex = makeExtracted({ apellidos:'FRANCO', nombres:'JULIO', numeroCedula:'8354119', fechaNacimiento:'1975-04-19', fechaVencimiento:'2028-03-26' })
+    expect(simulateRequiredPresent(ex, [])).toBe(hardcoded(ex))
+    expect(simulateRequiredPresent(ex, [])).toBe(true)
+  })
+
+  it('fieldDefs=[] con todos ausentes → mismo que hardcoded (false), NO true espurio', () => {
+    const ex = makeExtracted({ apellidos:'', nombres:'', numeroCedula:'', fechaNacimiento:'', fechaVencimiento:'' })
+    expect(simulateRequiredPresent(ex, [])).toBe(hardcoded(ex))
+    expect(simulateRequiredPresent(ex, [])).toBe(false)
+  })
+})
+
+/**
  * Full-seed equivalence: the 7 optional fields in the ci_py seed (validation={})
  * must be inert — never flip requiredPresent — because validateField({}, {}) returns
  * {ok:true}. This closes the gap between the 5-field proxy above and the real

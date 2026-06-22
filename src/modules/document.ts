@@ -2443,8 +2443,10 @@ export class DocumentModule {
 
     // Autenticidad: presencia de campos + check digits ICAO + no vencido. DUROS.
     const checks: AuthenticityCheck[] = [];
-    // Fase 4: data-driven cuando fieldDefs inyectado; fallback hardcodeado cuando no.
-    const requiredPresent = deps.fieldDefs
+    // Fase 4: data-driven cuando fieldDefs inyectado Y no vacío; fallback hardcodeado
+    // cuando ausente O array vacío. FAIL-CLOSED: [] (p.ej. DB devuelve cero filas) es
+    // tan inseguro como undefined — siempre cae al cálculo hardcodeado seguro.
+    const requiredPresent = deps.fieldDefs?.length
       ? validateExtracted(extracted, deps.fieldDefs).requiredPresent
       : (
           !!extracted.titular.apellidos &&
@@ -2653,8 +2655,10 @@ export class DocumentModule {
 
     // passed (CAMBIO CLAVE): campos impresos requeridos + no vencido + foto recortable.
     // El MRZ ya NO decide.
-    // Fase 4: data-driven cuando fieldDefs inyectado; fallback hardcodeado cuando no.
-    const requiredPresent = deps.fieldDefs
+    // Fase 4: data-driven cuando fieldDefs inyectado Y no vacío; fallback hardcodeado
+    // cuando ausente O array vacío. FAIL-CLOSED: [] (p.ej. DB devuelve cero filas) es
+    // tan inseguro como undefined — siempre cae al cálculo hardcodeado seguro.
+    const requiredPresent = deps.fieldDefs?.length
       ? validateExtracted(extracted, deps.fieldDefs).requiredPresent
       : (
           !!extracted.titular.apellidos &&
