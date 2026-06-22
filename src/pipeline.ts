@@ -52,6 +52,7 @@ import type {
 } from "./types";
 import { decision as decideVerdict } from "./modules/decision";
 import { match as matchEmbeddings } from "./modules/match";
+import { resolveCheckList } from "./pipeline/resolver";
 import { ensureRasterImage } from "./lib/raster";
 import {
   ageEstimationRejects,
@@ -616,6 +617,10 @@ export async function processSession(
   const { tenantId, id: sessionId } = session;
   // LoA por sesión: el nivel pedido por la sesión manda sobre el de la policy.
   const policy = effectivePolicy(session, tenantPolicy);
+  // Fase 3: per-workflow check enable/disable. Null when no snapshot → all checks run (no-regression).
+  const resolvedChecks = session.workflowSnapshot
+    ? resolveCheckList(session.workflowSnapshot)
+    : null;
 
   try {
     // === 0) NORMALIZA DOCUMENTO PDF→imagen (cédula escaneada) ============== //
@@ -687,7 +692,7 @@ export async function processSession(
 
     // === 2) LIVENESS (rechazo duro) — sólo si el LoA lo exige ============== //
     let liveness: LivenessResult | undefined;
-    if (needsLiveness(policy)) {
+    if (needsLiveness(policy) && resolvedChecks?.get("liveness")?.enabled !== false) {
       const challenge = policy.livenessChallenges[0];
       liveness = await deps.modules.liveness(images.selfie, deps.engine, {
         frames: images.frames,
@@ -712,7 +717,7 @@ export async function processSession(
     // abierto durante una inferencia ONNX).
     let matchRes: MatchResult | undefined;
     let selfieEmb: Float32Array | null = null;
-    if (needsMatch(policy)) {
+    if (needsMatch(policy) && resolvedChecks?.get("match")?.enabled !== false) {
       selfieEmb = await deps.modules.embed(images.selfie);
       // Embedding de la cara de la cédula. Primero el recorte ajustado; si SCRFD no
       // lo re-detecta (recorte sin contexto), caemos a la foto del FRENTE completa
@@ -734,14 +739,16 @@ export async function processSession(
     // === 4.bis) AML SCREENING (señal/score, NO rechazo duro) — P1 #1 ====== //
     // Cruza la identidad extraída contra el dataset LOCAL de sanciones/PEP. No
     // corta el flujo: el ruteo a revisión lo decide el workflow (aml.onMatch).
-    const aml = await runAml(deps, session, document);
+    const aml = resolvedChecks?.get("aml")?.enabled !== false
+      ? await runAml(deps, session, document)
+      : undefined;
 
     // === 4.ter) FACE SEARCH 1:N (señal/score, NO rechazo duro) — P1 #2 ==== //
     // Dedup/anti-fraude + returning user contra la galería del tenant. Reusa el
     // embedding de la selfie ya computado por el match; si el workflow pide
     // face_search sin match (raro), se computa acá. La sesión actual se excluye.
     let faceSearch: FaceSearchResult | undefined;
-    if (session.workflowSnapshot?.faceSearch?.required) {
+    if (session.workflowSnapshot?.faceSearch?.required && resolvedChecks?.get("face_search")?.enabled !== false) {
       if (!selfieEmb) selfieEmb = await deps.modules.embed(images.selfie);
       faceSearch = await runFaceSearch(
         deps,
@@ -753,10 +760,14 @@ export async function processSession(
 
     // COMPROBANTE DE DOMICILIO (señal/score, NO rechazo duro) — P1 #4. Corre si el
     // workflow lo exige y el titular subió el comprobante. Ver runProofOfAddress.
-    const proofOfAddress = await runProofOfAddress(deps, session, document, images.proofOfAddress);
+    const proofOfAddress = resolvedChecks?.get("proof_of_address")?.enabled !== false
+      ? await runProofOfAddress(deps, session, document, images.proofOfAddress)
+      : undefined;
 
     // ESTIMACIÓN DE EDAD (señal/score) — P2. Corre si el workflow lo exige. Ver runAgeEstimation.
-    const ageEstimation = await runAgeEstimation(deps, session, images.selfie);
+    const ageEstimation = resolvedChecks?.get("age_estimation")?.enabled !== false
+      ? await runAgeEstimation(deps, session, images.selfie)
+      : undefined;
 
     // === 5) DECISION (fusión + LoA) ======================================= //
     const checks: PipelineChecks = {
@@ -1026,6 +1037,10 @@ export async function computeChecks(
   const { tenantId, id: sessionId } = session;
   // LoA por sesión: el nivel pedido por la sesión manda sobre el de la policy.
   const policy = effectivePolicy(session, tenantPolicy);
+  // Fase 3: per-workflow check enable/disable. Null when no snapshot → all checks run (no-regression).
+  const resolvedChecks = session.workflowSnapshot
+    ? resolveCheckList(session.workflowSnapshot)
+    : null;
   try {
     // === 0) NORMALIZA DOCUMENTO PDF→imagen (cédula escaneada) ============== //
     // Si docFront/docBack llegaron como PDF, rasteriza a PNG ANTES de cualquier
@@ -1092,7 +1107,7 @@ export async function computeChecks(
 
     // === 2) LIVENESS (NO cortocircuita — se acumula para la revisión) ====== //
     let liveness: LivenessResult | undefined;
-    if (needsLiveness(policy)) {
+    if (needsLiveness(policy) && resolvedChecks?.get("liveness")?.enabled !== false) {
       const challenge = policy.livenessChallenges[0];
       liveness = await deps.modules.liveness(images.selfie, deps.engine, {
         frames: images.frames,
@@ -1109,7 +1124,7 @@ export async function computeChecks(
     let matchRes: MatchResult | undefined;
     // El embedding de la selfie se reusa para el face search 1:N (P1 #2).
     let selfieEmb: Float32Array | null = null;
-    if (needsMatch(policy)) {
+    if (needsMatch(policy) && resolvedChecks?.get("match")?.enabled !== false) {
       selfieEmb = await deps.modules.embed(images.selfie);
       let docFaceEmb = document.docFaceCrop
         ? await deps.modules.embed(Buffer.from(document.docFaceCrop.base64Jpeg, "base64"))
@@ -1127,13 +1142,15 @@ export async function computeChecks(
     // AML SCREENING (señal/score, NO rechazo duro) — P1 #1. Corre si el workflow lo
     // exige; usa la identidad extraída por `document` (aunque document no haya pasado,
     // se intenta el cruce con lo que se haya extraído). Ver runAml (fail-closed).
-    const aml = await runAml(deps, session, document);
+    const aml = resolvedChecks?.get("aml")?.enabled !== false
+      ? await runAml(deps, session, document)
+      : undefined;
 
     // FACE SEARCH 1:N (señal/score, NO rechazo duro) — P1 #2. Dedup/anti-fraude +
     // returning user. Reusa el embedding de la selfie del match; si el workflow pide
     // face_search sin match (raro), se computa acá. Ver runFaceSearch (fail-closed).
     let faceSearch: FaceSearchResult | undefined;
-    if (session.workflowSnapshot?.faceSearch?.required) {
+    if (session.workflowSnapshot?.faceSearch?.required && resolvedChecks?.get("face_search")?.enabled !== false) {
       if (!selfieEmb) selfieEmb = await deps.modules.embed(images.selfie);
       faceSearch = await runFaceSearch(
         deps,
@@ -1145,11 +1162,15 @@ export async function computeChecks(
 
     // COMPROBANTE DE DOMICILIO (señal/score, NO rechazo duro) — P1 #4. Corre si el
     // workflow lo exige y el titular subió el comprobante. Ver runProofOfAddress.
-    const proofOfAddress = await runProofOfAddress(deps, session, document, images.proofOfAddress);
+    const proofOfAddress = resolvedChecks?.get("proof_of_address")?.enabled !== false
+      ? await runProofOfAddress(deps, session, document, images.proofOfAddress)
+      : undefined;
 
     // ESTIMACIÓN DE EDAD (señal/score) — P2. Se computa y persiste para mostrarse en la
     // revisión; el rechazo duro por edad (onUnderage:reject) lo aplica /confirm (finalize).
-    const ageEstimation = await runAgeEstimation(deps, session, images.selfie);
+    const ageEstimation = resolvedChecks?.get("age_estimation")?.enabled !== false
+      ? await runAgeEstimation(deps, session, images.selfie)
+      : undefined;
 
     const checks: PipelineChecks = {
       quality,

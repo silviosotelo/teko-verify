@@ -465,3 +465,74 @@ describe("applyReviewDecision — decisión humana (P0 #1)", () => {
     expect(spy.webhooks).toEqual([{ event: "session.rejected", state: "rejected" }]);
   });
 });
+
+describe("pipeline.checks configuration (Fase 3)", () => {
+  let spy: SpyState;
+  beforeEach(() => {
+    spy = freshSpy();
+  });
+
+  it("liveness disabled in pipeline.checks → liveness module never called even at L3", async () => {
+    const def = {
+      ...workflowDefForLoA("L3"),
+      pipeline: { checks: [{ key: "liveness", enabled: false, order: 1 }] },
+    };
+    const session = makeSession({ workflowSnapshot: def, assuranceRequired: "L3" });
+    const livenessSpy = vi.fn().mockResolvedValue({ score: 0.99, passed: true, attackType: "none" });
+    const modules: PipelineModules = {
+      ...modulesFor({ quality: PASS_QUALITY, liveness: PASS_LIVENESS, document: makeDocument(true), match: "pass" }),
+      liveness: livenessSpy,
+    };
+    await processSession(session, makePolicy(), IMAGES, makeDeps(modules, spy));
+    expect(livenessSpy).not.toHaveBeenCalled();
+  });
+
+  it("aml disabled in pipeline.checks → aml module never called even when aml.required=true", async () => {
+    const def: WorkflowDefinition = {
+      document: { required: true },
+      match: { required: true },
+      aml: { required: true, threshold: 0.8 },
+      review: { mode: "auto" },
+      pipeline: { checks: [{ key: "aml", enabled: false, order: 4 }] },
+    };
+    const session = makeSession({ workflowSnapshot: def, assuranceRequired: "L2" });
+    const amlSpy = vi.fn().mockResolvedValue({
+      passed: true,
+      decision: "clear",
+      hits: [],
+      topScore: 0,
+      threshold: 0.8,
+      query: { nombres: "", apellidos: "", normalized: "" },
+      provider: "test",
+      datasetVersion: null,
+    });
+    const modules: PipelineModules = {
+      ...modulesFor({ quality: PASS_QUALITY, document: makeDocument(true), match: "pass" }),
+      aml: amlSpy,
+    };
+    await processSession(session, makePolicy({ assuranceRequired: "L2" }), IMAGES, makeDeps(modules, spy));
+    expect(amlSpy).not.toHaveBeenCalled();
+  });
+
+  it("no pipeline.checks → behavior identical to default (regression)", async () => {
+    const session = makeSession({ workflowSnapshot: workflowDefForLoA("L3"), assuranceRequired: "L3" });
+    const modules = modulesFor({ quality: PASS_QUALITY, liveness: PASS_LIVENESS, document: makeDocument(true), match: "pass" });
+    const result = await processSession(session, makePolicy(), IMAGES, makeDeps(modules, spy));
+    expect(result.state).toBe("verified");
+  });
+
+  it("disabling match in pipeline.checks → match check not persisted, LoA is L1", async () => {
+    const def: WorkflowDefinition = {
+      document: { required: true },
+      match: { required: true },
+      review: { mode: "auto" },
+      pipeline: { checks: [{ key: "match", enabled: false, order: 3 }] },
+    };
+    const session = makeSession({ workflowSnapshot: def, assuranceRequired: "L1" });
+    const modules = modulesFor({ quality: PASS_QUALITY, document: makeDocument(true), match: "pass" });
+    const result = await processSession(session, makePolicy({ assuranceRequired: "L1" }), IMAGES, makeDeps(modules, spy));
+    expect(spy.checks.some((c) => c.type === "match")).toBe(false);
+    expect(result.state).toBe("verified");
+    expect(result.result?.loa).toBe("L1");
+  });
+});
