@@ -1,5 +1,6 @@
 import { createContext, useContext, type ButtonHTMLAttributes, type ReactNode } from "react"
 import { DEFAULT_BRANDING, type Branding } from "./branding"
+import { Spinner } from "./Icons"
 
 /** Componentes de UI compartidos — radios redondeados + verde Teko (estilo ecme/Behance). */
 
@@ -215,6 +216,131 @@ export function OptionRow({
     </button>
   )
 }
+
+// ---- ProgressOverlay --------------------------------------------------------
+
+export type ProgressStep = { key: string; label: string }
+
+/**
+ * Overlay full-screen de progreso/error. Aparece encima del contenido durante
+ * operaciones de red (subida, procesamiento). NO se muestra mientras la cámara
+ * está encuadrando — sólo al revisar/subir/procesar.
+ */
+export function ProgressOverlay({
+  open,
+  title,
+  subtitle,
+  steps,
+  activeStepKey,
+  state,
+  errorText,
+  onRetry,
+  onCancel,
+}: {
+  open: boolean
+  title: string
+  subtitle?: string
+  steps?: ProgressStep[]
+  activeStepKey?: string
+  state: "loading" | "error"
+  errorText?: string
+  onRetry?: () => void
+  onCancel?: () => void
+}) {
+  if (!open) return null
+  const activeIdx = steps ? steps.findIndex((s) => s.key === activeStepKey) : -1
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-black/65 px-6 backdrop-blur-sm"
+      role={state === "error" ? "alert" : "status"}
+      aria-live={state === "error" ? "assertive" : "polite"}
+    >
+      <div className="w-full max-w-sm rounded-3xl bg-white p-8 text-center shadow-2xl">
+        {state === "loading" ? (
+          <>
+            <Spinner className="mx-auto mb-5 size-14" />
+            <h2 className="text-xl font-bold text-gray-900">{title}</h2>
+            {subtitle && (
+              <p className="mt-2 text-sm leading-relaxed text-gray-500">{subtitle}</p>
+            )}
+            {steps && steps.length > 0 && (
+              <div className="mt-5 flex items-center justify-center gap-1.5">
+                {steps.map((s, i) => {
+                  const isDone = i < activeIdx
+                  const isActive = i === activeIdx
+                  return (
+                    <div key={s.key} className="flex items-center gap-1.5">
+                      <div
+                        className={`flex size-6 items-center justify-center rounded-full text-[10px] font-bold transition-colors ${
+                          isDone
+                            ? "bg-primary text-white"
+                            : isActive
+                              ? "bg-primary/15 text-primary ring-2 ring-primary"
+                              : "bg-gray-100 text-gray-400"
+                        }`}
+                      >
+                        {isDone ? "✓" : i + 1}
+                      </div>
+                      <span
+                        className={`text-[11px] ${
+                          isActive
+                            ? "font-semibold text-gray-800"
+                            : isDone
+                              ? "text-gray-400"
+                              : "text-gray-400"
+                        }`}
+                      >
+                        {s.label}
+                      </span>
+                      {i < steps.length - 1 && (
+                        <div
+                          className={`h-px w-5 shrink-0 rounded-full ${isDone ? "bg-primary" : "bg-gray-200"}`}
+                        />
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+          </>
+        ) : (
+          <>
+            <div className="mx-auto mb-4 flex size-16 items-center justify-center rounded-full bg-red-50">
+              <svg
+                viewBox="0 0 24 24"
+                className="size-8 text-red-400"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden
+              >
+                <circle cx="12" cy="12" r="9" />
+                <path d="M12 8v4M12 16h.01" />
+              </svg>
+            </div>
+            <h2 className="text-lg font-bold text-gray-900">{title}</h2>
+            {errorText && (
+              <p className="mt-2 text-sm leading-relaxed text-gray-500">{errorText}</p>
+            )}
+            <div className="mt-5 flex flex-col gap-2">
+              {onRetry && <Button onClick={onRetry}>Reintentar</Button>}
+              {onCancel && (
+                <Button variant="ghost" onClick={onCancel}>
+                  Volver
+                </Button>
+              )}
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ---- Brand ------------------------------------------------------------------
 
 /**
  * Marca del header. White-label (P1 #5):

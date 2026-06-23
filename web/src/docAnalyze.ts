@@ -129,7 +129,7 @@ export function analyze(cv: CV, src: CV): Analysis {
       }
       const peri = cv.arcLength(cnt, true)
       const approx = new cv.Mat()
-      cv.approxPolyDP(cnt, approx, 0.02 * peri, true)
+      cv.approxPolyDP(cnt, approx, 0.04 * peri, true)
       if (approx.rows === 4 && cv.isContourConvex(approx)) {
         const pts: QuadPt[] = []
         for (let j = 0; j < 4; j++) {

@@ -16,7 +16,7 @@ import {
 } from "../liveness/challenges"
 import { pickBestFrame, type FrameCandidate } from "../liveness/bestFrame"
 import { laplacianVariance } from "../liveness/signals"
-import { Button, Card, Notice, BackBar } from "../ui"
+import { Button, Card, Notice, BackBar, ProgressOverlay } from "../ui"
 
 // --- Parámetros del flujo de liveness activo ------------------------------- //
 // Cuánto hay que SOSTENER cada desafío para contarlo (ms). Los gestos (parpadeo)
@@ -237,7 +237,7 @@ export function Selfie({
         image: bestImage,
         frames,
         activeLiveness: { challenges: sequence, passed: true },
-      })
+      }, { timeoutMs: 60_000 })
 
       // 2) Sube el video (fail-open: si falla, no bloquea el avance).
       if (videoBlob && videoBlob.size > 0) {
@@ -310,7 +310,7 @@ export function Selfie({
       const resp = await apiPost<{ quality?: QualityResult }>("/selfie", {
         image: selfie,
         frames: [f1],
-      })
+      }, { timeoutMs: 60_000 })
       if (videoBlob && videoBlob.size > 0) void apiUploadVideo(videoBlob)
       const verdict = evalQuality(resp.quality)
       if (verdict.advance) {
@@ -326,6 +326,9 @@ export function Selfie({
       setManualBusy(false)
       finishedRef.current = false
       await cam.start()
+    } finally {
+      // Safety net: ensures manualBusy never stays true on unexpected throws.
+      setManualBusy(false)
     }
   }, [cam, manualBusy, onDone, stopRecording])
 
@@ -339,6 +342,23 @@ export function Selfie({
   const ringColor = "#16a34a"
 
   return (
+    <>
+      <ProgressOverlay
+        open={phase === "uploading" || manualBusy || (phase === "error" && !!fatal)}
+        title={
+          phase === "error" && fatal
+            ? "Algo salió mal"
+            : "Subiendo tu selfie"
+        }
+        subtitle={
+          phase === "error" && fatal
+            ? undefined
+            : "Guardando tu foto, un momento…"
+        }
+        state={phase === "error" && fatal ? "error" : "loading"}
+        errorText={phase === "error" && fatal ? fatal : undefined}
+        onRetry={phase === "error" && fatal ? () => void retry() : undefined}
+      />
     <Card>
       <BackBar onBack={onBack} />
       <h1 className="text-xl font-bold text-gray-900">Verificá que sos vos</h1>
@@ -348,11 +368,6 @@ export function Selfie({
       </p>
 
       {notice && <Notice>{notice}</Notice>}
-      {fatal && (
-        <p className="mt-3 text-sm text-error" role="alert">
-          {fatal}
-        </p>
-      )}
 
       <div className="relative my-4 aspect-square w-full overflow-hidden rounded-full bg-gray-900">
         <video
@@ -412,12 +427,6 @@ export function Selfie({
           </div>
         )}
 
-        {phase === "uploading" && (
-          <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-black/55 text-white">
-            <div className="size-10 animate-spin rounded-full border-4 border-white/30 border-t-white" />
-            <span className="text-sm font-medium">Verificando…</span>
-          </div>
-        )}
       </div>
 
       {/* Pasos completados (✓) */}
@@ -493,6 +502,7 @@ export function Selfie({
         Tus datos se usan solo para verificar tu identidad · Ley 7593
       </p>
     </Card>
+    </>
   )
 }
 

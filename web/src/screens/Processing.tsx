@@ -1,6 +1,7 @@
-import { useEffect, useRef } from "react"
+import { useEffect, useRef, useState } from "react"
 import { apiPost, getStatus, ApiError, type StatusResult } from "../api"
-import { Card } from "../ui"
+import { errorMessage } from "../messages"
+import { Card, ProgressOverlay } from "../ui"
 import { Spinner } from "../Icons"
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
@@ -26,14 +27,17 @@ export function Processing({
   onResult: (s: StatusResult) => void
 }) {
   const done = useRef(false)
+  const [attempt, setAttempt] = useState(0)
+  const [overlayError, setOverlayError] = useState<string | null>(null)
 
   useEffect(() => {
     done.current = false
+    setOverlayError(null)
 
     async function run() {
       // --- 1) Preview (idempotente; también rehidrata desde 'review') --------
       try {
-        await apiPost("/preview", {})
+        await apiPost("/preview", {}, { timeoutMs: 90_000 })
       } catch (e) {
         if (done.current) return
         // preview_not_review trae el estado real (needs_recapture/rejected) y los
@@ -49,13 +53,19 @@ export function Processing({
             onResult({ state: "needs_recapture", reasons: e.reasons })
             return
           }
+          // Timeout o error de red en /preview → overlay con reintentar.
+          if (e.code === "timeout" || e.status === 0) {
+            if (!done.current) setOverlayError(errorMessage(e))
+            return
+          }
           // Estado NO terminal y sin reasons (p.ej. invalid_state_for_preview si la
           // sesión ya está en 'processing' por una carrera de rehidratación): NO es
           // un error real — caemos al polling de /status, que verá el terminal
           // cuando el pipeline (síncrono) finalice. Fail-closed pero sin pantalla
           // de error espuria.
         } else {
-          onResult({ state: "error" })
+          // Error de red inesperado → overlay con reintentar.
+          if (!done.current) setOverlayError(errorMessage(e))
           return
         }
       }
@@ -68,7 +78,7 @@ export function Processing({
           state?: string
           reasons?: string[]
           redirectUrl?: string | null
-        }>("/confirm", {})
+        }>("/confirm", {}, { timeoutMs: 90_000 })
         if (done.current) return
         if (r?.state && TERMINAL.includes(r.state)) {
           onResult({
@@ -83,6 +93,11 @@ export function Processing({
         if (done.current) return
         if (e instanceof ApiError && e.state && TERMINAL.includes(e.state)) {
           onResult({ state: e.state, reasons: e.reasons })
+          return
+        }
+        // Timeout o error de red en /confirm → overlay con reintentar.
+        if (e instanceof ApiError && (e.code === "timeout" || e.status === 0)) {
+          if (!done.current) setOverlayError(errorMessage(e))
           return
         }
         // Seguimos al polling: el pipeline puede haber finalizado igual.
@@ -102,7 +117,10 @@ export function Processing({
           continue
         }
       }
-      if (!done.current) onResult({ state: "error" })
+      // Polling agotado → overlay con reintentar.
+      if (!done.current) {
+        setOverlayError("No pudimos completar la verificación. Revisá tu conexión e intentá de nuevo.")
+      }
     }
 
     void run()
@@ -110,20 +128,34 @@ export function Processing({
       done.current = true
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [attempt])
+
+  const retry = () => {
+    done.current = true
+    setAttempt((a) => a + 1)
+  }
 
   return (
-    <Card>
-      <div className="flex flex-col items-center gap-5 py-12 text-center">
-        <Spinner className="size-14" />
-        <h1 className="text-xl font-bold text-gray-900">
-          Estamos verificando tu identidad…
-        </h1>
-        <p className="max-w-xs text-sm leading-relaxed text-gray-500">
-          Comprobamos tu documento y tu selfie. Tarda unos segundos, no cierres
-          esta pantalla.
-        </p>
-      </div>
-    </Card>
+    <>
+      <ProgressOverlay
+        open={!!overlayError}
+        title="Algo salió mal"
+        state="error"
+        errorText={overlayError ?? undefined}
+        onRetry={retry}
+      />
+      <Card>
+        <div className="flex flex-col items-center gap-5 py-12 text-center">
+          <Spinner className="size-14" />
+          <h1 className="text-xl font-bold text-gray-900">
+            Estamos verificando tu identidad…
+          </h1>
+          <p className="max-w-xs text-sm leading-relaxed text-gray-500">
+            Comprobamos tu documento y tu selfie. Tarda unos segundos, no cierres
+            esta pantalla.
+          </p>
+        </div>
+      </Card>
+    </>
   )
 }

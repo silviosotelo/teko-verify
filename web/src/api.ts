@@ -175,16 +175,36 @@ export interface PreviewResult {
   photos?: PreviewPhotos
 }
 
-/** POST a /verify/:token<path> con JSON. Lanza Error con mensaje del backend si !ok. */
+/**
+ * POST a /verify/:token<path> con JSON. Lanza ApiError con `code="timeout"` si la
+ * request supera `opts.timeoutMs` (default 30 s). Lanza ApiError para respuestas !ok.
+ */
 export async function apiPost<T = unknown>(
   path: string,
   body?: unknown,
+  opts?: { timeoutMs?: number },
 ): Promise<T> {
-  const r = await fetch(`/verify/${TOKEN}${path}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body ?? {}),
-  })
+  const timeoutMs = opts?.timeoutMs ?? 30_000
+  const ctrl = new AbortController()
+  const timerId = setTimeout(() => ctrl.abort(), timeoutMs)
+
+  let r: Response
+  try {
+    r = await fetch(`/verify/${TOKEN}${path}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body ?? {}),
+      signal: ctrl.signal,
+    })
+  } catch (e) {
+    if (e instanceof DOMException && e.name === "AbortError") {
+      throw new ApiError({ message: "timeout", code: "timeout", status: 0 })
+    }
+    throw e
+  } finally {
+    clearTimeout(timerId)
+  }
+
   let j: Record<string, unknown> = {}
   try {
     j = (await r.json()) as Record<string, unknown>

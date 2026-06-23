@@ -29,11 +29,13 @@
 const SAMPLE_W = 320
 const SAMPLE_H = 202
 const GUIDE_INSET = 0.08
-const AREA_FILL_MIN = 0.55
-const CORNER_TOL = 0.22
+// Umbrales sincronizados con docAnalyze.ts (relajados 2026-06-17).
+// AREA_FILL_MIN 0.55→0.42, CORNER_TOL 0.22→0.32, ASPECT_TOL 0.45→0.55.
+const AREA_FILL_MIN = 0.42
+const CORNER_TOL = 0.32
 const EDGE_INSET_MIN = 0.035
 const ASPECT_TARGET = 1.585
-const ASPECT_TOL = 0.45
+const ASPECT_TOL = 0.55
 const BLUR_VAR = 55
 const DARK_MEAN = 55
 const GLARE_HOT = 0.16
@@ -93,7 +95,9 @@ function analyze(src) {
       }
       const peri = cv.arcLength(cnt, true)
       const approx = new cv.Mat()
-      cv.approxPolyDP(cnt, approx, 0.02 * peri, true)
+      // 0.04 tolera las esquinas redondeadas de la cédula PY (~3mm radio) sin
+      // aumentar falsos positivos (el resto de los checks filtran igual).
+      cv.approxPolyDP(cnt, approx, 0.04 * peri, true)
       if (approx.rows === 4 && cv.isContourConvex(approx)) {
         const pts = []
         for (let j = 0; j < 4; j++) {

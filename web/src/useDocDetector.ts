@@ -65,7 +65,7 @@ function wantMlDetector(): boolean {
 
 // Si en ~7s el detector no está listo, degradamos (ML→OpenCV→manual) sin bloquear
 // al usuario. opencv.js (~11MB) / ort+onnx (~16MB) pueden tardar por el túnel.
-const READY_TIMEOUT_MS = 7000
+const READY_TIMEOUT_MS = 25000
 // Throttle del envío de frames al worker (~6fps). El worker procesa de a uno.
 const FRAME_INTERVAL_MS = 160
 

@@ -131,6 +131,7 @@ export const ERROR_MSG: Record<string, string> = {
   confirm_failed: "Algo falló al confirmar tu identidad. Probá de nuevo en unos minutos.",
   tenant_not_found: "No pudimos identificar la verificación. Pedí un enlace nuevo.",
   evidence_not_found: "No encontramos tus fotos. Volvé a sacarlas.",
+  timeout: "No pudimos completar este paso. Revisá tu conexión e intentá de nuevo.",
 }
 
 /** Fallback genérico cuando el code no está mapeado (nunca mostramos el code crudo). */

@@ -2,8 +2,8 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import { apiPost, type DocCheckResult, type DocumentType } from "../api"
 import { docMsg, DOC_LIVE_MSG, errorMessage } from "../messages"
 import { useCamera } from "../useCamera"
-import { useDocDetector, type Quad } from "../useDocDetector"
-import { Button, Card, Notice } from "../ui"
+import { useDocDetector } from "../useDocDetector"
+import { Button, Card, Notice, ProgressOverlay } from "../ui"
 import { DocReview } from "./DocReview"
 import { Prepare } from "./Prepare"
 import { DocSubmitted } from "./DocSubmitted"
@@ -69,6 +69,8 @@ export function DocCapture({
   const [back, setBack] = useState<string | null>(null)
   const [uploadErr, setUploadErr] = useState<string | null>(null)
   const [uploading, setUploading] = useState(false)
+  const [overlayErr, setOverlayErr] = useState<string | null>(null)
+  const [retryArgs, setRetryArgs] = useState<[string, string] | null>(null)
 
   // Sube el documento. Para cédula viajan los dos lados; para pasaporte se reenvía
   // la página de datos como `back` (el backend la ignora en ese camino). El
@@ -78,18 +80,29 @@ export function DocCapture({
     async (frontImg: string, backImg: string) => {
       setUploading(true)
       setUploadErr(null)
+      setOverlayErr(null)
+      setRetryArgs(null)
       try {
-        await apiPost("/document", { front: frontImg, back: backImg, documentType })
-        setUploading(false)
+        await apiPost("/document", { front: frontImg, back: backImg, documentType }, { timeoutMs: 60_000 })
         setPhase("submitted")
       } catch (e) {
-        setUploading(false)
-        setUploadErr(errorMessage(e))
+        const msg = errorMessage(e)
+        setUploadErr(msg)
+        setOverlayErr(msg)
+        setRetryArgs([frontImg, backImg])
         setPhase(isPassport ? "review-front" : "review-back")
+      } finally {
+        setUploading(false)
       }
     },
     [documentType, isPassport],
   )
+
+  const DOC_UPLOAD_STEPS = [
+    { key: "upload", label: "Subir" },
+    { key: "review", label: "Revisar" },
+    { key: "done", label: "Listo" },
+  ]
 
   switch (phase) {
     case "prep-front":
@@ -138,21 +151,18 @@ export function DocCapture({
       // Cédula: confirmar avanza al dorso (camino histórico).
       return (
         <>
-          {uploading ? (
-            <Card><div className="flex flex-col items-center gap-3 py-10 text-center">
-              <span className="size-10 animate-spin rounded-full border-4 border-primary border-t-transparent" />
-              <span className="text-sm font-semibold text-gray-800">Subiendo tus fotos…</span>
-              <span className="text-xs text-gray-400">Estamos procesando el documento, no cierres esta ventana</span>
-            </div></Card>
-          ) : (
-            <>
-          {isPassport && uploadErr && (
-            <Card>
-              <p className="text-sm text-error" role="alert">
-                {uploadErr}
-              </p>
-            </Card>
-          )}
+          <ProgressOverlay
+            open={uploading || !!overlayErr}
+            title={overlayErr ? "No pudimos subir tu documento" : "Subiendo tu documento"}
+            subtitle={overlayErr ? undefined : "Esto puede tardar unos segundos. No cierres esta pantalla."}
+            steps={DOC_UPLOAD_STEPS}
+            activeStepKey="upload"
+            state={overlayErr ? "error" : "loading"}
+            errorText={overlayErr ?? undefined}
+            onRetry={retryArgs ? () => void submitDoc(retryArgs[0], retryArgs[1]) : undefined}
+            onCancel={overlayErr ? () => { setOverlayErr(null); setRetryArgs(null) } : undefined}
+          />
+          {!overlayErr && uploadErr && <Notice>{uploadErr}</Notice>}
           <DocReview
             side="front"
             label={isPassport ? "la página de datos" : undefined}
@@ -162,13 +172,6 @@ export function DocCapture({
             }
             onRetake={() => setPhase("capture-front")}
           />
-          {isPassport && uploading && (
-            <p className="mt-2 text-center text-xs text-gray-400">
-              Subiendo tu pasaporte…
-            </p>
-          )}
-            </>
-          )}
         </>
       )
 
@@ -202,29 +205,24 @@ export function DocCapture({
     case "review-back":
       return (
         <>
-          {uploading ? (
-            <Card><div className="flex flex-col items-center gap-3 py-10 text-center">
-              <span className="size-10 animate-spin rounded-full border-4 border-primary border-t-transparent" />
-              <span className="text-sm font-semibold text-gray-800">Subiendo tus fotos…</span>
-              <span className="text-xs text-gray-400">Estamos procesando el documento, no cierres esta ventana</span>
-            </div></Card>
-          ) : (
-            <>
-          {uploadErr && (
-            <Card>
-              <p className="text-sm text-error" role="alert">
-                {uploadErr}
-              </p>
-            </Card>
-          )}
+          <ProgressOverlay
+            open={uploading || !!overlayErr}
+            title={overlayErr ? "No pudimos subir tu documento" : "Subiendo tu documento"}
+            subtitle={overlayErr ? undefined : "Esto puede tardar unos segundos. No cierres esta pantalla."}
+            steps={DOC_UPLOAD_STEPS}
+            activeStepKey="upload"
+            state={overlayErr ? "error" : "loading"}
+            errorText={overlayErr ?? undefined}
+            onRetry={retryArgs ? () => void submitDoc(retryArgs[0], retryArgs[1]) : undefined}
+            onCancel={overlayErr ? () => { setOverlayErr(null); setRetryArgs(null) } : undefined}
+          />
+          {!overlayErr && uploadErr && <Notice>{uploadErr}</Notice>}
           <DocReview
             side="back"
             image={back!}
             onConfirm={() => void submitDoc(front!, back!)}
             onRetake={() => setPhase("capture-back")}
           />
-          </>
-          )}
         </>
       )
 
@@ -305,7 +303,7 @@ function DocSideCamera({
     // Pre-check informativo: si el endpoint falla, avanzamos (pipeline manda).
     let check: DocCheckResult = { passed: true, reasons: [] }
     try {
-      check = await apiPost<DocCheckResult>("/doc-check", { image: img, side })
+      check = await apiPost<DocCheckResult>("/doc-check", { image: img, side }, { timeoutMs: 20_000 })
     } catch {
       check = { passed: true, reasons: [] }
     }
@@ -386,67 +384,10 @@ function DocSideCamera({
   }, [manualMode, busy, cancelCountdown])
 
   // --- Overlay: dibuja el contorno detectado EN VIVO sobre la cámara ---------
-  const overlayRef = useRef<HTMLCanvasElement | null>(null)
-  const quadRef = useRef<Quad | null>(det.quad)
-  quadRef.current = det.quad
-  const isGoodForDraw = isGood
-  const isGoodDrawRef = useRef(isGoodForDraw)
-  isGoodDrawRef.current = isGoodForDraw
-
-  useEffect(() => {
-    if (manualMode) return
-    let raf = 0
-    const draw = () => {
-      const cnv = overlayRef.current
-      const v = cam.videoRef.current
-      if (cnv && v && v.videoWidth > 0) {
-        const cw = cnv.clientWidth
-        const ch = cnv.clientHeight
-        if (cnv.width !== cw) cnv.width = cw
-        if (cnv.height !== ch) cnv.height = ch
-        const ctx = cnv.getContext("2d")
-        if (ctx) {
-          ctx.clearRect(0, 0, cw, ch)
-          const q = quadRef.current
-          if (q && count == null) {
-            const vw = v.videoWidth
-            const vh = v.videoHeight
-            const scale = Math.max(cw / vw, ch / vh)
-            const dw = vw * scale
-            const dh = vh * scale
-            const ox = (cw - dw) / 2
-            const oy = (ch - dh) / 2
-            const map = (p: { x: number; y: number }) => ({
-              x: ox + p.x * dw,
-              y: oy + p.y * dh,
-            })
-            const good = isGoodDrawRef.current
-            ctx.beginPath()
-            const pts = q.map(map)
-            ctx.moveTo(pts[0].x, pts[0].y)
-            for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y)
-            ctx.closePath()
-            ctx.lineWidth = 3
-            ctx.strokeStyle = good ? "#16a34a" : "#f59e0b"
-            ctx.fillStyle = good
-              ? "rgba(22,163,74,0.14)"
-              : "rgba(245,158,11,0.10)"
-            ctx.fill()
-            ctx.stroke()
-            ctx.fillStyle = good ? "#16a34a" : "#f59e0b"
-            for (const p of pts) {
-              ctx.beginPath()
-              ctx.arc(p.x, p.y, 5, 0, Math.PI * 2)
-              ctx.fill()
-            }
-          }
-        }
-      }
-      raf = requestAnimationFrame(draw)
-    }
-    raf = requestAnimationFrame(draw)
-    return () => cancelAnimationFrame(raf)
-  }, [manualMode, count, cam.videoRef])
+  // El documento se valida CONTRA el recuadro-guía ESTÁTICO (inset-8%, ver
+  // GUIDE_INSET en docAnalyze): NO se dibuja un contorno que persiga al documento.
+  // El marco fijo es el único indicador y cambia de color (buscando → ajustando →
+  // verde "bien ajustado"); cuando queda verde estable, la captura dispara sola.
 
   // Etiqueta del documento/lado para la guía (adaptativa al tipo).
   const docNoun = isPassport ? "el documento" : "la cédula"
@@ -458,7 +399,23 @@ function DocSideCamera({
       ? "Iniciando cámara…"
       : (DOC_LIVE_MSG[det.verdict] ?? inFrameMsg)
 
-  const frameColor = isGood ? "border-primary" : "border-white/60"
+  // Estado del marco-guía estático (3 niveles, feedback claro):
+  //   searching  → sin documento: borde blanco punteado ("poné el documento")
+  //   adjusting  → documento detectado pero no encaja: ámbar ("acercá/enderezá")
+  //   good       → bien ajustado dentro del marco: VERDE sólido → autocaptura
+  const frameState: "searching" | "adjusting" | "good" = isGood
+    ? "good"
+    : det.verdict === "no-doc" ||
+        det.verdict === "loading" ||
+        det.verdict === "no-camera"
+      ? "searching"
+      : "adjusting"
+  const frameClass =
+    frameState === "good"
+      ? "border-solid border-[#16a34a] shadow-[0_0_0_4px_rgba(22,163,74,0.30)]"
+      : frameState === "adjusting"
+        ? "border-dashed border-[#f59e0b]"
+        : "border-dashed border-white/60"
 
   // Título/subtítulo: pasaporte = página de datos (con la franja MRZ); cédula =
   // frente/dorso (camino histórico).
@@ -495,18 +452,21 @@ function DocSideCamera({
           className="size-full object-cover"
         />
 
-        {!manualMode && (
-          <canvas
-            ref={overlayRef}
-            className="pointer-events-none absolute inset-0 size-full"
-          />
-        )}
-
         <div
-          className={`pointer-events-none absolute inset-[8%] rounded-2xl border-[3px] ${
-            isGood ? "border-solid" : "border-dashed"
-          } ${frameColor} transition-colors duration-300`}
+          className={`pointer-events-none absolute inset-[8%] rounded-2xl border-[3px] ${frameClass} transition-all duration-300`}
         />
+
+        {frameState === "good" && count == null && (
+          <div className="pointer-events-none absolute right-[10%] top-[10%] flex size-7 items-center justify-center rounded-full bg-[#16a34a] text-white shadow-lg">
+            <svg viewBox="0 0 20 20" fill="currentColor" className="size-4">
+              <path
+                fillRule="evenodd"
+                d="M16.7 5.3a1 1 0 0 1 0 1.4l-7.5 7.5a1 1 0 0 1-1.4 0L3.3 9.7a1 1 0 1 1 1.4-1.4l3.3 3.29 6.8-6.8a1 1 0 0 1 1.4 0Z"
+                clipRule="evenodd"
+              />
+            </svg>
+          </div>
+        )}
 
         {detLoading && (
           <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/30">
